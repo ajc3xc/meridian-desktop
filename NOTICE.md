@@ -8,7 +8,7 @@ that the desktop app uses or may bundle. The bundle check
 
 - Packages: PySide6 6.12.0, PySide6_Essentials 6.12.0, PySide6_Addons 6.12.0,
   shiboken6 6.12.0.
-- Qt runtime: Qt 6.12.0 (`PySide6.QtCore.qVersion()` in the dev venv).
+- Qt runtime: Qt 6.12.0 (`PySide6.QtCore.qVersion()` in the pixi dev environment).
 - Upstream licence metadata, verbatim: `License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`
   and `License-File: LicenseRef-Qt-Commercial.txt`.
 - Election: this project uses PySide6 and Qt under LGPL-3.0-only. It does not
@@ -18,7 +18,7 @@ that the desktop app uses or may bundle. The bundle check
 - Linking: Qt is shipped as separate, dynamically linked DLL files in the
   ONEDIR bundle, so a user can replace them. The app is folder-mode only.
 - Source offer: see `OFFER-SOURCE.md`.
-- Dev venv only: PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed as
+- Dev environment only: PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed as
   PySide6 requirements. Their modules are excluded from the bundle. They carry
   the same licence metadata.
 

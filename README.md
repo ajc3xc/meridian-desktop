@@ -7,19 +7,22 @@ UI, so this app does not reproduce it. It has no web views.
 
 ## Run
 
-From the repo root, with the project venv (Windows):
+The environment is managed by pixi (Python 3.12, PySide6 6.12.0). Install it
+once with `pixi install`. From the repo root:
 
-    .venv\Scripts\python.exe -m meridian_desktop
+    pixi run app
 
 Smoke check. It builds the window and tray, prints "smoke ok" and exits 0
 without starting the event loop:
 
-    .venv\Scripts\python.exe -m meridian_desktop --smoke
+    pixi run smoke
 
-No PYTHONPATH change is needed when you run from the repo root.
+Build the folder-mode bundle, then verify it against the LGPL manifest:
 
-Python 3.10 is used for now. `requires-python` stays at 3.10 until the Meridian
-core, which needs Python 3.12, is imported. See `pyproject.toml`.
+    pixi run python packaging/build.py
+    pixi run verify
+
+Python 3.12 is the same line the Meridian core uses (3.11 to 3.12 supported).
 
 Settings are stored in `%LOCALAPPDATA%\meridian-desktop\settings.json`, or in
 `~/.meridian-desktop/settings.json` when LOCALAPPDATA is unset. The mode is
@@ -27,8 +30,8 @@ Settings are stored in `%LOCALAPPDATA%\meridian-desktop\settings.json`, or in
 
 ## Tests and boundary check
 
-    .venv\Scripts\python.exe -m pytest -q
-    .venv\Scripts\python.exe tools\check_boundary.py
+    pixi run test
+    pixi run boundary
 
 ## Qt boundary rule
 

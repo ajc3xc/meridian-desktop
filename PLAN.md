@@ -7,12 +7,12 @@ provides the web UI, so this app does not reproduce it.
 
 | Item | State |
 |---|---|
-| Repo | Branch `master`, no commits. Untracked: `.gitignore`, `.venv`, and the Wave 1 files. |
+| Repo | Branch `dev`, commits `7c1aa0c` and `ddfca52`. Working tree clean. |
 | Skeleton build (workflow `wsil64j56`) | Stopped by the lead while still running. It had written a root-layout package, packaging scripts, and `LICENSES/`. Partial. See "Incidents". |
 | Autodesk and auto-test research (workflow `wwcwaw6tn`) | Finished. See "Research findings". |
 | Maintenance, adopters, LGPL-in-the-wild research (`wud5uwacx`) | Finished. See "Research findings". |
 | Wave 1 foundation | Committed on `dev` (`7c1aa0c`). 64 tests pass under pixi. Boundary ok. The packaged bundle passes the verifier (2026-10-14) and its `--smoke` exits 0. See "Qt DLL policy". |
-| Environment | pixi, Python 3.12.15, PySide6 6.12.0. The old `.venv` (3.10) is obsolete. Not deleted until the owner says so. |
+| Environment | pixi only: Python 3.12.15, PySide6 6.12.0. The old `.venv` (3.10) was deleted on 2026-10-14 after a reference check. |
 
 ## Scope
 
@@ -24,10 +24,9 @@ Each tab is built in a numbered wave (see "Waves").
 
 - Root package `meridian_desktop/` at the repo root, not `src/`.
   `packaging/verify_bundle.py` assumes this layout.
-- Python 3.10.11 in `.venv` for now, because it is the only interpreter on this
-  machine. PySide6 6.12.0 is installed there. The Meridian core needs Python 3.12,
-  so `requires-python` must be raised before any core import. That needs an owner
-  decision (see below).
+- Python 3.12.15 through pixi (`pixi.toml`, `pixi.lock`). The Meridian core
+  supports 3.11 to 3.12, so the desktop and the core share one interpreter line.
+  No system Python was changed.
 
 ## Licensing rules
 
@@ -282,7 +281,45 @@ narrow research run):
 - **Gap:** no Qt-specific LGPL checker was found. The Qt LGPL obligations page
   gives no offer duration.
 
-## Owner decisions needed
+## Decisions answered on 2026-10-14
+
+- **Hosted Docs may store a database and a live copy for indexing.** The owner
+  says indexing needs a DB, or at least a live copy. Google's Limited Use policy
+  still applies. A policy read is required before anything is built. Encrypt at
+  rest.
+- **Overleaf may store the session server-side** if needed. This supersedes the
+  "desktop never stores a cookie" rule for the cloud design. The local-engine
+  rule stays for the local path. The MSL-1.0 Competing Use point for third-party
+  hosting still needs a read. Encrypt at rest.
+- **Qt DLL decisions accepted** (see "Qt DLL policy").
+- **`.venv` deleted** on 2026-10-14. pixi is the only environment. No references
+  remain except the verifier's forbidden-path names and the checker's skip list.
+- **Review-comment ledger approved.**
+- **Distribution (Chrome Web Store and similar) under consideration.** See
+  "Distribution options".
+- **Next:** a megasprint with an executor handoff, after prospecting.
+
+## Distribution options (under consideration, not decided)
+
+- **A. Desktop only** (LGPL, pixi and PyInstaller bundle, local engines). It keeps
+  files local, and the tunnel and Zotero stay local. Users who don't want local
+  tools get no indexing of Docs or Overleaf without the tunnel.
+- **B. Google Docs add-on from the Workspace Marketplace.** Google-native. It
+  installs from the Docs add-on store and needs a hosted backend, since Apps Script
+  runs on Google's servers. It also needs Marketplace review and OAuth verification.
+- **C. Chrome Web Store extension** for docs.google.com and overleaf.com. It
+  installs from the store, which is a trust signal. It must call the hosted backend,
+  because loopback needs a Chrome permission. Store review, single purpose, minimal
+  permissions (activeTab is the lightest), and the 2026 disclosure rule all apply.
+  The existing Overleaf extension is MSL-1.0 and would need its licence reviewed
+  before any reuse.
+- **D. Hosted web surface only** (usemeridian.us). No install. OAuth and the Picker
+  run in the browser.
+- **Working recommendation:** build the hosted backend first, since B, C, and D all
+  need it. Then add C as the in-page surface for Docs and Overleaf. Keep A for local
+  folders, the tunnel, and Zotero. Trust messaging must say which parts are hosted.
+
+## Owner decisions still open (before the answers above)
 
 1. **Google Docs approach:** A, B, or C above. Recommended: test C, then build B.
 2. **MSL-1.0 and a commercial desktop build:** confirm that connecting to a

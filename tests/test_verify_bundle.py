@@ -265,9 +265,14 @@ def test_zip_member_errors_are_reported_not_raised(tmp_path):
 
 
 def test_real_qt_core_version_is_read_from_resources():
-    dll = REPO / ".venv" / "Lib" / "site-packages" / "PySide6" / "Qt6Core.dll"
-    if not dll.is_file():
-        pytest.skip("PySide6 not installed in .venv")
+    import importlib.util
+    from pathlib import Path
+
     import pefile
+
+    spec = importlib.util.find_spec("PySide6")
+    assert spec is not None and spec.submodule_search_locations, "PySide6 is not installed (fail closed)"
+    dll = Path(next(iter(spec.submodule_search_locations))) / "Qt6Core.dll"
+    assert dll.is_file(), f"Qt6Core.dll missing: {dll} (fail closed)"
 
     assert vb._file_version(pefile, dll).startswith("6.12")

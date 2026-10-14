@@ -15,7 +15,7 @@
 
 [pyside6]
 version = "6.12.0"          # PySide6 dist-info METADATA
-qt_version = "6.12.0"       # PySide6.QtCore.qVersion() in .venv, run 2026-10-14
+qt_version = "6.12.0"       # PySide6.QtCore.qVersion() in the pixi env, run 2026-10-14
 elected_license = "LGPL-3.0-only"
 
 [qt]
@@ -132,7 +132,7 @@ lgpl_family = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
 
 [bundled]
 # Distributions expected in the ONEDIR bundle. Unverified until Wave 7.
-# PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed in .venv as PySide6
+# PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed in the pixi env as PySide6
 # requirements, with the same LGPL line in their METADATA. They are not listed
 # because build.py excludes their modules. Add them only if they land in the bundle.
 distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
