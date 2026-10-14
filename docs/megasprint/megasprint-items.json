@@ -1,4 +1,5 @@
 {
+  "path_convention": "<core> is the Meridian core repository root. latex-dir is its meridian-latex directory. Paths are written with placeholders so this repository never names the engine path (tools/check_boundary.py).",
   "version": "desktop-megasprint-v1",
   "items": [
     {
@@ -114,7 +115,7 @@
         "PLAN.md"
       ],
       "existing_code": [
-        "extensions/meridian-latex/extension/manifest.json:8 (Overleaf host pattern; MSL-1.0 code, do not copy)",
+        "<core>/latex-dir/extension/manifest.json:8 (Overleaf host pattern; MSL-1.0 code, do not copy)",
         "extensions/manifest.json:7 (root extension host list has no docs.google.com)"
       ],
       "acceptance": [
@@ -127,7 +128,7 @@
       ],
       "owner_decision_needed": "Run only if option C (Chrome extension) stays open after the distribution evaluation. The owner signs in by hand to a throwaway Doc.",
       "risk": "high",
-      "notes": "PLAN.md:159-161 says whether content scripts can edit the Docs editor is unknown. A no-go does not block the OAuth path. The Overleaf extension is MSL-1.0 (extensions/meridian-latex/LICENSE line 1), so its code must not be copied.",
+      "notes": "PLAN.md:159-161 says whether content scripts can edit the Docs editor is unknown. A no-go does not block the OAuth path. The Overleaf extension is MSL-1.0 (<core>/latex-dir/LICENSE line 1), so its code must not be copied.",
       "blocker": "manual",
       "collision_group": "",
       "id": "MS-005"
@@ -1226,7 +1227,7 @@
         "meridian/zotero_client.py:275-327 resolve_citation_ref(ref) dispatches doi:, zotero: and citekey refs and never raises. It is async (line 275).",
         "meridian/zotero_client.py:98-143 _normalize_ref classifies the ref. :245-272 citekey search is fuzzy without Better BibTeX (per its docstring), so DOI and zotero: keys are the reliable inputs.",
         "meridian/zotero_client.py:146-172 _normalize_item returns zotero_key, doi, title and item_type for the result view.",
-        "PLAN.md:100 names GET /zotero-lookup as the shared lookup path. That engine route auto-starts Zotero (extensions/meridian-latex/engine/src/server.ts:347), so the desktop should not call it without the owner's decision."
+        "PLAN.md:100 names GET /zotero-lookup as the shared lookup path. That engine route auto-starts Zotero (<core>/latex-dir/engine/src/server.ts:347), so the desktop should not call it without the owner's decision."
       ],
       "acceptance": [
         "The result shows zotero_key, title, doi and item_type. Not found and Zotero unreachable show as separate messages.",
@@ -2339,13 +2340,13 @@
       "depends_on": [],
       "files": [
         "npm/package.json",
-        "extensions/meridian-latex/engine/package.json",
+        "<core>/latex-dir/engine/package.json",
         ".github/workflows/npm-publish.yml"
       ],
       "existing_code": [
         "npm/package.json:12 license MSL-1.0; :19 ./latex export; :22 files includes latex/; :24 prepack runs bundle-latex.mjs",
         "npm/scripts/bundle-latex.mjs:1-12 says it copies the engine dist into npm/latex",
-        "extensions/meridian-latex/engine/package.json:2 name @meridianmcp/latex, :33 license 'SEE LICENSE IN LICENSE'",
+        "<core>/latex-dir/engine/package.json:2 name @meridianmcp/latex, :33 license 'SEE LICENSE IN LICENSE'",
         "PLAN.md:55 repo license TBD-owner",
         "npm-publish.yml:3-5 publishes on v*.*.* tags; AGENTS.md pre-authorizes release tags"
       ],
@@ -3950,7 +3951,7 @@
       "title": "Add a test that fails if meridian-latex imports meridian-docs or the Meridian server",
       "depends_on": [],
       "files": [
-        "extensions/meridian-latex/engine/src/self-containment.test.ts"
+        "<core>/latex-dir/engine/src/self-containment.test.ts"
       ],
       "acceptance": [
         "Scans engine/src/*.ts, excluding *.test.ts, for import and require specifiers",
@@ -3973,7 +3974,7 @@
       "title": "Refresh write-back spec status: claims, leases and popup flow are built",
       "depends_on": [],
       "files": [
-        "extensions/meridian-latex/docs/write-back-spec.md",
+        "<core>/latex-dir/docs/write-back-spec.md",
         "tests/test_writeback_spec_status.py"
       ],
       "acceptance": [
@@ -3998,8 +3999,8 @@
       "title": "HTTP tests for /claim, /lease, /release and /claims",
       "depends_on": [],
       "files": [
-        "extensions/meridian-latex/engine/src/server.ts",
-        "extensions/meridian-latex/engine/src/server.test.ts"
+        "<core>/latex-dir/engine/src/server.ts",
+        "<core>/latex-dir/engine/src/server.test.ts"
       ],
       "acceptance": [
         "A second claim on the same node returns claimed false with holder_token_of_conflict",
@@ -4023,8 +4024,8 @@
       "title": "Persist per-project Overleaf file paths so indexing survives without a live session",
       "depends_on": [],
       "files": [
-        "extensions/meridian-latex/engine/src/store.ts",
-        "extensions/meridian-latex/engine/src/project-tree.ts"
+        "<core>/latex-dir/engine/src/store.ts",
+        "<core>/latex-dir/engine/src/project-tree.ts"
       ],
       "acceptance": [
         "New table project_files(project_id, path, doc_id, indexed_at) created with CREATE TABLE IF NOT EXISTS",
@@ -4050,8 +4051,8 @@
         "latex-engine-claim-route-tests"
       ],
       "files": [
-        "extensions/meridian-latex/engine/src/server.ts",
-        "extensions/meridian-latex/engine/src/server.test.ts"
+        "<core>/latex-dir/engine/src/server.ts",
+        "<core>/latex-dir/engine/src/server.test.ts"
       ],
       "acceptance": [
         "GET /overleaf-login-status returns only loggedIn plus optional savedAt and baseUrl",
@@ -4076,8 +4077,8 @@
         "latex-overleaf-login-status-route"
       ],
       "files": [
-        "extensions/meridian-latex/engine/src/server.ts",
-        "extensions/meridian-latex/engine/src/claims.ts"
+        "<core>/latex-dir/engine/src/server.ts",
+        "<core>/latex-dir/engine/src/claims.ts"
       ],
       "existing_code": [
         "engine/src/server.ts:45-48 CORS comment; :115 history of reflected origins; :129-133 origin pin to the extension id",
@@ -4107,14 +4108,14 @@
       "title": "Gate the engine /zotero-lookup auto-start behind an explicit opt-in",
       "depends_on": [],
       "files": [
-        "extensions/meridian-latex/engine/src/server.ts",
-        "extensions/meridian-latex/engine/src/zotero.test.ts"
+        "<core>/latex-dir/engine/src/server.ts",
+        "<core>/latex-dir/engine/src/zotero.test.ts"
       ],
       "existing_code": [
-        "extensions/meridian-latex/engine/src/server.ts:333-355 is the /zotero-lookup route.",
-        "extensions/meridian-latex/engine/src/server.ts:347 calls lookupCitationKey(key, { autoStart: true }), so any lookup with Zotero closed launches it, with no owner gate.",
-        "extensions/meridian-latex/engine/src/zotero.ts:229 autoStart defaults to false in the library function; :57-59 records the 2026-09-24 owner request.",
-        "extensions/meridian-latex/engine/src/zotero.test.ts:258-272 already tests that autoStart:false never launches."
+        "<core>/latex-dir/engine/src/server.ts:333-355 is the /zotero-lookup route.",
+        "<core>/latex-dir/engine/src/server.ts:347 calls lookupCitationKey(key, { autoStart: true }), so any lookup with Zotero closed launches it, with no owner gate.",
+        "<core>/latex-dir/engine/src/zotero.ts:229 autoStart defaults to false in the library function; :57-59 records the 2026-09-24 owner request.",
+        "<core>/latex-dir/engine/src/zotero.test.ts:258-272 already tests that autoStart:false never launches."
       ],
       "acceptance": [
         "A /zotero-lookup request without the opt-in returns resolved:null with a reason and never calls execImpl.",
@@ -4122,7 +4123,7 @@
         "The new route-level test runs under the engine's existing test command."
       ],
       "tests": [
-        "extensions/meridian-latex/engine/src/zotero.test.ts::route does not auto-start without opt-in (named, new; first confirm whether a server test harness exists)"
+        "<core>/latex-dir/engine/src/zotero.test.ts::route does not auto-start without opt-in (named, new; first confirm whether a server test harness exists)"
       ],
       "owner_decision_needed": "",
       "risk": "medium",
