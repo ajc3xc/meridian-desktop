@@ -11,7 +11,8 @@ provides the web UI, so this app does not reproduce it.
 | Skeleton build (workflow `wsil64j56`) | Stopped by the lead while still running. It had written a root-layout package, packaging scripts, and `LICENSES/`. Partial. See "Incidents". |
 | Autodesk and auto-test research (workflow `wwcwaw6tn`) | Finished. See "Research findings". |
 | Maintenance, adopters, LGPL-in-the-wild research (`wud5uwacx`) | Finished. See "Research findings". |
-| Wave 1 foundation | Gates pass on this run: 56 tests, boundary ok, smoke ok, verifier exits 1 with no build (expected). Not committed. No real bundle has been built. |
+| Wave 1 foundation | Committed on `dev` (`7c1aa0c`). 64 tests pass under pixi. Boundary ok. The packaged bundle passes the verifier (2026-10-14) and its `--smoke` exits 0. See "Qt DLL policy". |
+| Environment | pixi, Python 3.12.15, PySide6 6.12.0. The old `.venv` (3.10) is obsolete. Not deleted until the owner says so. |
 
 ## Scope
 
@@ -102,6 +103,10 @@ or when any file names the meridian-latex directory. The verifier's
     `overleaf_login_status` and tells the owner to run
     `node dist/overleaf-login.js login` in a terminal. The desktop never runs it,
     never reads a session cookie, and never stores one.
+  - **Cloud-hosted Overleaf (the owner's long-term preference) conflicts with that
+    rule.** A hosted engine would need an Overleaf session on a server. Decide that
+    before building anything, and check Overleaf's terms (not done yet). Hosting the
+    engine for third parties is Competing Use under MSL 3(a).
 - Known risks from the engine README:
   - Its CORS once accepted any installed browser extension. It is now pinned to
     the extension id via the manifest `key`. The extension must be reloaded
@@ -130,8 +135,63 @@ or when any file names the meridian-latex directory. The verifier's
     kept in the OS keychain. This is the recommended write path.
   - **C. Drive connector for read and export only,** as a first step. Checks
     value before committing to A or B.
-- Recommendation: test C first, then build B. Do not build A unless the owner
-  wants the browser-driven path.
+- **Decision (owner, 2026-10-14):** OAuth. The local path is option B.
+- **Local path (desktop, no cloud):** loopback OAuth with PKCE, then the Docs REST
+  API `documents.batchUpdate`. It is the only documented write path. Comments and
+  suggestions are GA per the 2026-09-30 release notes. Suggestion mode rejects
+  named ranges and several structural edits. Scope: `drive.file` (non-sensitive),
+  plus `documents` (sensitive) if needed. **Untested:** whether a `drive.file` token
+  can batchUpdate a Doc chosen through the Picker.
+- **Testing-status limit:** refresh tokens expire after 7 days for any scope except
+  basic profile. That includes `drive.file`. Owner-only use needs weekly re-consent,
+  or the consent screen must leave Testing.
+- **Add-ons and extensions are not the local path.** Apps Script runs on Google's
+  servers and has no documented route to `127.0.0.1`. Chrome's Local Network Access
+  gate blocks public-to-loopback requests without a permission. Neither is no-install.
+- **Cloud (hosted) path, the owner's long-term preference.** A Docs add-on or Chrome
+  Web Store extension calling usemeridian.us would let users index and work through
+  comments without the tunnel. Constraints:
+  - Google's Limited Use policy forbids building databases and permanent copies of
+    Google user data. It also forbids using that data to train or improve AI
+    models, and requires encryption at rest. Persisting Doc content in Neon, or
+    sending it to a model provider, needs a policy read before anything is built.
+  - `drive` and `drive.readonly` are restricted and trigger a security assessment.
+    `documents` and `drive.file` are not restricted.
+  - Open: Google's Docs MCP server (Developer Preview, 2026-10-01) is not
+    evaluated. Whether Chrome content scripts can edit the Docs editor is unknown
+    and needs a DevTools spike.
+
+## Qt DLL policy (verified by a real build, 2026-10-14)
+
+- **Build:** PyInstaller 6.22.3, onedir, `packaging/build.py`. PyInstaller collects
+  Qt plugins and their dependencies by hook. The first raw build had 53 verifier
+  problems: forbidden Qt DLLs (Qt6Network, Qt6OpenGL, Qt6Pdf, the Qml family,
+  Qt6Quick, Qt6Svg, Qt6VirtualKeyboard), plugin categories outside the allowlist
+  (imageformats, iconengines, generic, tls, networkinformation,
+  platforminputcontexts), and `opengl32sw.dll`.
+- **Fix:** prune after collection, driven by the manifest. `prune_forbidden` removed
+  31 files. The verifier then checks what is left. The plugin allowlist is now
+  per file: `qwindows` (Windows platform), `qoffscreen` (headless, used only by
+  `--smoke`, imports Qt6Core and Qt6Gui only), `qmodernwindowsstyle`.
+- **Allowed Qt6 DLLs:** Qt6Core, Qt6Gui, Qt6Widgets (the import closure).
+- **Forbidden Qt6 DLLs:** 149, by name.
+- **Non-Qt DLLs:** allowed are the MSVC runtime (`msvcp140`, `msvcp140_1`,
+  `msvcp140_2`, `vcruntime140`, `vcruntime140_1`) and `pyside6.abi3`. Forbidden are
+  FFmpeg (`avcodec`, `avformat`, `avutil`, `swresample`, `swscale`), `opengl32sw`,
+  `pyside6qml.abi3`, `concrt140`, `vcamp140`, `vccorlib140`, `vcomp140`, and
+  `msvcp140_codecvt_ids`.
+- **Result:** the verifier passes on the pruned bundle, with 10 checks. The first
+  verified build recorded 6 sha256 hashes. A second run without writes matches
+  them. The packaged `--smoke` exits 0.
+- **Still open:**
+  - The verifier does not enforce the non-Qt lists yet. Wave 7 adds that.
+  - `shiboken6.abi3.dll` is in the bundle and is not classified. Its folder is
+    outside `PySide6/`, so the classification test does not cover it.
+  - `--smoke` uses the offscreen platform, so the real Windows GUI path is not yet
+    exercised by the bundle test.
+  - The MSVC runtime licence is unverified.
+  - `Qt6Network` is forbidden, so the app cannot use QtNetwork. If Wave 3 needs it,
+    reclassify through the closure check.
 
 ## Waves
 

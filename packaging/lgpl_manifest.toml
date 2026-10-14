@@ -29,6 +29,16 @@ allowed_dlls = ["Qt6Core", "Qt6Gui", "Qt6Widgets"]
 # Plugin categories. platforms holds qwindows (the Windows platform plugin).
 # styles holds qmodernwindowsstyle. Unverified until Wave 7.
 allowed_plugin_dirs = ["platforms", "styles"]
+# File-level allowlist, relative to the plugins folder. Checked by verify_bundle and
+# applied by build.py's prune step. qwindows is the Windows platform plugin the
+# app needs. qoffscreen is the headless platform used only by --smoke. Its imports
+# are Qt6Core and Qt6Gui, so it adds no forbidden DLLs. qmodernwindowsstyle is the
+# Windows style. Everything else is pruned.
+allowed_plugin_files = [
+    "platforms/qwindows.dll",
+    "platforms/qoffscreen.dll",
+    "styles/qmodernwindowsstyle.dll",
+]
 allowed_non_qt_pyd = []
 
 # Every other Qt6* DLL in the installed PySide6 folder. None is in the import closure
@@ -129,4 +139,13 @@ distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
 
 # sha256 of every Qt6*.dll and Qt plugin. verify_bundle.py writes this table on
 # the first verified build. Empty here, on purpose.
+
 [hashes]
+# sha256 of every Qt6*.dll and Qt plugin, written by verify_bundle.py on the
+# first verified build. Later builds must match exactly.
+"_internal/PySide6/Qt6Core.dll" = "f57ed38afd95d0306cca9d88d997f639f70c7628a4f1f064eae291d579487121"
+"_internal/PySide6/Qt6Gui.dll" = "abd20026e190e8cc69667d1bea042db05cd353cc05e7da74b063c20b7da3f6cd"
+"_internal/PySide6/Qt6Widgets.dll" = "2f62cbe2869fff4e20df7369c2786e1ec7ec290d5a63d1371b7f70cf06909c3f"
+"_internal/PySide6/plugins/platforms/qoffscreen.dll" = "d24ef380ab0882d39f21539dcf57ab4213875a6fc658a53012f2d2fd275c6f69"
+"_internal/PySide6/plugins/platforms/qwindows.dll" = "ddd5cf6a96f058cfafcbc901ddeb5df010d755f0716beacfb557f8b27b733afe"
+"_internal/PySide6/plugins/styles/qmodernwindowsstyle.dll" = "74d4c47b56a942afb3723bb105900501bb8f91a46a8b592fa722cc4fdb2ce9bf"

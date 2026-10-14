@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tomllib
 import sys
 from pathlib import Path
 
@@ -99,6 +100,46 @@ def pyinstaller_command() -> list[str]:
     return cmd
 
 
+MANIFEST = REPO / "packaging" / "lgpl_manifest.toml"
+PRUNE_REPORT = BUILD_DIR / "pruned.txt"
+
+
+def prune_forbidden(bundle_root: Path, qt: dict) -> list[str]:
+    """Delete bundle files the manifest forbids, and plugin files not on the allowlist.
+
+    PyInstaller collects Qt plugins and their DLL dependencies through hooks, so a
+    clean build still contains forbidden files (verified on 2026-10-14: 53 problems
+    before pruning). This removes them after collection. verify_bundle then checks
+    what is left, so pruning cannot hide a violation. Every key is required: a
+    missing key raises KeyError and the build fails.
+    """
+    forbidden = set(qt["forbidden_dlls"])
+    forbidden_other = set(qt["forbidden_other_dlls"])
+    allowed = set(qt["allowed_dlls"])
+    allowed_plugin_files = set(qt["allowed_plugin_files"])
+    removed: list[str] = []
+    for path in sorted(bundle_root.rglob("*")):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(bundle_root).parts
+        suffix = path.suffix.lower()
+        stem = path.stem
+        drop = False
+        if suffix == ".dll" and (stem in forbidden or stem in forbidden_other):
+            drop = True
+        elif suffix == ".pyd" and "PySide6" in parts and stem.startswith("Qt"):
+            dll = "Qt6" + stem[2:]
+            drop = dll not in allowed
+        elif "PySide6" in parts and "plugins" in parts:
+            idx = parts.index("plugins")
+            if len(parts) > idx + 2 and "/".join(parts[idx + 1 :]) not in allowed_plugin_files:
+                drop = True
+        if drop:
+            path.unlink()
+            removed.append(path.relative_to(bundle_root).as_posix())
+    return removed
+
+
 def copy_notices() -> None:
     for name in NOTICE_FILES:
         src = REPO / name
@@ -120,6 +161,11 @@ def main() -> int:
     subprocess.run(cmd, cwd=REPO, check=True)
     if not (BUNDLE_DIR / f"{APP_NAME}.exe").is_file():
         raise SystemExit("PyInstaller did not produce the executable")
+    qt = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))["qt"]
+    removed = prune_forbidden(BUNDLE_DIR, qt)
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    PRUNE_REPORT.write_text("\n".join(removed) + "\n", encoding="utf-8")
+    print(f"pruned {len(removed)} forbidden or unlisted files (list: {PRUNE_REPORT})")
     copy_notices()
     print(f"bundle ready: {BUNDLE_DIR}")
     return 0

@@ -190,6 +190,7 @@ def check_qt_modules(root: Path, manifest: dict) -> tuple[list[str], dict]:
     allowed = set(qt["allowed_dlls"])
     forbidden = set(qt["forbidden_dlls"])
     allowed_plugin_dirs = set(qt["allowed_plugin_dirs"])
+    allowed_plugin_files = set(qt.get("allowed_plugin_files", []))
     allowed_non_qt_pyd = set(qt.get("allowed_non_qt_pyd", []))
     problems: list[str] = []
     inventory: dict[str, list[str]] = {"qt_dlls": [], "pyside_pyd": [], "plugins": []}
@@ -228,6 +229,8 @@ def check_qt_modules(root: Path, manifest: dict) -> tuple[list[str], dict]:
                 inventory["plugins"].append(rel)
                 if category not in allowed_plugin_dirs:
                     problems.append(f"Qt plugin category not allowed: {rel}")
+                elif "/".join(parts[idx + 1 :]) not in allowed_plugin_files:
+                    problems.append(f"Qt plugin file not on allowed list: {rel}")
 
     if not any(p.endswith("platforms/qwindows.dll") for p in inventory["plugins"]):
         problems.append("Qt platform plugin platforms/qwindows.dll missing")
