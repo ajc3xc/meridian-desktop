@@ -19,8 +19,12 @@ without starting the event loop:
 
 Build the folder-mode bundle, then verify it against the LGPL manifest:
 
-    pixi run python packaging/build.py
+    pixi run build
     pixi run verify
+
+Or run both in one step, build then verify:
+
+    pixi run release
 
 Python 3.12 is the same line the Meridian core uses (3.11 to 3.12 supported).
 
@@ -58,9 +62,10 @@ to a user-installed engine over loopback only.
 
 ## Packaging
 
-`packaging/build.py` builds a folder (ONEDIR) bundle with PyInstaller.
-`packaging/verify_bundle.py` checks it against `packaging/lgpl_manifest.toml`.
-Neither runs in wave 1. Licence and notice files are in `LICENSES/`,
-`NOTICE.md`, `OFFER-SOURCE.md` and `EULA.txt`. The last two are drafts.
+`pixi run build` runs `packaging/build.py`, which builds a folder (ONEDIR)
+bundle with PyInstaller. `pixi run verify` runs `packaging/verify_bundle.py`,
+which checks it against `packaging/lgpl_manifest.toml`. `pixi run release` runs
+build, then verify. Licence and notice files are in `LICENSES/`, `NOTICE.md`,
+`OFFER-SOURCE.md` and `EULA.txt`. The last two are drafts.
 
 Status: wave 1 only. Placeholders make no network calls.

@@ -42,6 +42,7 @@ FORBIDDEN_REFS = (
 # Generated or dependency trees. They are not repo content.
 SKIP_DIRS = {
     ".git",
+    ".pixi",
     ".venv",
     "venv",
     "build",

@@ -8,7 +8,9 @@ version = "0.1.0"
 test = "python -m pytest -q"
 boundary = "python tools/check_boundary.py"
 smoke = "python -m meridian_desktop --smoke"
+build = "python packaging/build.py"
 verify = "python packaging/verify_bundle.py"
+release = { depends-on = ["build", "verify"] }
 app = "python -m meridian_desktop"
 
 [dependencies]

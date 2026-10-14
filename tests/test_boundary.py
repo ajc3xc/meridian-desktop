@@ -106,6 +106,29 @@ def test_clean_tree_exits_0_with_ok_line(tmp_path, capsys):
     assert "boundary ok" in out
 
 
+def test_pixi_env_is_not_scanned(tmp_path):
+    _clean_tree(tmp_path)
+    _write(tmp_path, ".pixi/envs/default/share/notes.md", f"see {LATEX_REF}\n")
+    assert check_boundary.check(tmp_path) == []
+
+
+def test_pixi_skip_does_not_hide_same_reference_elsewhere(tmp_path):
+    # Control: the skip is limited to the .pixi directory.
+    _clean_tree(tmp_path)
+    _write(tmp_path, ".pixi/envs/default/share/notes.md", f"see {LATEX_REF}\n")
+    _write(tmp_path, "envs/default/share/notes.md", f"see {LATEX_REF}\n")
+    problems = check_boundary.check(tmp_path)
+    assert len(problems) == 1
+    assert "envs/default/share/notes.md" in problems[0]
+
+
+def test_repo_files_prunes_pixi(tmp_path):
+    _write(tmp_path, ".pixi/envs/default/x.txt", "x\n")
+    _write(tmp_path, "README.md", "x\n")
+    rels = [p.relative_to(tmp_path).as_posix() for p in check_boundary._repo_files(tmp_path)]
+    assert rels == ["README.md"]
+
+
 def test_real_repo_passes():
     problems = check_boundary.check(REPO)
     assert problems == [], "\n".join(problems)
