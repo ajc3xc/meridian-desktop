@@ -1,0 +1,22 @@
+[workspace]
+channels = ["conda-forge"]
+name = "meridian-desktop"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+test = "python -m pytest -q"
+boundary = "python tools/check_boundary.py"
+smoke = "python -m meridian_desktop --smoke"
+verify = "python packaging/verify_bundle.py"
+app = "python -m meridian_desktop"
+
+[dependencies]
+python = "3.12.*"
+
+[pypi-dependencies]
+pyside6 = "==6.12.0"
+pytest = ">=9.1.1, <10"
+pytest-qt = ">=4.5.0, <5"
+pefile = "==2024.8.26"
+pyinstaller = "==6.22.3"

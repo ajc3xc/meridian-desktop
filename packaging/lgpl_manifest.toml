@@ -1,0 +1,132 @@
+# LGPL manifest for MeridianDesktop. Read by packaging/verify_bundle.py.
+#
+# Qt licence election: PySide6 and the Qt libraries it ships are used under
+# LGPL-3.0-only. This project elects that option only. It does not elect
+# GPL-2.0-only, GPL-3.0-only, or the Qt commercial licence.
+#
+# Upstream metadata, copied verbatim from the installed PySide6 6.12.0
+# dist-info METADATA (read 2026-10-14):
+#   License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+#   License-File: LicenseRef-Qt-Commercial.txt
+# PySide6_Essentials, PySide6_Addons and shiboken6 carry the same License line.
+#
+# "unverified" below means not confirmed by a run. Wave 7 confirms those
+# items against a real PyInstaller build.
+
+[pyside6]
+version = "6.12.0"          # PySide6 dist-info METADATA
+qt_version = "6.12.0"       # PySide6.QtCore.qVersion() in .venv, run 2026-10-14
+elected_license = "LGPL-3.0-only"
+
+[qt]
+# Allowed Qt DLLs: the import closure of the PySide6 extension modules the app loads
+# (QtCore, QtGui, QtWidgets) and of the platform and style plugins. Recomputed
+# 2026-10-14 from PE import tables with pefile (scratch dll_closure.py).
+# qwindows.dll imports Qt6Core and Qt6Gui. qmodernwindowsstyle.dll imports Qt6Core,
+# Qt6Gui and Qt6Widgets. Unverified until a PyInstaller build confirms the bundle.
+allowed_dlls = ["Qt6Core", "Qt6Gui", "Qt6Widgets"]
+
+# Plugin categories. platforms holds qwindows (the Windows platform plugin).
+# styles holds qmodernwindowsstyle. Unverified until Wave 7.
+allowed_plugin_dirs = ["platforms", "styles"]
+allowed_non_qt_pyd = []
+
+# Every other Qt6* DLL in the installed PySide6 folder. None is in the import closure
+# of the allowed set. Excluded modules (build.py UNUSED_PYSIDE_MODULES) plus modules
+# with no use here. Before removing an entry, re-run the closure check: Qt6Network,
+# Qt6PrintSupport and Qt6Svg are plausible future needs.
+forbidden_dlls = [
+    "Qt63DAnimation", "Qt63DCore", "Qt63DExtras", "Qt63DInput", "Qt63DLogic",
+    "Qt63DQuick", "Qt63DQuickAnimation", "Qt63DQuickExtras", "Qt63DQuickInput",
+    "Qt63DQuickLogic", "Qt63DQuickRender", "Qt63DQuickScene2D", "Qt63DQuickScene3D",
+    "Qt63DRender", "Qt6Bluetooth", "Qt6CanvasPainter", "Qt6Charts", "Qt6ChartsQml",
+    "Qt6Concurrent", "Qt6DataVisualization", "Qt6DataVisualizationQml", "Qt6DBus",
+    "Qt6Designer", "Qt6DesignerComponents", "Qt6Graphs", "Qt6Graphs2DImpl",
+    "Qt6GraphsWidgets", "Qt6Help", "Qt6HttpServer", "Qt6LabsAnimation",
+    "Qt6LabsFolderListModel", "Qt6LabsPlatform", "Qt6LabsQmlModels", "Qt6LabsSettings",
+    "Qt6LabsSharedImage", "Qt6LabsStyleKit", "Qt6LabsStyleKitImpl",
+    "Qt6LabsSynchronizer", "Qt6LabsWavefrontMesh", "Qt6Location", "Qt6Lottie",
+    "Qt6LottieVectorImageGenerator", "Qt6LottieVectorImageHelpers", "Qt6Multimedia",
+    "Qt6MultimediaQuick", "Qt6MultimediaWidgets", "Qt6Network", "Qt6NetworkAuth",
+    "Qt6Nfc", "Qt6OpenGL", "Qt6OpenGLWidgets", "Qt6Pdf", "Qt6PdfQuick",
+    "Qt6PdfWidgets", "Qt6Positioning", "Qt6PositioningQuick", "Qt6PrintSupport",
+    "Qt6Qml", "Qt6QmlCompiler", "Qt6QmlCore", "Qt6QmlDesignSupport",
+    "Qt6QmlLocalStorage", "Qt6QmlMeta", "Qt6QmlModels", "Qt6QmlNetwork",
+    "Qt6QmlWorkerScript", "Qt6QmlXmlListModel", "Qt6Quick", "Qt6Quick3D",
+    "Qt6Quick3DAssetImport", "Qt6Quick3DAssetUtils", "Qt6Quick3DEffects",
+    "Qt6Quick3DGlslParser", "Qt6Quick3DHelpers", "Qt6Quick3DHelpersImpl",
+    "Qt6Quick3DIblBaker", "Qt6Quick3DParticleEffects", "Qt6Quick3DParticles",
+    "Qt6Quick3DPhysics", "Qt6Quick3DPhysicsHelpers", "Qt6Quick3DRuntimeRender",
+    "Qt6Quick3DSpatialAudio", "Qt6Quick3DUtils", "Qt6Quick3DXr", "Qt6QuickControls2",
+    "Qt6QuickControls2Basic", "Qt6QuickControls2BasicStyleImpl",
+    "Qt6QuickControls2FluentWinUI3", "Qt6QuickControls2FluentWinUI3StyleImpl",
+    "Qt6QuickControls2Fusion", "Qt6QuickControls2FusionStyleImpl",
+    "Qt6QuickControls2Imagine", "Qt6QuickControls2ImagineStyleImpl",
+    "Qt6QuickControls2Impl", "Qt6QuickControls2Material",
+    "Qt6QuickControls2MaterialStyleImpl", "Qt6QuickControls2Native",
+    "Qt6QuickControls2Universal", "Qt6QuickControls2UniversalStyleImpl",
+    "Qt6QuickControls2Windows", "Qt6QuickControls2WindowsStyleImpl",
+    "Qt6QuickDialogs2", "Qt6QuickDialogs2QuickImpl", "Qt6QuickDialogs2Utils",
+    "Qt6QuickEffects", "Qt6QuickLayouts", "Qt6QuickNativeStyle", "Qt6QuickParticles",
+    "Qt6QuickShapes", "Qt6QuickShapesDesignHelpers", "Qt6QuickTemplates2",
+    "Qt6QuickTest", "Qt6QuickTimeline", "Qt6QuickTimelineBlendTrees",
+    "Qt6QuickVectorImage", "Qt6QuickVectorImageGenerator",
+    "Qt6QuickVectorImageHelpers", "Qt6QuickWidgets", "Qt6RemoteObjects",
+    "Qt6RemoteObjectsQml", "Qt6Scxml", "Qt6ScxmlQml", "Qt6Sensors", "Qt6SensorsQuick",
+    "Qt6SerialBus", "Qt6SerialPort", "Qt6ShaderTools", "Qt6SpatialAudio", "Qt6Sql",
+    "Qt6StateMachine", "Qt6StateMachineQml", "Qt6Svg", "Qt6SvgWidgets", "Qt6Test",
+    "Qt6TextToSpeech", "Qt6UiTools", "Qt6VirtualKeyboard", "Qt6VirtualKeyboardQml",
+    "Qt6VirtualKeyboardSettings", "Qt6WebChannel", "Qt6WebChannelQuick",
+    "Qt6WebEngineCore", "Qt6WebEngineQuick", "Qt6WebEngineQuickDelegatesQml",
+    "Qt6WebEngineWidgets", "Qt6WebSockets", "Qt6WebView", "Qt6WebViewQuick", "Qt6Xml",
+]
+
+# Non-Qt DLLs in the PySide6 folder, classified explicitly. allowed_other_dlls are
+# the MSVC runtime and PySide6's own core DLL, the only ones the closure needs.
+# forbidden_other_dlls are FFmpeg (QtMultimedia), the Mesa software renderer, QML, and
+# OpenMP and Concurrency runtimes. The verifier does not check these yet: it has no
+# full bundle inventory until a build exists (Wave 7).
+allowed_other_dlls = [
+    "msvcp140", "msvcp140_1", "msvcp140_2", "vcruntime140", "vcruntime140_1",
+    "pyside6.abi3",
+]
+forbidden_other_dlls = [
+    "avcodec-63", "avformat-63", "avutil-61", "swresample-7", "swscale-10",
+    "opengl32sw", "pyside6qml.abi3", "concrt140", "vcamp140", "vccorlib140",
+    "vcomp140", "msvcp140_codecvt_ids",
+]
+
+# Expected Wave 7 conflict (unverified, reasoned from PyInstaller's plugin table):
+# build.py does not exclude plugin categories. PyInstaller collects every DLL in the
+# QtGui categories, including imageformats/qpdf, imageformats/qsvg,
+# iconengines/qsvgicon, generic/qtuiotouchplugin and
+# platforminputcontexts/qtvirtualkeyboardplugin. Those import forbidden DLLs. Expect
+# verify_bundle to fail until build.py excludes those plugin files or the owner
+# changes this policy.
+
+
+[licenses]
+# SPDX ids allowed for distributions outside the LGPL family. None is bundled
+# outside the family today, so only the elected id is listed.
+allowed_spdx = ["LGPL-3.0-only"]
+# Distributions that carry the Qt election. The verifier accepts a License field
+# that lists LGPL-3.0-only as one of its OR options.
+lgpl_family = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
+# Licence records come from the installed distributions via importlib.metadata
+# (standard library). The License strings above were read from the dist-info
+# METADATA files.
+
+[licenses.aliases]
+# Raw License metadata string mapped to the elected SPDX id.
+"LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only" = "LGPL-3.0-only"
+
+[bundled]
+# Distributions expected in the ONEDIR bundle. Unverified until Wave 7.
+# PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed in .venv as PySide6
+# requirements, with the same LGPL line in their METADATA. They are not listed
+# because build.py excludes their modules. Add them only if they land in the bundle.
+distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
+
+# sha256 of every Qt6*.dll and Qt plugin. verify_bundle.py writes this table on
+# the first verified build. Empty here, on purpose.
+[hashes]

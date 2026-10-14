@@ -1,0 +1,36 @@
+DRAFT - NOT FOR RELEASE
+
+MERIDIAN DESKTOP END USER LICENSE AGREEMENT (DRAFT)
+
+This draft has not been reviewed by counsel. Do not distribute it. The owner and
+counsel must review this text before any release.
+
+1. Grant
+You may install and run Meridian Desktop on your own computer. The repository
+licence is still to be decided (see NOTICE.md).
+
+2. Third-party components
+Qt and PySide6 are used under the GNU Lesser General Public License, version 3
+(LGPL-3.0-only). The LGPL text is in LICENSES/LGPL-3.0.txt. The Qt libraries are
+separate DLL files in the application folder. You may replace them with a
+compatible build.
+
+3. Modification and debugging of the LGPL components
+You may modify the LGPL components, and you may reverse engineer them for the
+purpose of debugging those modifications. This is permitted as the LGPL-3.0
+allows. Nothing in this agreement restricts a right that the LGPL gives you.
+
+4. Source offer
+The source code for the LGPL components is offered in OFFER-SOURCE.md.
+
+5. No warranty
+The software is provided as is, without warranty, to the extent the law allows.
+
+6. Network use
+Meridian Desktop in wave 1 makes no network calls. It does not connect to any
+hosted service or engine. Later waves may add connections. This draft will be
+updated then.
+
+7. Open items
+- Counsel review, governing law and liability terms: open.
+- Final wording of the source offer term: open (see OFFER-SOURCE.md).
