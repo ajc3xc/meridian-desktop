@@ -52,7 +52,10 @@ Each tab is built in a numbered wave (see "Waves").
   - Whether a *connecting* desktop build raises a 3(e) issue for a commercial
     release is an owner decision. This is not legal advice. Get a read before any
     paid release.
-- The repo's own license is `TBD-owner`.
+- The repo's own license is MSL-1.0, the same text as the core. `LICENSE` in this
+  repo is that text, unchanged. Its "Software" definition covers "the Meridian source
+  code", and the desktop is Meridian source code. Chosen on the owner's delegation,
+  2026-10-14. Wording review: owner.
 
 Boundary enforcement: `tools/check_boundary.py` (Wave 1) fails when Qt is
 imported outside `meridian_desktop/ui/` (with `tray.py` listed as a UI exception)
@@ -298,6 +301,44 @@ narrow research run):
 - **Distribution (Chrome Web Store and similar) under consideration.** See
   "Distribution options".
 - **Next:** a megasprint with an executor handoff, after prospecting.
+- **Zotero autostart: approved** (owner, 2026-10-14). Not blocked any more. It is
+  still gated in the UI by an explicit enable.
+- **Repo licence: MSL-1.0**, delegated to me, applied (see above).
+- **MSL-1.0 amendment: not needed for the desktop as designed.** The desktop never
+  bundles the engine and connects over loopback. The point to check is whether
+  the Overleaf extension is ever published to a store, because that is
+  distribution of MSL code. Candidate clause, not applied, for the owner to
+  decide:
+  > Connection exception. Software distributed under this licence may connect
+  > over a local network interface to a separately installed copy of meridian-latex
+  > that the user runs on their own machine. That connection does not make the
+  > connecting software a Competing Use or a sublicence, and it may be distributed
+  > with, or alongside, a separately licensed client.
+- **MCP approvals: no `/mcp` step.** See "MCP control panel".
+
+## MCP control panel (owner requirement, 2026-10-14)
+
+- **Requirement:** the desktop is the external control panel. Users should not
+  have to authorize Meridian's MCP servers through `/mcp` in each client.
+- **What is true now:** the servers that ask for authorization (`meridian-outputs`,
+  `meridian-code`, `meridian-debug`, `meridian-extractor`, `meridian-fs`) are
+  claude.ai connectors, so they're authorized in claude.ai connector settings. Local
+  stdio servers need no OAuth. The main repo's `.mcp.json` uses a bearer header for
+  the hosted server. Verified by reading the config files (names and transport only,
+  no values).
+- **Design:**
+  1. Meridian-owned servers run as local stdio launchers, written by the desktop's
+     client setup. No OAuth.
+  2. The hosted server's bearer token lives in the OS keychain. The desktop writes
+     it into client config, so the user approves once, in the desktop.
+  3. Remote servers that do require OAuth: the desktop runs the authorization-code
+     flow itself, using loopback PKCE. It stores tokens in the keychain and writes
+     the client config. **Unverified:** whether Claude Code and Claude Desktop accept
+     externally stored tokens for remote servers. Verify before relying on it.
+  4. Consent is explicit and per server. The consent screen lists the scopes. There
+     is no silent auto-approval, because that would remove the protection MCP
+     authorization exists to provide. The desktop automates the flow, not the
+     consent. Revocation and an audit log live in the desktop.
 
 ## Distribution options (under consideration, not decided)
 
