@@ -15,9 +15,8 @@ EXPECTED_WAVES = {
     "Services": 3,
     "Code": 6,
     "Logs": 3,
-    "Settings": 2,
 }
-STATUS = "No services checked (wave 1 makes no network calls)"
+STATUS = "No services checked yet"
 
 
 def _window(qtbot, settings_path):
@@ -49,6 +48,13 @@ def test_placeholders_name_their_wave(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     for name, wave in EXPECTED_WAVES.items():
         assert f"Not built yet (wave {wave})" in _label_texts(_page(window, name)), name
+
+
+def test_settings_tab_holds_runpod_panel_not_placeholder(qtbot, settings_path):
+    window = _window(qtbot, settings_path)
+    page = _page(window, "Settings")
+    assert page.objectName() == "runpod-panel"
+    assert not any("Not built yet" in text for text in _label_texts(page))
 
 
 def test_writing_lists_three_named_sections(qtbot, settings_path):
