@@ -1,8 +1,11 @@
-"""Main window: a mode selector on top, then one placeholder tab per area.
+"""Main window: a mode selector on top, then one tab per area.
 
-Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py).
-Settings go through settings_store, which has no Qt import. Wave 1 makes no
-network calls.
+The Settings tab holds the RunPod panel (wave 2). The other tabs are still
+placeholders. Qt code lives in meridian_desktop/ui/ (and the listed exception
+tray.py). Settings go through settings_store and the RunPod key goes through
+secret_store, and neither imports Qt. The only network calls are loopback calls
+to the local Meridian server at the local_url setting. The panel makes them when
+it is first shown and when a button is pressed. No other host is contacted.
 """
 
 from __future__ import annotations
@@ -17,7 +20,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.runpod_panel import RunPodPanel
 
 # (tab name, wave that builds it). Display order is the tuple order.
 TAB_SPECS = (
@@ -38,7 +43,11 @@ WRITING_SECTIONS = (
     "Google Docs (approach not decided)",
 )
 
-STATUS_MESSAGE = "No services checked (wave 1 makes no network calls)"
+STATUS_MESSAGE = "No services checked yet"
+
+# The window opens at this size (width, height). It fits the full tab bar and gives the
+# Settings panel room for its key row and pods table.
+DEFAULT_WINDOW_SIZE = (960, 640)
 
 # Mode selector entries in display order: (settings value, label).
 MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"))
@@ -57,11 +66,16 @@ def _placeholder_page(name: str, wave: int, parent: QWidget) -> QWidget:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above one tab per area. Placeholders only in wave 1."""
+    """Mode selector above one tab per area. Settings holds the RunPod panel."""
 
-    def __init__(self, settings_store: SettingsStore | None = None) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore | None = None,
+        secret_store: SecretStore | None = None,
+    ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
+        self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
         self.setWindowTitle("Meridian")
 
         central = QWidget(self)
@@ -70,9 +84,17 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget(central)
         for name, wave in TAB_SPECS:
-            self.tabs.addTab(_placeholder_page(name, wave, self.tabs), name)
+            if name == "Settings":
+                page: QWidget = RunPodPanel(self._store, self._secrets, parent=self.tabs)
+            else:
+                page = _placeholder_page(name, wave, self.tabs)
+            self.tabs.addTab(page, name)
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
+        # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
+        # may not shrink below the full bar, so every tab label stays visible.
+        self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
+        self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
 
