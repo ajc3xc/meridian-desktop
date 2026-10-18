@@ -10,8 +10,9 @@
 #   License-File: LicenseRef-Qt-Commercial.txt
 # PySide6_Essentials, PySide6_Addons and shiboken6 carry the same License line.
 #
-# "unverified" below means not confirmed by a run. Wave 7 confirms those
-# items against a real PyInstaller build.
+# verify_bundle.py enforces this file on every build. A check that cannot run, or that
+# finds a missing input, fails the build. Nothing in it can be overridden from the
+# environment.
 
 [pyside6]
 version = "6.12.0"          # PySide6 dist-info METADATA
@@ -23,11 +24,12 @@ elected_license = "LGPL-3.0-only"
 # (QtCore, QtGui, QtWidgets) and of the platform and style plugins. Recomputed
 # 2026-10-14 from PE import tables with pefile (scratch dll_closure.py).
 # qwindows.dll imports Qt6Core and Qt6Gui. qmodernwindowsstyle.dll imports Qt6Core,
-# Qt6Gui and Qt6Widgets. Unverified until a PyInstaller build confirms the bundle.
+# Qt6Gui and Qt6Widgets. verify_bundle.py checks every Qt DLL and every Qt plugin in
+# the bundle against this list, and checks their import tables.
 allowed_dlls = ["Qt6Core", "Qt6Gui", "Qt6Widgets"]
 
 # Plugin categories. platforms holds qwindows (the Windows platform plugin).
-# styles holds qmodernwindowsstyle. Unverified until Wave 7.
+# styles holds qmodernwindowsstyle.
 allowed_plugin_dirs = ["platforms", "styles"]
 # File-level allowlist, relative to the plugins folder. Checked by verify_bundle and
 # applied by build.py's prune step. qwindows is the Windows platform plugin the
@@ -92,10 +94,11 @@ forbidden_dlls = [
 ]
 
 # Non-Qt DLLs in the PySide6 folder, classified explicitly. allowed_other_dlls are
-# the MSVC runtime and PySide6's own core DLL, the only ones the closure needs.
-# forbidden_other_dlls are FFmpeg (QtMultimedia), the Mesa software renderer, QML, and
-# OpenMP and Concurrency runtimes. The verifier does not check these yet: it has no
-# full bundle inventory until a build exists (Wave 7).
+# the MSVC runtime and PySide6's own core DLL, the only ones the closure needs. The
+# MSVC runtime must be named in packaging/native_runtimes.toml. pyside6.abi3 must be
+# pinned in [hashes]. forbidden_other_dlls are FFmpeg (QtMultimedia), the Mesa software
+# renderer, QML, and OpenMP and Concurrency runtimes. verify_bundle.py rejects any
+# bundled DLL, PYD or EXE with one of these stems, and build.py prunes them.
 allowed_other_dlls = [
     "msvcp140", "msvcp140_1", "msvcp140_2", "vcruntime140", "vcruntime140_1",
     "pyside6.abi3",
@@ -106,39 +109,143 @@ forbidden_other_dlls = [
     "vcomp140", "msvcp140_codecvt_ids",
 ]
 
-# Expected Wave 7 conflict (unverified, reasoned from PyInstaller's plugin table):
-# build.py does not exclude plugin categories. PyInstaller collects every DLL in the
-# QtGui categories, including imageformats/qpdf, imageformats/qsvg,
-# iconengines/qsvgicon, generic/qtuiotouchplugin and
-# platforminputcontexts/qtvirtualkeyboardplugin. Those import forbidden DLLs. Expect
-# verify_bundle to fail until build.py excludes those plugin files or the owner
-# changes this policy.
+# Plugin files outside allowed_plugin_files, such as imageformats/qpdf,
+# imageformats/qsvg, iconengines/qsvgicon, generic/qtuiotouchplugin and
+# platforminputcontexts/qtvirtualkeyboardplugin, are collected by PyInstaller and then
+# removed by build.py's prune_forbidden step. verify_bundle.py checks what remains. A
+# plugin file that survives pruning fails the build.
 
 
 [licenses]
-# SPDX ids allowed for distributions outside the LGPL family. None is bundled
-# outside the family today, so only the elected id is listed.
-allowed_spdx = ["LGPL-3.0-only"]
+# SPDX ids allowed for distributions shipped outside the LGPL family. Permissive
+# licences only. verify_bundle.py rejects every GPL, AGPL and MPL licence, and every
+# licence it cannot map to an id here. keyring 25.7.0 (MIT) ships in the bundle.
+allowed_spdx = ["MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "PSF-2.0", "ISC", "0BSD", "Zlib", "Unlicense"]
 # Distributions that carry the Qt election. The verifier accepts a License field
-# that lists LGPL-3.0-only as one of its OR options.
-lgpl_family = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
-# Licence records come from the installed distributions via importlib.metadata
-# (standard library). The License strings above were read from the dist-info
-# METADATA files.
+# that lists LGPL-3.0-only as one of its OR options. LGPL-3.0-only is accepted for
+# these names only. Any other distribution that declares it fails the build.
+# A file that more than one distribution's RECORD claims passes only when every claimant
+# is in this list and they all carry the same License line (D1).
+# PySide6_Pdf and PySide6_WebEngine (6.12.0.140) carry the same LGPL line in their METADATA.
+# Their RECORD lists PySide6/__init__.py, the file that the PYZ module PySide6 is built from,
+# so the PYZ owner check makes them owners of that module and they must pass the family rule.
+lgpl_family = [
+    "PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6",
+    "PySide6_Pdf", "PySide6_WebEngine",
+]
+# Licence records come from each bundled *.dist-info METADATA (the bundle inventory)
+# and from the installed distributions via importlib.metadata (the environment check).
+# Both read License-Expression, License and the License :: classifiers together. The
+# statements must resolve to one SPDX id through [licenses.aliases]. When they disagree,
+# or when the metadata is missing or ambiguous, the LICENSE or COPYING file is read, and
+# a GPL or AGPL signature in it fails the distribution.
 
 [licenses.aliases]
-# Raw License metadata string mapped to the elected SPDX id.
+# Raw licence metadata string mapped to an SPDX id. A string with no entry here fails
+# the build (fail closed). "BSD License" and "Apache Software License" are not mapped
+# because they do not name the exact licence. A reviewer adds the exact SPDX form.
 "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only" = "LGPL-3.0-only"
+"LGPL-3.0-only" = "LGPL-3.0-only"
+"MIT" = "MIT"
+"MIT License" = "MIT"
+"BSD-2-Clause" = "BSD-2-Clause"
+"BSD-3-Clause" = "BSD-3-Clause"
+"Apache-2.0" = "Apache-2.0"
+"Apache License 2.0" = "Apache-2.0"
+"PSF-2.0" = "PSF-2.0"
+"Python Software Foundation License" = "PSF-2.0"
+"ISC" = "ISC"
+"ISC License (ISCL)" = "ISC"
+"0BSD" = "0BSD"
+"Zlib" = "Zlib"
+"zlib/libpng License" = "Zlib"
+"Unlicense" = "Unlicense"
+"The Unlicense (Unlicense)" = "Unlicense"
 
 [bundled]
-# Distributions expected in the ONEDIR bundle. Unverified until Wave 7.
+# Distributions expected in the ONEDIR bundle. verify_bundle.py fails the build when a
+# listed distribution has no *.dist-info in the bundle, or when its licence is not
+# allowed. keyring ships in the bundle and is listed. Its own dependencies are not
+# listed, because the bundle does not carry their dist-info (see the known gaps in
+# verify_bundle.py).
 # PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed in the pixi env as PySide6
 # requirements, with the same LGPL line in their METADATA. They are not listed
 # because build.py excludes their modules. Add them only if they land in the bundle.
-distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"]
+distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6", "keyring"]
 
-# sha256 of every Qt6*.dll and Qt plugin. verify_bundle.py writes this table on
-# the first verified build. Empty here, on purpose.
+[system_dlls]
+# Windows OS DLLs a bundled binary may import without shipping them. Exact lower-case
+# file names, and the api-ms-win- API-set prefix. Each name is a Windows component, and
+# the ICU names are the ICU libraries that Windows 10 1703 and later ship (icu.dll,
+# icuin.dll and icuuc.dll are present in System32 on Windows 11). icuuc.dll is what
+# Qt6Core.dll imports. The other names are OS DLLs that the Qt, Python and app binaries
+# of the 2026-10-17 bundle import, read from their PE import tables.
+names = [
+    "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "shell32.dll",
+    "ole32.dll", "oleaut32.dll", "ws2_32.dll", "bcrypt.dll", "crypt32.dll",
+    "ucrtbase.dll", "icu.dll", "icuin.dll", "icuuc.dll",
+    "authz.dll", "comctl32.dll", "comdlg32.dll", "d3d9.dll", "d3d11.dll", "d3d12.dll",
+    "dwmapi.dll", "dwrite.dll", "dxgi.dll", "imm32.dll", "iphlpapi.dll", "mpr.dll",
+    "mscms.dll", "netapi32.dll", "ntdll.dll", "propsys.dll", "rpcrt4.dll", "setupapi.dll",
+    "shlwapi.dll", "uiautomationcore.dll", "userenv.dll", "uxtheme.dll", "version.dll",
+    "winmm.dll", "wtsapi32.dll",
+]
+prefixes = ["api-ms-win-"]
+
+[runtimes]
+# SPDX ids allowed for native runtimes listed in packaging/native_runtimes.toml. Each
+# runtime is named in NOTICE.md, and its header is in THIRD_PARTY_LICENSES.txt.
+# bzip2-1.0.6 is the bzip2 licence id. MSL-1.0 is included because the licence audit
+# cites MSL section 6, so a component of the bundle is under MSL-1.0. Counsel must
+# confirm which runtime it covers.
+# The two Microsoft ids cover only the redistributable runtime files listed in
+# native_runtimes.toml: LicenseRef-Microsoft-VC-Redist for the Visual C++ runtime, and
+# LicenseRef-Microsoft-Windows-SDK for the UCRT and api-ms-win stubs.
+allowed_spdx = [
+    "PSF-2.0", "Apache-2.0", "MIT", "Zlib", "0BSD", "bzip2-1.0.6", "MSL-1.0",
+    "LicenseRef-Microsoft-VC-Redist", "LicenseRef-Microsoft-Windows-SDK",
+]
+# Runtime digests in native_runtimes.toml are keyed by path relative to the bundle root
+# (D2). The Visual C++ runtime appears twice, as 14.44 under _internal/PySide6/ and
+# _internal/shiboken6/ and as 14.51 at _internal/. Each copy has its own digest.
+# LGPL-3.0-only is not on this list. The gate accepts an LGPL-3.0-only runtime (the Qt
+# extension binaries, D4) only when every one of its files is under _internal/PySide6/ or
+# _internal/shiboken6/.
+
+[source_offer]
+# Hosts that a URL in OFFER-SOURCE.md may use. Every URL there must be https and must
+# name one of these hosts exactly. Add the owner's own source host here once it is
+# chosen. Until then the offer cannot pass.
+hosts = ["download.qt.io", "code.qt.io"]
+
+[pyz_owners]
+# PYZ modules that no installed distribution's RECORD lists. The verifier looks each PYZ
+# module up in the build interpreter's RECORD files first. A module with no RECORD owner
+# passes only when it is in the standard library (owned by the CPython runtime, PSF-2.0,
+# listed in native_runtimes.toml) or in first_party. Any other module fails, and the
+# message names it. first_party is the project's own package, which the repository
+# licence covers, not a third-party licence check.
+stdlib_owner = "CPython"
+stdlib_spdx = "PSF-2.0"
+first_party = ["meridian_desktop"]
+
+[pyinstaller]
+# D3. PyInstaller's bootstrap modules (the _pyi_rth_* runtime hooks and the pyiboot*
+# bootstrap) are licensed "GPL-2.0-or-later WITH PyInstaller-exception". A PYZ module
+# whose top-level name matches module_patterns, and that no installed RECORD lists, is
+# attributed to PyInstaller. It passes only while NOTICE.md names notice_name and
+# THIRD_PARTY_LICENSES.txt carries every copying_markers text. No other GPL-2.0 licence
+# passes, and a module outside module_patterns with that licence fails.
+# NEEDS COUNSEL CONFIRMATION before release: whether the PyInstaller exception covers
+# these modules in this bundle. The pattern list and the NOTICE and THIRD_PARTY
+# requirements are the code's reading of D3 until counsel signs it off.
+notice_name = "PyInstaller"
+module_patterns = ["_pyi_rth_*", "pyiboot*"]
+copying_markers = ["GNU GENERAL PUBLIC LICENSE", "Version 2, June 1991"]
+
+# sha256 of every Qt6*.dll and Qt plugin. verify_bundle.py writes this table on the
+# first verified build. [hashes] must stay the last table in this file, because
+# write_hashes rewrites it in place.
 
 [hashes]
 # sha256 of every Qt6*.dll and Qt plugin, written by verify_bundle.py on the

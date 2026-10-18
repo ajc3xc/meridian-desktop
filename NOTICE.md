@@ -1,42 +1,173 @@
 # Third-party notices
 
-Meridian Desktop, wave 1 (0.1.0). Draft. This file lists third-party software
-that the desktop app uses or may bundle. The bundle check
-(`packaging/verify_bundle.py`) looks for some of the names below.
+MeridianDesktop, wave 1 (0.1.0). This file lists the third-party software in the ONEDIR bundle,
+with its licence and the bundle path of its licence text. Bundle paths are relative to the bundle
+root, `dist/MeridianDesktop`. packaging/build.py writes THIRD_PARTY_LICENSES.txt at the bundle root.
+That file has one section per bundled distribution and per native runtime, and each section starts
+with "== name version (SPDX) ==". The build fails if a listed item has no licence text or no version,
+or if a GPL-only or AGPL licence is found.
 
-## PySide6 and shiboken6 (Qt for Python), elected LGPL-3.0-only
+## Qt for Python and Qt: LGPL-3.0-only (elected)
 
-- Packages: PySide6 6.12.0, PySide6_Essentials 6.12.0, PySide6_Addons 6.12.0,
-  shiboken6 6.12.0.
-- Qt runtime: Qt 6.12.0 (`PySide6.QtCore.qVersion()` in the pixi dev environment).
-- Upstream licence metadata, verbatim: `License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`
-  and `License-File: LicenseRef-Qt-Commercial.txt`.
-- Election: this project uses PySide6 and Qt under LGPL-3.0-only. It does not
-  elect GPL-2.0-only, GPL-3.0-only, or the Qt commercial licence.
-- Licence text: `LICENSES/LGPL-3.0.txt`. Its provenance against the FSF copy is
-  not yet verified.
-- Linking: Qt is shipped as separate, dynamically linked DLL files in the
-  ONEDIR bundle, so a user can replace them. The app is folder-mode only.
-- Source offer: see `OFFER-SOURCE.md`.
-- Dev environment only: PySide6_WebEngine and PySide6_Pdf 6.12.0.140 are installed as
-  PySide6 requirements. Their modules are excluded from the bundle. They carry
-  the same licence metadata.
+| Name | Version | SPDX | Source | Licence text in the bundle |
+|---|---|---|---|---|
+| PySide6 | 6.12.0 | LGPL-3.0-only (elected) | https://code.qt.io/cgit/pyside/pyside-setup.git/ | `LICENSES/LGPL-3.0.txt`. The distribution's own file is `_internal/pyside6-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt`, which is not the elected licence. |
+| PySide6_Essentials | 6.12.0 | LGPL-3.0-only (elected) | https://code.qt.io/cgit/pyside/pyside-setup.git/ | `LICENSES/LGPL-3.0.txt`. The distribution's own file is `_internal/pyside6_essentials-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt`, which is not the elected licence. |
+| PySide6_Addons | 6.12.0 | LGPL-3.0-only (elected) | https://code.qt.io/cgit/pyside/pyside-setup.git/ | `LICENSES/LGPL-3.0.txt`. The distribution's own file is `_internal/pyside6_addons-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt`, which is not the elected licence. |
+| shiboken6 | 6.12.0 | LGPL-3.0-only (elected) | https://code.qt.io/cgit/pyside/pyside-setup.git/ | `LICENSES/LGPL-3.0.txt`. The distribution's own file is `_internal/shiboken6-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt`, which is not the elected licence. |
+| Qt | 6.12.0 | LGPL-3.0-only (elected) | https://download.qt.io/official_releases/qt/6.12/6.12.0/ | `LICENSES/LGPL-3.0.txt` |
 
-## meridian-docs (MIT): not used in wave 1
+- Election: this project uses PySide6 and Qt under LGPL-3.0-only only. It does not elect
+  GPL-2.0-only, GPL-3.0-only, or the Qt commercial licence.
+- Upstream licence metadata, verbatim, for the four PySide and shiboken distributions:
+  `License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`, with
+  `License-File: LicenseRef-Qt-Commercial.txt`. The file LicenseRef-Qt-Commercial.txt is shipped by
+  the upstream distributions and does not apply to this project.
+- Licence texts: `LICENSES/LGPL-3.0.txt`. The GPL-3.0 text, which LGPL-3.0 section 4 refers to, is
+  `LICENSES/GPL-3.0.txt`.
+- Linking: Qt is shipped as separate, dynamically linked DLL files in the ONEDIR bundle, so a user
+  can replace them. The app is folder-mode only.
+- Qt libraries in the bundle: Qt6Core.dll, Qt6Gui.dll and Qt6Widgets.dll, with the plugins
+  platforms/qwindows.dll, platforms/qoffscreen.dll and styles/qmodernwindowsstyle.dll. The
+  PySide6 and shiboken6 binaries are in `_internal/PySide6/` and `_internal/shiboken6/`. They are
+  PySide6/QtCore.pyd, QtGui.pyd, QtWidgets.pyd, pyside6.abi3.dll, shiboken6/Shiboken.pyd and
+  shiboken6.abi3.dll.
+- The two extension binaries, `pyside6.abi3.dll` (in `_internal/PySide6/`) and `shiboken6.abi3.dll` (in
+  `_internal/shiboken6/`), are the runtime "Qt for Python extension binaries" in `packaging/native_runtimes.toml`.
+  That entry is LGPL-3.0-only and pins each file by its path.
+- Source offer: see `OFFER-SOURCE.md`, which names the upstream source locations.
+- Dev environment only: PySide6_WebEngine 6.12.0.140 and PySide6_Pdf 6.12.0.140 are installed as
+  PySide6 requirements. Their modules are excluded from the bundle, and their DLLs are pruned.
 
-If a later wave bundles meridian-docs, its MIT notice and copyright line must be
-added here.
+## Windows system libraries: icuuc.dll and icuin.dll
 
-## meridian-latex: excluded, not bundled
+- `icuuc.dll` is imported by `Qt6Core.dll`. The import table was read with pefile. The DLL is not
+  bundled. It is provided by Windows 10 version 1703 and later, as part of the Windows ICU libraries.
+- `icuin.dll` is the other Windows ICU library, and it is provided by Windows 10 version 1703 and
+  later. It is not bundled. A byte search of `Qt6Core.dll` finds the name `icuuc.dll` but not
+  `icuin.dll`, so `icuin.dll` is documented here as part of the Windows ICU pair, not as a direct
+  import of Qt6Core.dll.
 
-The desktop does not include, copy, vendor or bundle any meridian-latex code. In
-a later wave the desktop may connect to a user-installed engine over loopback.
-That component is covered by its own licence, which is not reproduced here.
+## Native runtimes
+
+Each runtime's licence text is in THIRD_PARTY_LICENSES.txt, in the section whose header is shown
+below. The source texts are in `packaging/licenses/native/` and are pinned in
+`packaging/licenses/SHA256SUMS`. They are the licence files of the same conda packages that the pixi
+environment was built from. Versions come from the conda-meta files of that environment.
+
+| Runtime | Version | SPDX | Files in the bundle | Source (upstream licence page) | Licence text in the bundle |
+|---|---|---|---|---|---|
+| CPython | 3.12.15 | PSF-2.0 | python312.dll, python3.dll and 15 extension modules (.pyd) | https://docs.python.org/3/license.html | `THIRD_PARTY_LICENSES.txt`, section `== CPython 3.12.15 (PSF-2.0) ==` |
+| OpenSSL | 3.6.5 | Apache-2.0 | libcrypto-3-x64.dll, libssl-3-x64.dll | https://openssl-library.org/source/license/index.html | `THIRD_PARTY_LICENSES.txt`, section `== OpenSSL 3.6.5 (Apache-2.0) ==` |
+| libffi | 3.7.0 | MIT | ffi-8.dll | https://github.com/libffi/libffi/blob/master/LICENSE | `THIRD_PARTY_LICENSES.txt`, section `== libffi 3.7.0 (MIT) ==` |
+| expat | 2.8.5 | MIT | libexpat.dll | https://github.com/libexpat/libexpat/blob/master/expat/COPYING | `THIRD_PARTY_LICENSES.txt`, section `== expat 2.8.5 (MIT) ==` |
+| bzip2 | 1.0.8 | bzip2-1.0.6 | libbz2.dll | https://gitlab.com/bzip2/bzip2 | `THIRD_PARTY_LICENSES.txt`, section `== bzip2 1.0.8 (bzip2-1.0.6) ==` |
+| XZ Utils | 5.8.3 | 0BSD | liblzma.dll | https://github.com/tukaani-project/xz/blob/master/COPYING.0BSD | `THIRD_PARTY_LICENSES.txt`, section `== XZ Utils 5.8.3 (0BSD) ==` |
+| zlib | 1.3.2 | Zlib | zlib.dll | https://zlib.net/zlib_license.html | `THIRD_PARTY_LICENSES.txt`, section `== zlib 1.3.2 (Zlib) ==` |
+| Microsoft VC++ runtime | 14.51.36247 | LicenseRef-Microsoft-VC-Redist | MSVCP140.dll, MSVCP140_1.dll, MSVCP140_2.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll, in 11 bundled copies | https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files | `THIRD_PARTY_LICENSES.txt`, section `== Microsoft VC++ runtime 14.51.36247 (LicenseRef-Microsoft-VC-Redist) ==` |
+| Microsoft UCRT | 10.0.26100.0 | LicenseRef-Microsoft-Windows-SDK | ucrtbase.dll and 42 api-ms-win-*.dll stubs | https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment | `THIRD_PARTY_LICENSES.txt`, section `== Microsoft UCRT 10.0.26100.0 (LicenseRef-Microsoft-Windows-SDK) ==` |
+| Qt for Python extension binaries | 6.12.0 | LGPL-3.0-only (elected) | pyside6.abi3.dll (`_internal/PySide6/`), shiboken6.abi3.dll (`_internal/shiboken6/`) | https://www.qt.io/development/qt-framework/qt-licensing | `LICENSES/LGPL-3.0.txt`. THIRD_PARTY_LICENSES.txt section `== Qt for Python extension binaries 6.12.0 (LGPL-3.0-only) ==` |
+
+The two Microsoft SPDX ids, LicenseRef-Microsoft-VC-Redist and LicenseRef-Microsoft-Windows-SDK, cover
+only the redistributable runtime files listed in `packaging/native_runtimes.toml`.
+
+- The Visual C++ runtime has two versions in the bundle, and both are kept (decision D2). `_internal/MSVCP140.dll`,
+  `_internal/VCRUNTIME140.dll` and `_internal/VCRUNTIME140_1.dll` have file version 14.51.36247.0, the version in
+  the header. `_internal/PySide6/MSVCP140_1.dll` and `_internal/PySide6/MSVCP140_2.dll` have file version
+  14.44.35211.0 and are the only copies of those two files. The six other copies, in `_internal/PySide6/`
+  (MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll) and `_internal/shiboken6/` (MSVCP140.dll,
+  VCRUNTIME140.dll, VCRUNTIME140_1.dll), also have file version 14.44.35211.0 and different bytes. Each of the
+  eleven bundled copies has its own sha256, keyed by its path in `packaging/native_runtimes.toml`, and the build
+  checks each one.
+- The version in the UCRT header is the conda package version. The file version of `ucrtbase.dll` in
+  the bundle is 10.0.26100.4654.
+- The CPython text is the PSF licence, version 2. conda-forge labels the same package `Python-2.0`.
+  This file uses the SPDX identifier PSF-2.0 for the text.
+- The Microsoft licence texts come from the conda packages `vc14_runtime` and `ucrt`. The VC++
+  runtime text is the converted copy that Microsoft's package supplies with its disclaimer.
+- The full file list, and the sha256 of each bundled copy keyed by its path relative to the bundle root,
+  are in `packaging/native_runtimes.toml`. The build fails if a listed file is missing from the bundle,
+  if a bundled copy of a listed file has no sha256 for its path, or if a native runtime DLL in the bundle
+  is not listed there. A bundled copy whose sha256 differs from the value declared for its path is printed
+  as RELEASE BLOCKED.
+
+## Other bundled Python distributions
+
+Each licence file is in the bundle inside its own dist-info folder, and in THIRD_PARTY_LICENSES.txt
+under the section header shown.
+
+| Distribution | Version | SPDX | Source | Licence text in the bundle |
+|---|---|---|---|---|
+| keyring | 25.7.0 | MIT | https://github.com/jaraco/keyring | `_internal/keyring-25.7.0.dist-info/licenses/LICENSE` |
+| jaraco.classes | 3.4.0 | MIT | https://github.com/jaraco/jaraco.classes | `_internal/jaraco.classes-3.4.0.dist-info/LICENSE` |
+| jaraco.functools | 4.6.0 | MIT | https://github.com/jaraco/jaraco.functools | `_internal/jaraco_functools-4.6.0.dist-info/licenses/LICENSE` |
+| jaraco.context | 6.1.2 | MIT | https://github.com/jaraco/jaraco.context | `_internal/jaraco_context-6.1.2.dist-info/licenses/LICENSE` |
+| more-itertools | 11.2.1 | MIT | https://github.com/more-itertools/more-itertools | `_internal/more_itertools-11.2.1.dist-info/licenses/LICENSE` |
+| pywin32-ctypes | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes | `_internal/pywin32_ctypes-0.2.3.dist-info/LICENSE.txt` |
+
+The Qt-family distributions (PySide6, PySide6_Essentials, PySide6_Addons, shiboken6) are listed in the
+Qt section above.
+
+- setuptools is not bundled. The build excludes it, because nothing the app or its direct
+  dependencies imports it.
+- importlib_metadata is not bundled. The locked Python 3.12 environment does not contain it, and
+  keyring requires it only below Python 3.12. It is not listed above because it is not in the bundle.
+
+## Build tool: PyInstaller 6.22.3 (bootloader and runtime exception)
+
+PyInstaller is used to build the bundle. Its package is not bundled, but its bootloader is compiled into
+`MeridianDesktop.exe`, and its bootstrap modules (`_pyi_rth_*` and `pyiboot*`) are embedded in that exe.
+The licence recorded for the bootloader and these modules is GPL-2.0-or-later WITH PyInstaller-exception.
+PyInstaller's package metadata reads its licence as "GPLv2-or-later with a special exception which allows
+to use PyInstaller to build and distribute non-free programs (including commercial ones)". The exception is
+the Bootloader Exception in PyInstaller's COPYING.txt: the authors give unlimited permission to link or embed
+the compiled bootloader and related files into combinations with other programs, and to distribute those
+combinations without restriction from the use of those files. So the bootloader may be distributed with the
+program under the program's own licence. The licence file is `COPYING.txt`, from the PyInstaller 6.22.3
+distribution (https://github.com/pyinstaller/pyinstaller/blob/v6.22.3/COPYING.txt).
+THIRD_PARTY_LICENSES.txt includes this text in a section titled "PyInstaller 6.22.3 (GPL-2.0-or-later
+WITH PyInstaller-exception)". The build fails if this file does not name PyInstaller and that licence.
+
+## Desktop code and the repository licence
+
+The repository's LICENSE file is Meridian Source License 1.0 (MSL-1.0). A copy of that text is in the
+bundle as `LICENSES/MSL-1.0.txt`. MSL-1.0 section 6 requires the licence text to be retained on
+redistribution. The copy in the bundle is byte-identical to the repository's LICENSE file, which
+packaging/build.py checks.
+
+## meridian-docs and meridian-latex
+
+- meridian-docs (MIT) is not used in wave 1. If a later wave bundles it, its MIT notice and copyright
+  line must be added here.
+- meridian-latex is excluded and not bundled. The desktop does not include, copy, vendor or bundle any
+  meridian-latex code. A later wave may connect to a user-installed engine over loopback. That component
+  is covered by its own licence, which is not reproduced here.
+
+## Licence texts shipped in the bundle
+
+- `LICENSES/LGPL-3.0.txt`: LGPL-3.0. Its SHA-256 is pinned. Its provenance against the FSF copy is not
+  verified in this change.
+- `LICENSES/GPL-3.0.txt`: GPL-3.0, from https://www.gnu.org/licenses/gpl-3.0.txt, fetched on 2026-10-17.
+  Its SHA-256 (3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986) is pinned.
+- `LICENSES/MSL-1.0.txt`: the repository's MSL-1.0 licence text.
+- `THIRD_PARTY_LICENSES.txt`: every licence file listed above, by section.
 
 ## Open items
 
-- `LICENSES/LGPL-3.0.txt`: kept as is. Its provenance is not verified against
-  the FSF copy.
-- Python runtime and other dependencies: not yet inventoried. The verifier's
-  licence inventory (standard library, importlib.metadata) runs at build time.
-- Upstream source URLs: see `OFFER-SOURCE.md`.
+- Repository licence: the LICENSE file is MSL-1.0, but EULA.txt section 1 says the repository licence
+  is still to be decided. The owner must reconcile the two.
+- Counsel review: EULA.txt and OFFER-SOURCE.md carry the marker "DRAFT - NOT FOR RELEASE". Counsel
+  removes it after review. packaging/build.py --release refuses to build while it is present.
+- Source offer host: the owner must confirm the upstream-only host decision in OFFER-SOURCE.md.
+- LICENSES/LGPL-3.0.txt provenance against the FSF copy is not verified.
+- Visual C++ runtime, two versions: both ship (decision D2). The header of the Microsoft VC++ section gives
+  14.51.36247, and six copies in `_internal/PySide6/` and `_internal/shiboken6/` are 14.44.35211.0. Each
+  copy has its own digest in `packaging/native_runtimes.toml`. The owner must confirm that the Microsoft
+  redistributable terms cover the 14.44 copies.
+- PyInstaller licence, for counsel: the licence recorded for PyInstaller's bootloader and bootstrap modules
+  is GPL-2.0-or-later WITH PyInstaller-exception (decision D3). Two points need confirmation before release.
+  First, PyInstaller's own files name this exception "Bootloader-exception": `PyInstaller/loader/pyiboot01_bootstrap.py`
+  reads "GPL-2.0-or-later WITH Bootloader-exception". Second, PyInstaller's run-time hooks
+  (`PyInstaller/hooks/rthooks/pyi_rth_*.py`) carry "SPDX-License-Identifier: Apache-2.0" headers, and COPYING.txt
+  places run-time hooks under Apache-2.0. Counsel must confirm the licence of each `_pyi_rth_*` and `pyiboot*`
+  module that the bundle embeds.

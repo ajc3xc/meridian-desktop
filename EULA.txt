@@ -13,7 +13,8 @@ licence is still to be decided (see NOTICE.md).
 Qt and PySide6 are used under the GNU Lesser General Public License, version 3
 (LGPL-3.0-only). The LGPL text is in LICENSES/LGPL-3.0.txt. The Qt libraries are
 separate DLL files in the application folder. You may replace them with a
-compatible build.
+compatible build. The other third-party components, and their licences, are listed
+in NOTICE.md and THIRD_PARTY_LICENSES.txt.
 
 3. Modification and debugging of the LGPL components
 You may modify the LGPL components, and you may reverse engineer them for the
@@ -27,9 +28,16 @@ The source code for the LGPL components is offered in OFFER-SOURCE.md.
 The software is provided as is, without warranty, to the extent the law allows.
 
 6. Network use
-Meridian Desktop in wave 1 makes no network calls. It does not connect to any
-hosted service or engine. Later waves may add connections. This draft will be
-updated then.
+Meridian Desktop sends network requests only to a Meridian server on the same
+computer. The server address comes from the local_url setting, and it must be
+http on 127.0.0.1, localhost or ::1. The desktop refuses any other host, does not
+use a proxy and does not follow redirects. It checks that server with a request
+to its /health path, and it reads RunPod status through that server. The desktop
+does not contact usemeridian.us, RunPod or any other host. It does not send the
+RunPod key anywhere: the key stays in the operating system keychain on this
+computer. The hosted_url and engine_url settings are stored, but this version
+sends no request to them. The Meridian server is a separate program, and this
+section does not cover its own network use.
 
 7. Open items
 - Counsel review, governing law and liability terms: open.

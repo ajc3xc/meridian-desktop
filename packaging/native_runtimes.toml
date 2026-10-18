@@ -1,0 +1,319 @@
+# Native (non-Qt) runtimes in the MeridianDesktop ONEDIR bundle, and the Qt extension binaries.
+#
+# Read by packaging/build.py and packaging/verify_bundle.py. The build writes one section per
+# [[runtime]] into THIRD_PARTY_LICENSES.txt. It fails when a listed file is missing from the
+# bundle, when a bundled copy of a listed file has no digest for its path, and when a native
+# runtime DLL in the bundle is not listed here. A bundled copy whose sha256 differs from the
+# digest declared for its path is reported as RELEASE BLOCKED, and verify_bundle.py reports it
+# as a problem.
+#
+# Each [[runtime]] table has:
+#   name          the name in the section header
+#   version       the version in the section header
+#   spdx          the SPDX identifier in the section header
+#   files         exact file names, without folder parts, as they appear in the bundle
+#   sha256        a [runtime.sha256] table. Each key is the path of one bundled copy, relative
+#                 to the bundle root (dist/MeridianDesktop), for example
+#                 "_internal/PySide6/MSVCP140.dll". Each value is that copy's 64-digit
+#                 lower-case sha256. Every name in files needs at least one key, and every
+#                 bundled copy of a listed name needs its own key. Several keys may share one
+#                 file name. A key's file name must be in files.
+#   notice_url    the upstream licence page (https)
+#   licence_file  optional. A repo-relative licence text that packaging/licenses/SHA256SUMS
+#                 pins. Without it, the text is packaging/licenses/native/<slug of name>.txt.
+#
+# Licence texts for the runtimes are pinned in packaging/licenses/native/ and listed in
+# packaging/licenses/SHA256SUMS. They are the info/licenses files of the same conda packages.
+#
+# Versions: pixi env meridian-desktop-8257345453352236247 (env "default"), conda-meta files,
+# read 2026-10-17. The Qt entry's version is PySide6 6.12.0 from its dist-info METADATA.
+#
+# The Microsoft entries are split into two runtimes because the VC++ runtime and the UCRT are
+# separate packages with different versions. Their SPDX ids, LicenseRef-Microsoft-VC-Redist and
+# LicenseRef-Microsoft-Windows-SDK, cover only the redistributable runtime files listed here.
+#
+# CPython's extension modules (.pyd) are listed under CPython. No dist-info in the bundle owns them.
+#
+# Not listed here: Qt and its plugins, and the PySide6 and shiboken6 extension modules
+# (QtCore.pyd, QtGui.pyd, QtWidgets.pyd, Shiboken.pyd). packaging/lgpl_manifest.toml covers them.
+# The two extension binaries pyside6.abi3.dll and shiboken6.abi3.dll are listed in the Qt entry.
+
+[[runtime]]
+name = "CPython"
+version = "3.12.15"
+spdx = "PSF-2.0"
+files = [
+    "python312.dll",
+    "python3.dll",
+    "_asyncio.pyd",
+    "_bz2.pyd",
+    "_ctypes.pyd",
+    "_decimal.pyd",
+    "_hashlib.pyd",
+    "_lzma.pyd",
+    "_multiprocessing.pyd",
+    "_overlapped.pyd",
+    "_queue.pyd",
+    "_socket.pyd",
+    "_ssl.pyd",
+    "_wmi.pyd",
+    "pyexpat.pyd",
+    "select.pyd",
+    "unicodedata.pyd",
+]
+notice_url = "https://docs.python.org/3/license.html"
+
+[runtime.sha256]
+"_internal/python312.dll" = "bd05e1c279e0d95478625c1e891aedd2bf4fa483304365b77ac48a1f0687ce69"
+"_internal/python3.dll" = "da25c8c1244b0a658f4bacb58f2087bca0c17023dcca5b437fd3aca31fe0346f"
+"_internal/_asyncio.pyd" = "3d986cc7e02e3ab82959b68eccd7ed5648cdddd3fb8cc147150cd62e4d56b5f3"
+"_internal/_bz2.pyd" = "158065c3488bf53460a4bec934e5604e52b327414ccfa6e1d33380a74f6c59ad"
+"_internal/_ctypes.pyd" = "28b6d089ba5e0da10f5f7b32bba926ef5fa41bd15c027990d4f4efea5336d194"
+"_internal/_decimal.pyd" = "7ee35f4f98e3451f034d0dc6d0e06ee8fa0f4bd63ea1969be65c49c52d16d1f4"
+"_internal/_hashlib.pyd" = "a7f6cc2f4582fd701ff263dc4929a3df4a9c8929bb783918968e3eaeccb0ca5c"
+"_internal/_lzma.pyd" = "694a0f63e82ec11357ba2351da5f6df73723ce3fe3344029db6ed0520315f0b9"
+"_internal/_multiprocessing.pyd" = "e2cfbccde56c42d72bbcb1ebc728c77f1675cffc847c53d726060296da47ba03"
+"_internal/_overlapped.pyd" = "9953a5c4b90dfa9e29a17c76c6be704cbf76512eb4af29c667806559b206de2b"
+"_internal/_queue.pyd" = "b015f12fcb5d27ade024cc47808e1c3f95d23f80f35e472bf07882ac1ce57554"
+"_internal/_socket.pyd" = "b4047c86ef5facc7a75052c3afc5d6cc766b02a16970ef33b7d5eb56cbec96b8"
+"_internal/_ssl.pyd" = "53ebf568c64758d71c579c6387ad3d349b0dbaf979ae763ca4971835ade8b609"
+"_internal/_wmi.pyd" = "ab9774c4f96297d92e5867d8e0d6da145c336f4d9d415d4ad0408bbdd5f87376"
+"_internal/pyexpat.pyd" = "1beb87913332197d8869623261421f010d46cab789057f6382c91bb715dcfc53"
+"_internal/select.pyd" = "7aa823a1f7ad83c5b94fe86828b155ed7c05f7b521c860914a1be94979bca8ee"
+"_internal/unicodedata.pyd" = "1850e8cb4b4b973d7dd082ddc946e10218e87919d85a29c6a048f5ab0b352ddd"
+
+[[runtime]]
+name = "OpenSSL"
+version = "3.6.5"
+spdx = "Apache-2.0"
+files = [
+    "libcrypto-3-x64.dll",
+    "libssl-3-x64.dll",
+]
+notice_url = "https://openssl-library.org/source/license/index.html"
+
+[runtime.sha256]
+"_internal/libcrypto-3-x64.dll" = "7ff26fb03c914b87e22f55c6abed6eda0bfbfc628f9c1f1fde67993ddf1f8d47"
+"_internal/libssl-3-x64.dll" = "a1b3fd1f6eb95812e4fc3c68106f8ebec6b3f9dad9ff873ce4eebe20582b6f4f"
+
+[[runtime]]
+name = "libffi"
+version = "3.7.0"
+spdx = "MIT"
+files = [
+    "ffi-8.dll",
+]
+notice_url = "https://github.com/libffi/libffi/blob/master/LICENSE"
+
+[runtime.sha256]
+"_internal/ffi-8.dll" = "922fe231d83f412d351e2560714e248d097aae0b44c8410fb1826411e2528e69"
+
+[[runtime]]
+name = "expat"
+version = "2.8.5"
+spdx = "MIT"
+files = [
+    "libexpat.dll",
+]
+notice_url = "https://github.com/libexpat/libexpat/blob/master/expat/COPYING"
+
+[runtime.sha256]
+"_internal/libexpat.dll" = "c6e54dea938a9c62e545554a21723ab054af03ddcfa6389d1abd912c85f64880"
+
+[[runtime]]
+name = "bzip2"
+version = "1.0.8"
+spdx = "bzip2-1.0.6"
+files = [
+    "libbz2.dll",
+]
+notice_url = "https://gitlab.com/bzip2/bzip2"
+
+[runtime.sha256]
+"_internal/libbz2.dll" = "7f3ddbb88b670d79ada028480067ccdf240601319128e40eec8dce1daf4a9238"
+
+[[runtime]]
+name = "XZ Utils"
+version = "5.8.3"
+spdx = "0BSD"
+files = [
+    "liblzma.dll",
+]
+notice_url = "https://github.com/tukaani-project/xz/blob/master/COPYING.0BSD"
+
+[runtime.sha256]
+"_internal/liblzma.dll" = "8439ed3564a8dbbf6355e29c92e88fdf1f6dee096504149fc051104155c868a9"
+
+[[runtime]]
+name = "zlib"
+version = "1.3.2"
+spdx = "Zlib"
+files = [
+    "zlib.dll",
+]
+notice_url = "https://zlib.net/zlib_license.html"
+
+[runtime.sha256]
+"_internal/zlib.dll" = "f4f26ea6300c8449daad4650915e01ac80aafc6ca8b73a50be450f1fb66cdd63"
+
+
+# Visual C++ runtime (D2). Two versions ship in the bundle, and both are kept. Version
+# 14.51.36247 is at the bundle root: _internal/MSVCP140.dll, _internal/VCRUNTIME140.dll and
+# _internal/VCRUNTIME140_1.dll. Version 14.44.35211.0 is in _internal/PySide6/ and
+# _internal/shiboken6/. _internal/PySide6/MSVCP140_1.dll and _internal/PySide6/MSVCP140_2.dll
+# exist only in _internal/PySide6/, as 14.44.35211.0. Each copy has its own path digest, and
+# nothing is pruned from either version.
+[[runtime]]
+name = "Microsoft VC++ runtime"
+version = "14.51.36247"
+spdx = "LicenseRef-Microsoft-VC-Redist"
+files = [
+    "MSVCP140.dll",
+    "MSVCP140_1.dll",
+    "MSVCP140_2.dll",
+    "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll",
+]
+notice_url = "https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files"
+
+[runtime.sha256]
+"_internal/MSVCP140.dll" = "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+"_internal/PySide6/MSVCP140.dll" = "f6f1d55bfd64027820ddce48f9cd8cf46d53bfa34047e6acf4ef348d492a05cb"
+"_internal/shiboken6/MSVCP140.dll" = "1ba4d7c0a95d375da138a057a57593b33510ad5bda6c5e2686afd68faa5b4231"
+"_internal/PySide6/MSVCP140_1.dll" = "2be87527c41e1ba8aff48e326e0adcd4743516e0bbcc9304986c726e27de6aca"
+"_internal/PySide6/MSVCP140_2.dll" = "6a72ed8a87eae1671640bd1ca98eccb989f1772ae46ab84594e385bf6d4ac4fb"
+"_internal/PySide6/VCRUNTIME140.dll" = "a36e0cb185eb89533ed96d4568138f86a1315756a8b2644c5963a8ce23e32101"
+"_internal/VCRUNTIME140.dll" = "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+"_internal/shiboken6/VCRUNTIME140.dll" = "e7be9112ee9a5b9f44b44bff24cb761cca9b1ed7550b612f77b70edfcf5fdabf"
+"_internal/PySide6/VCRUNTIME140_1.dll" = "302b1e160e858602490a55e32ae2e29ddfc0bec2a188e19550cb655cdaa58f9c"
+"_internal/VCRUNTIME140_1.dll" = "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+"_internal/shiboken6/VCRUNTIME140_1.dll" = "f02cd4a862b85a9a3153d27e15e5a213f5df8e3d77004ed2e87b8a7e8873d97c"
+
+[[runtime]]
+name = "Microsoft UCRT"
+version = "10.0.26100.0"
+spdx = "LicenseRef-Microsoft-Windows-SDK"
+files = [
+    "ucrtbase.dll",
+    "api-ms-win-core-console-l1-1-0.dll",
+    "api-ms-win-core-datetime-l1-1-0.dll",
+    "api-ms-win-core-debug-l1-1-0.dll",
+    "api-ms-win-core-errorhandling-l1-1-0.dll",
+    "api-ms-win-core-fibers-l1-1-0.dll",
+    "api-ms-win-core-fibers-l1-1-1.dll",
+    "api-ms-win-core-file-l1-1-0.dll",
+    "api-ms-win-core-file-l1-2-0.dll",
+    "api-ms-win-core-file-l2-1-0.dll",
+    "api-ms-win-core-handle-l1-1-0.dll",
+    "api-ms-win-core-heap-l1-1-0.dll",
+    "api-ms-win-core-interlocked-l1-1-0.dll",
+    "api-ms-win-core-kernel32-legacy-l1-1-1.dll",
+    "api-ms-win-core-libraryloader-l1-1-0.dll",
+    "api-ms-win-core-localization-l1-2-0.dll",
+    "api-ms-win-core-memory-l1-1-0.dll",
+    "api-ms-win-core-namedpipe-l1-1-0.dll",
+    "api-ms-win-core-processenvironment-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-1.dll",
+    "api-ms-win-core-profile-l1-1-0.dll",
+    "api-ms-win-core-rtlsupport-l1-1-0.dll",
+    "api-ms-win-core-string-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "api-ms-win-core-sysinfo-l1-1-0.dll",
+    "api-ms-win-core-sysinfo-l1-2-0.dll",
+    "api-ms-win-core-timezone-l1-1-0.dll",
+    "api-ms-win-core-util-l1-1-0.dll",
+    "api-ms-win-crt-conio-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-process-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+]
+notice_url = "https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment"
+
+[runtime.sha256]
+"_internal/ucrtbase.dll" = "3239227d27667ba20d10a880751924e5719de0078f9fce232d149d383f7681f6"
+"_internal/api-ms-win-core-console-l1-1-0.dll" = "015bd08815c7b934a8952c3a7578e9ce59f21136e8a880d42bbd414bec2c6058"
+"_internal/api-ms-win-core-datetime-l1-1-0.dll" = "5534812cdbdae94ba45cb216e5eb9af686b853948df54365103555abbbaf9d9a"
+"_internal/api-ms-win-core-debug-l1-1-0.dll" = "837d2b1b2cd03e03fc6ccb050698b6b5763af17c201304872342a5eae9e0a2d2"
+"_internal/api-ms-win-core-errorhandling-l1-1-0.dll" = "de43b165f568c276c00e95acd454e3092f352a18e95874595f4f4658c06d2ec7"
+"_internal/api-ms-win-core-fibers-l1-1-0.dll" = "3cebc45bf479ad74cfabf2c6bfd4994d7ad639ed1221025981d19cedf9ce0416"
+"_internal/api-ms-win-core-fibers-l1-1-1.dll" = "5ef70308bcca628ce6b0e2856b15b1c7ae340c3f9bbbc4c1071d8c191a34a5c3"
+"_internal/api-ms-win-core-file-l1-1-0.dll" = "250ac829f2617bcac1c6e5b8c4f630462e20765863ba573526a3e11bbfb94a9a"
+"_internal/api-ms-win-core-file-l1-2-0.dll" = "ae14079a114733f60ce87b92cba42acd8083c2cd67594e53bc37dc0b97a4b465"
+"_internal/api-ms-win-core-file-l2-1-0.dll" = "914bf26a298713119477ea0a8e7bd43171b91344ebe24fb47ad77c49686e3d87"
+"_internal/api-ms-win-core-handle-l1-1-0.dll" = "ab5489955e371b15f77906c08ec3c7affe2c7a46a08c514ca628768b4478974b"
+"_internal/api-ms-win-core-heap-l1-1-0.dll" = "c70f9644d8377fa39c5b71f2e9734c1400d7598904fdeb772e8502099982dcb7"
+"_internal/api-ms-win-core-interlocked-l1-1-0.dll" = "f8129710188e407bb0e6f46d30aeba277d67b947ece5fe09e883fde2323f3ae6"
+"_internal/api-ms-win-core-kernel32-legacy-l1-1-1.dll" = "5200b16cb2ddc61cfc07373a9a84aa85a3ab50806ca96c879c883275832944c1"
+"_internal/api-ms-win-core-libraryloader-l1-1-0.dll" = "48786fb88b001dcd1f63acea903d3ca9cc0b3060d5a325e3f2f3cbc3bfd53166"
+"_internal/api-ms-win-core-localization-l1-2-0.dll" = "9ec3898f7eba91faa28b51616c211a2689e3a13aeef8de6e13cb674e49d689eb"
+"_internal/api-ms-win-core-memory-l1-1-0.dll" = "3a6cbc524c99e1cd80d5368f5601402a37ad602528b1ab628093573ef638eb3b"
+"_internal/api-ms-win-core-namedpipe-l1-1-0.dll" = "97145ef89c44949fcf0f04ac834a8bc7d687ef49ee73ae9fc32f3c11136b7201"
+"_internal/api-ms-win-core-processenvironment-l1-1-0.dll" = "8bc7c10b1851aea644e9c9f381cdb935e091fee6b0be3d3aedc6fffaac96adb7"
+"_internal/api-ms-win-core-processthreads-l1-1-0.dll" = "d8030b777617c71f0f94564607699dbf7561487d779db9756aed378c5675213f"
+"_internal/api-ms-win-core-processthreads-l1-1-1.dll" = "f5e676713340f73a03a3d41a6ec9883b431da7d16c7f07bd0a920fb80e6c0753"
+"_internal/api-ms-win-core-profile-l1-1-0.dll" = "f023d47e44d3eea6b0743580f57e8c6ba81e79d5ebfa7da26250076c647b980e"
+"_internal/api-ms-win-core-rtlsupport-l1-1-0.dll" = "9746d8930704153578a628c010638a5f818ffe5a927e25591b108e256dc6afca"
+"_internal/api-ms-win-core-string-l1-1-0.dll" = "7c53ae24c982d16ffd1bf7f918d115b11b7f30e57bc7feaa18cb9781e4abb926"
+"_internal/api-ms-win-core-synch-l1-1-0.dll" = "56d9d62ca5dba79a6581b8d574a7d8b2a64a5ecb71e47dcf06ed0285708b1859"
+"_internal/api-ms-win-core-synch-l1-2-0.dll" = "f6482bbec5612c39ecb4822787a333f2b7570f7a5f922a4059be41ba957bb372"
+"_internal/api-ms-win-core-sysinfo-l1-1-0.dll" = "272d02765fdd3582618236c2d309abba069642f9bc1062ede069d0c144e17007"
+"_internal/api-ms-win-core-sysinfo-l1-2-0.dll" = "8a0900788859d0eb51c2f48f50cc6ed376a120b518100fa20e11d7702ccde260"
+"_internal/api-ms-win-core-timezone-l1-1-0.dll" = "ff35de6c03812b332e140f17dade25c5dd4775156da9eeb1eaae3fddd27236ec"
+"_internal/api-ms-win-core-util-l1-1-0.dll" = "191ef3e98641a57296f19d572d8eb62489470ff1ef6030d136af170c2f835173"
+"_internal/api-ms-win-crt-conio-l1-1-0.dll" = "54ee5ec719a051496ff60aa00dbeaa94b9a7d2cdac27fe9b7317f1a666b6a2aa"
+"_internal/api-ms-win-crt-convert-l1-1-0.dll" = "8b94662429171019fcd63c70bbf2095a075170599704a5e7dcdbe3da13f3a429"
+"_internal/api-ms-win-crt-environment-l1-1-0.dll" = "39e5929593709e8af3bc9e0a75ec1155778d6f4a247f4cdfc58928ad6db88434"
+"_internal/api-ms-win-crt-filesystem-l1-1-0.dll" = "5a8ecebac32edf4e1f3c5c6c1c8ea1a1add6cda4f9c9cb26f752fb295bea6865"
+"_internal/api-ms-win-crt-heap-l1-1-0.dll" = "c71080cbcb43bf1f8f3e391deb12a582eb0abefc80946f340675a2c616e4feb4"
+"_internal/api-ms-win-crt-locale-l1-1-0.dll" = "6c68648e524187e03c4ad9aaa4a99113c6ee9f29fb39cc0ed93f951975138e63"
+"_internal/api-ms-win-crt-math-l1-1-0.dll" = "d4fbcccbe29371cbce431e43b2eb4f7ba9a6f04a3d740a071f02457a505e9dc8"
+"_internal/api-ms-win-crt-process-l1-1-0.dll" = "47c1935942e3ac0812e4dcf18c0e265e565f0194a3349111c299712f5565f7ac"
+"_internal/api-ms-win-crt-runtime-l1-1-0.dll" = "72adc1b3677e0814d9c4ebf0964000e84bb2acf67336c8963061665e44f78029"
+"_internal/api-ms-win-crt-stdio-l1-1-0.dll" = "900afc3989673c9bb1a687ed38c192f46db9e6ba6d11a668898a539e7fc23798"
+"_internal/api-ms-win-crt-string-l1-1-0.dll" = "fcf12466cc12fd3b73611fc0763a5a1f9d44e90349513c34a0c83b0f36421793"
+"_internal/api-ms-win-crt-time-l1-1-0.dll" = "886e57c4a6adb299b38f02945369f590a67da4e79a798359fc60aaa067212d7c"
+"_internal/api-ms-win-crt-utility-l1-1-0.dll" = "5f8f26b216ade615b67a41f6fbbb910972fc6153315a65bb8f09912be50215b1"
+
+# Qt for Python extension binaries (D4). pyside6.abi3.dll is in _internal/PySide6/ and
+# shiboken6.abi3.dll is in _internal/shiboken6/. Both are pinned by path. Their licence is the
+# elected Qt licence, LGPL-3.0-only (packaging/lgpl_manifest.toml). The gate accepts an
+# LGPL-3.0-only runtime only when every file is under PySide6/ or shiboken6/.
+[[runtime]]
+name = "Qt for Python extension binaries"
+version = "6.12.0"
+spdx = "LGPL-3.0-only"
+files = [
+    "pyside6.abi3.dll",
+    "shiboken6.abi3.dll",
+]
+notice_url = "https://www.qt.io/development/qt-framework/qt-licensing"
+licence_file = "LICENSES/LGPL-3.0.txt"
+
+[runtime.sha256]
+"_internal/PySide6/pyside6.abi3.dll" = "d5b87ccb0a7c305854bd120242b0a75002d0b50a35532d0f6171e4ed0f3cc82a"
+"_internal/shiboken6/shiboken6.abi3.dll" = "07c318c02be5a3a9f1475f5a2d0cd438f4d4ea3288c28e2e10bc5ebbbec8de86"
+
+# PyInstaller (not a [[runtime]] entry, D3). packaging/build.py writes PyInstaller's bootloader
+# section into THIRD_PARTY_LICENSES.txt under "GPL-2.0-or-later WITH PyInstaller-exception",
+# with PyInstaller's COPYING.txt. That licence may be carried only for the bootstrap modules
+# named _pyi_rth_* and pyiboot*, and only while NOTICE.md names PyInstaller and that licence.
+# build.py checks NOTICE.md. Any other GPL-2.0 licence fails.
+# COUNSEL CONFIRMATION NEEDED (D3). Two points for counsel before release:
+#   1. The exception id. PyInstaller's COPYING.txt is titled "Bootloader Exception", and the
+#      header of PyInstaller/loader/pyiboot01_bootstrap.py reads
+#      "GPL-2.0-or-later WITH Bootloader-exception". This project uses "PyInstaller-exception".
+#   2. The run-time hooks. PyInstaller/hooks/rthooks/pyi_rth_*.py carry
+#      "SPDX-License-Identifier: Apache-2.0", and COPYING.txt places run-time hooks under
+#      Apache-2.0. Assigning every _pyi_rth_* module to the GPL-2.0-or-later string does not
+#      match that.
