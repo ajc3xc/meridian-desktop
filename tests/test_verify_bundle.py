@@ -276,3 +276,51 @@ def test_real_qt_core_version_is_read_from_resources():
     assert dll.is_file(), f"Qt6Core.dll missing: {dll} (fail closed)"
 
     assert vb._file_version(pefile, dll).startswith("6.12")
+
+
+# ---------------------------------------------------------------- source leak scan (planted copies)
+
+# A real module from the package. Its bytes are planted into a dist tree under other names.
+SOURCE_FILE = REPO / "meridian_desktop" / "settings_store.py"
+
+
+def _plant_byte_copy(dist: Path) -> str:
+    target = dist / "_internal" / "vendor" / "util.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(SOURCE_FILE.read_bytes())
+    return "copy of meridian_desktop source in bundle: _internal/vendor/util.py"
+
+
+def _plant_py_path_name(dist: Path) -> str:
+    target = dist / "lib" / "meridian_desktop_shim.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(CLEAN_SOURCE, encoding="utf-8")
+    return "meridian_desktop python source in bundle: lib/meridian_desktop_shim.py"
+
+
+def _plant_directory_name(dist: Path) -> str:
+    (dist / "meridian_desktop").mkdir(parents=True)
+    return "meridian_desktop package directory in bundle: meridian_desktop"
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        pytest.param(_plant_byte_copy, id="byte-identical-copy-under-neutral-name"),
+        pytest.param(_plant_py_path_name, id="py-path-containing-meridian_desktop"),
+        pytest.param(_plant_directory_name, id="directory-named-meridian_desktop"),
+    ],
+)
+def test_planted_source_copy_fails_leak_scan(tmp_path, plant):
+    dist = tmp_path / "dist" / "MeridianDesktop"
+    dist.mkdir(parents=True)
+    expected = plant(dist)
+    problems = vb.check_source_leak(dist)
+    assert problems == [expected]
+
+
+def test_clean_bundle_passes_leak_scan(tmp_path):
+    dist = tmp_path / "dist" / "MeridianDesktop"
+    (dist / "app").mkdir(parents=True)
+    (dist / "app" / "main.py").write_text(CLEAN_SOURCE, encoding="utf-8")
+    assert vb.check_source_leak(dist) == []
