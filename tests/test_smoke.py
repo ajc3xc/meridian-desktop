@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -35,6 +36,14 @@ from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
 from meridian_desktop.ui.main_window import TAB_NAMES, WRITING_SECTIONS, MainWindow
 from meridian_desktop.ui.projects_tab import default_sources
+from meridian_desktop.ui.settings_tab import (
+    DB_SAVED_TEXT,
+    LOCAL_URL_SAVED_TEXT,
+    NOT_CHOSEN_TEXT,
+    NOT_WRITTEN_TEXT,
+    SettingsTab,
+    mode_text,
+)
 
 EXPECTED_TABS = ("Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Logs", "Settings")
 EXPECTED_WAVES = {
@@ -407,3 +416,167 @@ def test_unbuilt_hosted_reader_uses_the_stored_token_and_says_so(qtbot, settings
     expected = "Hosted Meridian projects could not be loaded (SourceNotBuilt)."
     qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
     assert FAKE_TOKEN not in status.text()
+
+
+# ----------------------------------------------------------- Settings tab (connection settings)
+
+LOOPBACK_OK = "http://localhost:7999"
+
+
+def _settings_tab(window):
+    """The connection section, which sits inside the Settings page above the RunPod rows."""
+    tab = _page(window, "Settings").findChild(SettingsTab, "settings-tab")
+    assert tab is not None
+    return tab
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://127.0.0.1:7878",  # not http
+        "ftp://127.0.0.1:7878",  # not http
+        "http://example.com:7878",  # not loopback
+        "http://10.0.0.5:7878",  # a private address, not loopback
+        "http://127.0.0.1.example.com:7878",  # a lookalike of a loopback address
+        "http://someone@127.0.0.1:7878",  # a user name in the address
+        "",  # empty
+    ],
+)
+def test_settings_tab_rejects_non_loopback_local_url(qtbot, settings_path, url):
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    before = settings_path.read_bytes()
+    window = _window(qtbot, settings_path)
+    tab = _settings_tab(window)
+    tab.findChild(QLineEdit, "settings-local-url").setText(url)
+
+    tab.findChild(QPushButton, "settings-save-local-url").click()
+
+    message = tab.findChild(QLabel, "settings-local-url-message")
+    assert message.text().startswith("Not saved.")
+    assert not message.isHidden()
+    # Nothing was written: the file bytes are unchanged.
+    assert settings_path.read_bytes() == before
+
+
+def test_settings_tab_saves_loopback_local_url_and_shows_saved_values(qtbot, settings_path, tmp_path):
+    db = _empty_db(tmp_path)
+    SettingsStore(settings_path).save(Settings(mode="local", local_url=LOOPBACK_OK, db_path=str(db)))
+    window = _window(qtbot, settings_path)
+    tab = _settings_tab(window)
+    field = tab.findChild(QLineEdit, "settings-local-url")
+    assert field.text() == LOOPBACK_OK
+    assert tab.findChild(QLabel, "settings-db-path").text() == str(db)
+
+    field.setText("  http://127.0.0.1:7999  ")
+    tab.findChild(QPushButton, "settings-save-local-url").click()
+
+    saved = SettingsStore(settings_path).load().settings
+    assert saved.local_url == "http://127.0.0.1:7999"
+    # Only the local URL changed. The mode and the database file are kept.
+    assert saved.mode == "local"
+    assert saved.db_path == str(db)
+    assert tab.findChild(QLabel, "settings-local-url-message").text() == LOCAL_URL_SAVED_TEXT
+
+
+def test_settings_tab_local_url_write_failure_is_shown(qtbot, settings_path, monkeypatch):
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    before = settings_path.read_bytes()
+
+    def failing_replace(src, dst):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(settings_store.os, "replace", failing_replace)
+    window = _window(qtbot, settings_path)
+    tab = _settings_tab(window)
+    tab.findChild(QLineEdit, "settings-local-url").setText(LOOPBACK_OK)
+
+    tab.findChild(QPushButton, "settings-save-local-url").click()
+
+    assert tab.findChild(QLabel, "settings-local-url-message").text() == f"{NOT_WRITTEN_TEXT}."
+    assert settings_path.read_bytes() == before
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == ["settings.json"]
+
+
+def test_settings_tab_db_path_chosen_by_dialog_and_shown_back(qtbot, settings_path, tmp_path, monkeypatch):
+    db = _empty_db(tmp_path)
+    asked = []
+
+    def fake_dialog(parent, caption, directory, file_filter, *args, **kwargs):
+        asked.append((caption, file_filter))
+        return str(db), "SQLite database (*.db *.sqlite *.sqlite3)"
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", fake_dialog)
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    window = _window(qtbot, settings_path)
+    tab = _settings_tab(window)
+    label = tab.findChild(QLabel, "settings-db-path")
+    assert label.text() == NOT_CHOSEN_TEXT
+
+    tab.findChild(QPushButton, "settings-choose-db").click()
+
+    assert len(asked) == 1
+    assert SettingsStore(settings_path).load().settings.db_path == str(db)
+    assert label.text() == str(db)
+    assert tab.findChild(QLabel, "settings-db-message").text() == DB_SAVED_TEXT
+
+
+def test_settings_tab_cancelled_dialog_changes_nothing(qtbot, settings_path, tmp_path, monkeypatch):
+    previous = _empty_db(tmp_path)
+    start_dirs = []
+
+    def cancelled(parent, caption, directory, file_filter, *args, **kwargs):
+        start_dirs.append(directory)
+        return "", ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", cancelled)
+    SettingsStore(settings_path).save(Settings(mode="local", db_path=str(previous)))
+    before = settings_path.read_bytes()
+    window = _window(qtbot, settings_path)
+    tab = _settings_tab(window)
+
+    tab.findChild(QPushButton, "settings-choose-db").click()
+
+    # The dialog opens in the folder of the file already chosen, and a cancel leaves everything as it was.
+    assert start_dirs == [str(previous.parent)]
+    assert settings_path.read_bytes() == before
+    assert tab.findChild(QLabel, "settings-db-path").text() == str(previous)
+    assert tab.findChild(QLabel, "settings-db-message").isHidden()
+
+
+def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path):
+    backend = MemoryKeyring()
+    secrets = KeyringSecretStore(backend=backend)
+    secrets.set_secret(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
+    SettingsStore(settings_path).save(Settings(mode="hosted"))
+    window = MainWindow(SettingsStore(settings_path), secret_store=secrets, data_sources=_sources())
+    qtbot.addWidget(window)
+    tab = _settings_tab(window)
+
+    # The connection section has one text field, the local URL. It has no token field.
+    assert [field.objectName() for field in tab.findChildren(QLineEdit)] == ["settings-local-url"]
+    assert FAKE_TOKEN not in _all_text(window)
+    assert FAKE_TOKEN not in tab.findChild(QLabel, "settings-mode").text()
+
+
+def test_settings_tab_and_top_bar_show_the_same_saved_mode(qtbot, settings_path, monkeypatch):
+    SettingsStore(settings_path).save(Settings(mode="hosted"))
+    window = _shown_window(qtbot, settings_path)
+    tab = _settings_tab(window)
+    mode_label = tab.findChild(QLabel, "settings-mode")
+    combo = window.mode_selector
+    assert combo.currentData() == "hosted"
+    assert mode_label.text() == mode_text("hosted")
+
+    combo.setCurrentIndex(combo.findData("local"))
+    assert SettingsStore(settings_path).load().settings.mode == "local"
+    assert combo.currentData() == "local"
+    assert mode_label.text() == mode_text("local")
+
+    # A failed save reverts the selector, and the tab still shows the mode that is saved.
+    def failing_replace(src, dst):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(settings_store.os, "replace", failing_replace)
+    combo.setCurrentIndex(combo.findData("hosted"))
+    assert combo.currentData() == "local"
+    assert mode_label.text() == mode_text("local")

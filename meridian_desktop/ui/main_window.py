@@ -1,7 +1,8 @@
 """Main window: a mode selector on top, then one tab per area.
 
-The Projects tab is read-only (wave 2) and the Settings tab holds the RunPod
-panel (wave 2). The other tabs are still placeholders. Qt code lives in
+The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
+(wave 2), with the connection settings (local URL, database file, saved mode) above
+its rows. The other tabs are still placeholders. Qt code lives in
 meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
 settings_store and the RunPod key goes through secret_store, and neither imports
 Qt. The only network calls are loopback calls to the local Meridian server at the
@@ -26,6 +27,7 @@ from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
+from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
 
 # (tab name, wave that builds it). Display order is the tuple order.
 TAB_SPECS = (
@@ -51,9 +53,6 @@ STATUS_MESSAGE = "No services checked yet"
 # The window opens at this size (width, height). It fits the full tab bar and gives the
 # Settings panel room for its key row and pods table.
 DEFAULT_WINDOW_SIZE = (960, 640)
-
-# Mode selector entries in display order: (settings value, label).
-MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"))
 
 
 def _placeholder_page(name: str, wave: int, parent: QWidget) -> QWidget:
@@ -95,6 +94,10 @@ class MainWindow(QMainWindow):
                 page: QWidget = self._projects
             elif name == "Settings":
                 page = RunPodPanel(self._store, self._secrets, parent=self.tabs)
+                # The connection settings go above the RunPod rows, in the panel's own layout,
+                # so the Settings page is still the RunPod panel.
+                self._settings_tab = SettingsTab(self._store, parent=page)
+                page.layout().insertWidget(0, self._settings_tab)
             else:
                 page = _placeholder_page(name, wave, self.tabs)
             self.tabs.addTab(page, name)
@@ -142,6 +145,8 @@ class MainWindow(QMainWindow):
             return
         self._saved_mode = mode
         self.settings_warning.hide()
+        # The Settings tab shows the saved mode, so it reads the new one too.
+        self._settings_tab.refresh()
         # The Projects tab reads from the source the new mode names.
         self._projects.refresh()
 
