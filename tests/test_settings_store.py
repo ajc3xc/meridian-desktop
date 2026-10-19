@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 from pathlib import Path
 
@@ -139,3 +140,66 @@ def test_settings_store_imports_no_qt():
             imported.append(node.module)
     qt_roots = {"PySide6", "PySide2", "PyQt5", "PyQt6", "PyQt4", "shiboken6", "shiboken2"}
     assert [name for name in imported if name.split(".")[0] in qt_roots] == []
+
+
+SAVED_KEYS = {"mode", "hosted_url", "local_url", "engine_url", "db_path"}
+
+
+def test_db_path_round_trip_and_blank_is_none(settings_path):
+    store = SettingsStore(settings_path)
+    assert store.load().settings.db_path is None
+
+    db = str(settings_path.parent / "meridian.db")
+    store.save(Settings(db_path=db))
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.db_path == db
+
+    # An unset db_path is saved as null and reads back as None with no warning.
+    store.save(Settings())
+    result = SettingsStore(settings_path).load()
+    assert result.settings.db_path is None
+    assert result.warning is None
+
+    # A blank or non-string value loads as None with a warning, and never raises.
+    for bad in ("", "   ", 42, True, ["a"], {"path": "x"}):
+        _write(settings_path, json.dumps({"db_path": bad}))
+        result = SettingsStore(settings_path).load()
+        assert result.settings.db_path is None, bad
+        assert result.warning is not None and "db_path" in result.warning, bad
+
+
+def test_file_written_before_db_path_loads_without_warning(settings_path):
+    _write(
+        settings_path,
+        json.dumps(
+            {
+                "mode": "hosted",
+                "hosted_url": "https://example.test",
+                "local_url": DEFAULT_LOCAL_URL,
+                "engine_url": "http://127.0.0.1:9999",
+            }
+        ),
+    )
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.mode == "hosted"
+    assert result.settings.db_path is None
+
+
+def test_saved_file_holds_only_the_five_keys(settings_path):
+    SettingsStore(settings_path).save(Settings(db_path=str(settings_path.parent / "meridian.db")))
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert set(saved) == SAVED_KEYS
+
+
+def test_token_like_keys_are_neither_kept_nor_written(settings_path):
+    _write(
+        settings_path,
+        json.dumps({"mode": "hosted", "hosted_token": "fake-token-value-123", "api_key": "fake-key-value-456"}),
+    )
+    SettingsStore(settings_path).set_mode("local")
+    text = settings_path.read_text(encoding="utf-8")
+    assert "fake-token-value-123" not in text
+    assert "fake-key-value-456" not in text
+    assert set(json.loads(text)) == SAVED_KEYS

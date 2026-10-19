@@ -32,6 +32,9 @@ class Settings:
     hosted_url: str = DEFAULT_HOSTED_URL
     local_url: str = DEFAULT_LOCAL_URL
     engine_url: str = DEFAULT_ENGINE_URL
+    # Path to the Meridian database file that the read-only reader opens. None means the
+    # user has not picked one yet. Only a path is stored here, never a token or a secret.
+    db_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,7 +57,7 @@ def default_settings_path(
 
 def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
     problems: list[str] = []
-    values: dict[str, str] = {}
+    values: dict[str, object] = {}
 
     mode = data.get("mode", DEFAULT_MODE)
     if mode in VALID_MODES:
@@ -70,6 +73,17 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values[key] = value
         else:
             problems.append(f"{key} must be a non-empty string; using its default")
+
+    # db_path: an absent key or null means "not chosen" (None) with no warning, so a file
+    # saved with db_path unset reads back clean. A blank or non-string value is refused.
+    if "db_path" in data:
+        value = data["db_path"]
+        if value is None:
+            values["db_path"] = None
+        elif isinstance(value, str) and value.strip():
+            values["db_path"] = value
+        else:
+            problems.append("db_path must be a non-empty string or null; using None")
 
     return replace(Settings(), **values), problems
 
