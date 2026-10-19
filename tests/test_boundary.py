@@ -1,6 +1,6 @@
 """Tests for tools/check_boundary.py: a violation tree fails, a clean tree passes,
-and the real repo is checked. The real-repo test is expected to fail until
-PLAN.md stops naming the meridian-latex path (see the wave 1 report)."""
+and the real repo is checked. The real-repo test passes on this repository and
+fails only if a file here breaks the Qt or meridian-latex boundary rules."""
 
 import importlib.util
 from pathlib import Path
