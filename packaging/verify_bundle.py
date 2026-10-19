@@ -52,7 +52,12 @@ Licence gate (run_license_gate, plus the PYZ owner check in run):
       copy of a runtime file needs its own path key. An LGPL-3.0-only runtime is
       accepted only for files under _internal/PySide6/ or _internal/shiboken6/ (D4).
   (c) every DLL that a native binary imports, delay imports included, must be
-      bundled or on the Windows OS allowlist in [system_dlls].
+      bundled or on the Windows OS allowlist in [system_dlls]. A Microsoft runtime name
+      from [microsoft_prerequisites] is a system prerequisite: it passes only while its
+      file is absent from the bundle.
+  (c2) no Microsoft runtime file is in the bundle, in any folder. The names and patterns
+      are in [microsoft_prerequisites]: the Visual C++ runtime, ucrtbase.dll and the
+      api-ms-win- stubs. Each file found is named.
   (d) THIRD_PARTY_LICENSES.txt has a "== name version (SPDX) ==" header for every
       distribution and runtime, and at least 200 characters of licence text under
       each header. LICENSES/ holds the LGPL, GPL and MSL texts, and NOTICE.md names
@@ -1390,7 +1395,7 @@ def load_native_runtimes(path: Path, manifest: dict) -> tuple[list[str], list[di
     """Read packaging/native_runtimes.toml. A missing or malformed file is a FAIL.
 
     Each [[runtime]] `files` list names files. Its `sha256` table is keyed by path relative
-    to the bundle root, for example "_internal/PySide6/MSVCP140.dll" (D2). Every listed name
+    to the bundle root, for example "_internal/python3.dll" (D2). Every listed name
     needs at least one path key. Every path key needs a 64-digit lower-case hex digest and
     a listed file name. A key that is not a bundle-relative path fails, and so does a
     duplicate. An LGPL-3.0-only runtime is accepted only when every path is under
@@ -1568,14 +1573,35 @@ def check_native_binaries(root: Path, manifest: dict, inventory: dict, runtimes:
     return problems
 
 
+def load_microsoft_prerequisites(manifest: dict) -> tuple[set[str], list[str]]:
+    """(names, patterns) from [microsoft_prerequisites], lower-cased. A missing table or key raises, and the check fails."""
+    table = manifest["microsoft_prerequisites"]
+    names = {str(name).lower() for name in table["names"]}
+    patterns = [str(pattern).lower() for pattern in table["patterns"]]
+    if not names or not patterns:
+        raise ValueError("[microsoft_prerequisites] must list names and patterns")
+    return names, patterns
+
+
+def is_microsoft_runtime_name(name: str, names: set[str], patterns: list[str]) -> bool:
+    """True when a file name is a Microsoft runtime file: an exact listed name, or a listed pattern."""
+    lower = name.lower()
+    return lower in names or any(fnmatch.fnmatchcase(lower, pattern) for pattern in patterns)
+
+
 def check_native_imports(root: Path, manifest: dict, read_imports: Callable[[Path], list[str]] | None = None) -> list[str]:
-    """Every DLL a shipped native binary imports must be bundled or on the OS allowlist."""
+    """Every DLL a shipped native binary imports must be bundled or on the OS allowlist.
+
+    A Microsoft runtime name is a system prerequisite (see [microsoft_prerequisites]). It is
+    accepted only while its file is absent from the bundle. A bundled copy is reported here too.
+    """
     if read_imports is None:
         import pefile  # noqa: F401 - a missing pefile fails the whole check, not each file
     reader = read_imports or _pe_import_names
     system = manifest["system_dlls"]
     allowed_names = {name.lower() for name in system["names"]}
     prefixes = tuple(prefix.lower() for prefix in system["prefixes"])
+    ms_names, ms_patterns = load_microsoft_prerequisites(manifest)
     bundled = {p.name.lower() for p in root.rglob("*.dll") if p.is_file()}
     problems: list[str] = []
     for path in _native_files(root):
@@ -1586,9 +1612,27 @@ def check_native_imports(root: Path, manifest: dict, read_imports: Callable[[Pat
             problems.append(f"{rel}: PE import table could not be read ({exc.__class__.__name__}: {exc}) (fail closed)")
             continue
         for dll in sorted(imports):
+            if is_microsoft_runtime_name(dll, ms_names, ms_patterns):
+                if dll in bundled:
+                    problems.append(f"{rel} imports {dll}, a Microsoft runtime file that must not be bundled")
+                continue  # a system prerequisite the user installs, absent from the bundle
             if dll in bundled or dll in allowed_names or dll.startswith(prefixes):
                 continue
             problems.append(f"{rel} imports {dll}, which is neither bundled nor on the Windows OS allowlist")
+    return problems
+
+
+def check_microsoft_runtime_absent(root: Path, manifest: dict) -> list[str]:
+    """No Microsoft runtime file or folder in any folder of the bundle (item c2). Each one found is named."""
+    names, patterns = load_microsoft_prerequisites(manifest)
+    problems: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if is_microsoft_runtime_name(path.name, names, patterns):
+            kind = "folder" if path.is_dir() else "file"
+            problems.append(
+                f"Microsoft runtime {kind} must not be bundled; users install the Visual C++ redistributable "
+                f"instead: {rel_posix(root, path)}"
+            )
     return problems
 
 
@@ -1742,6 +1786,7 @@ def run_license_gate(
     sections.append(
         ("native imports bundled or Windows OS DLLs", _run_check(check_native_imports, root, manifest, read_imports))
     )
+    sections.append(("Microsoft runtime not bundled", _run_check(check_microsoft_runtime_absent, root, manifest)))
     sections.append(
         ("licence and notice artifacts present", _run_check(check_required_artifacts, root, manifest, inventory, runtimes))
     )

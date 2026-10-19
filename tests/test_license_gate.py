@@ -13,6 +13,7 @@ import importlib.util
 import re
 import shutil
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -51,22 +52,6 @@ spdx = "Apache-2.0"
 files = ["libcrypto-3-x64.dll"]
 sha256 = { "_internal/libcrypto-3-x64.dll" = "@STUB@" }
 notice_url = "https://www.openssl.org/source/license.html"
-
-[[runtime]]
-name = "MSVC runtime"
-version = "14.40"
-spdx = "LicenseRef-Microsoft-VC-Redist"
-files = ["VCRUNTIME140.dll"]
-sha256 = { "_internal/VCRUNTIME140.dll" = "@STUB@" }
-notice_url = "https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files"
-
-[[runtime]]
-name = "UCRT"
-version = "10.0.26100.0"
-spdx = "LicenseRef-Microsoft-Windows-SDK"
-files = ["api-ms-win-core-synch-l1-1-0.dll"]
-sha256 = { "_internal/api-ms-win-core-synch-l1-1-0.dll" = "@STUB@" }
-notice_url = "https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment"
 """
 RUNTIMES_TOML = RUNTIMES_TEMPLATE.replace("@STUB@", STUB_SHA)
 
@@ -78,14 +63,12 @@ HEADERS = [
     "== keyring 25.7.0 (MIT) ==",
     "== CPython 3.12.0 (PSF-2.0) ==",
     "== OpenSSL 3.0.0 (Apache-2.0) ==",
-    "== MSVC runtime 14.40 (LicenseRef-Microsoft-VC-Redist) ==",
-    "== UCRT 10.0.26100.0 (LicenseRef-Microsoft-Windows-SDK) ==",
 ]
 
 NOTICE = (
     "# Third-party notices\n\n"
     "PySide6, PySide6_Essentials, PySide6_Addons and shiboken6 6.12.0, Qt 6.12.0, LGPL-3.0-only.\n"
-    "keyring (MIT). CPython (PSF-2.0). OpenSSL (Apache-2.0). MSVC runtime. UCRT.\n"
+    "keyring (MIT). CPython (PSF-2.0). OpenSSL (Apache-2.0).\n"
 )
 
 EULA = (
@@ -166,7 +149,7 @@ def build_valid_bundle(tmp_path: Path) -> tuple[Path, Path]:
     (internal / "PySide6").mkdir(parents=True)
     (root / "LICENSES").mkdir()
     (root / "MeridianDesktop.exe").write_bytes(b"MZ application stub")
-    for name in ("python3.dll", "_socket.pyd", "libcrypto-3-x64.dll", "VCRUNTIME140.dll", "api-ms-win-core-synch-l1-1-0.dll"):
+    for name in ("python3.dll", "_socket.pyd", "libcrypto-3-x64.dll"):
         (internal / name).write_bytes(STUB)
     (internal / "PySide6" / "QtCore.pyd").write_bytes(STUB)
 
@@ -473,22 +456,22 @@ def test_runtime_file_without_sha256_fails_and_is_named(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
     bad = tmp_path / "no_hash.toml"
     bad.write_text(
-        RUNTIMES_TOML.replace('sha256 = { "_internal/VCRUNTIME140.dll" = "' + STUB_SHA + '" }', "sha256 = {}"),
+        RUNTIMES_TOML.replace('sha256 = { "_internal/libcrypto-3-x64.dll" = "' + STUB_SHA + '" }', "sha256 = {}"),
         encoding="utf-8",
     )
     sections = run_gate(root, bad)
     problems = section_problems(sections, "native runtimes listed")
-    assert any("VCRUNTIME140.dll" in p and "has no sha256" in p for p in problems), problems
+    assert any("libcrypto-3-x64.dll" in p and "has no sha256" in p for p in problems), problems
 
 
 def test_runtime_without_sha256_table_fails_and_is_named(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
     bad = tmp_path / "no_table.toml"
-    text = "\n".join(line for line in RUNTIMES_TOML.splitlines() if not line.startswith('sha256 = { "_internal/api-ms'))
+    text = "\n".join(line for line in RUNTIMES_TOML.splitlines() if not line.startswith('sha256 = { "_internal/libcrypto'))
     bad.write_text(text, encoding="utf-8")
     sections = run_gate(root, bad)
     problems = section_problems(sections, "native runtimes listed")
-    assert any("UCRT" in p and "sha256" in p for p in problems), problems
+    assert any("OpenSSL" in p and "sha256" in p for p in problems), problems
 
 
 def test_malformed_runtime_digest_fails_and_is_named(tmp_path):
@@ -509,9 +492,9 @@ def test_bundled_runtime_file_with_wrong_content_fails_and_is_named(tmp_path):
 
 def test_runtime_file_missing_from_bundle_fails_and_is_named(tmp_path):
     root, runtimes = build_valid_bundle(tmp_path)
-    (root / "_internal" / "VCRUNTIME140.dll").unlink()
+    (root / "_internal" / "libcrypto-3-x64.dll").unlink()
     problems = problems_of(run_gate(root, runtimes))
-    assert any("VCRUNTIME140.dll" in p and "not in the bundle" in p for p in problems), problems
+    assert any("libcrypto-3-x64.dll" in p and "not in the bundle" in p for p in problems), problems
 
 
 def test_microsoft_spdx_ids_are_allowed_for_runtimes_only():
@@ -525,10 +508,10 @@ def test_microsoft_spdx_ids_are_allowed_for_runtimes_only():
 def test_unlisted_runtime_licence_is_rejected(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
     bad = tmp_path / "unknown_licence.toml"
-    bad.write_text(RUNTIMES_TOML.replace("LicenseRef-Microsoft-VC-Redist", "LicenseRef-Microsoft-Unknown"), encoding="utf-8")
+    bad.write_text(RUNTIMES_TOML.replace('spdx = "Apache-2.0"', 'spdx = "LicenseRef-Unlisted"'), encoding="utf-8")
     sections = run_gate(root, bad)
     problems = section_problems(sections, "native runtimes listed")
-    assert any("MSVC runtime" in p and "LicenseRef-Microsoft-Unknown" in p for p in problems), problems
+    assert any("OpenSSL" in p and "LicenseRef-Unlisted" in p for p in problems), problems
 
 
 # ---------------------------------------------------------------- (d) artifacts
@@ -1053,60 +1036,64 @@ def test_file_shared_by_family_and_a_permissive_distribution_fails_and_names_bot
 # ---------------------------------------------------------------- D2: digests are keyed by bundle path
 
 
-def _vc_runtimes(tmp_path: Path, digests: dict[str, str]) -> Path:
-    """native_runtimes.toml with the MSVC runtime's sha256 table replaced by `digests` (path -> digest)."""
+def _openssl_runtimes(tmp_path: Path, digests: dict[str, str]) -> Path:
+    """native_runtimes.toml with the OpenSSL runtime's sha256 table replaced by `digests` (path -> digest).
+
+    OpenSSL stands in for a runtime that ships in more than one folder. The Visual C++ runtime, which
+    used to, is no longer bundled.
+    """
     table = ", ".join(f'"{path}" = "{digest}"' for path, digest in digests.items())
     text = RUNTIMES_TOML.replace(
-        'sha256 = { "_internal/VCRUNTIME140.dll" = "' + STUB_SHA + '" }',
+        'sha256 = { "_internal/libcrypto-3-x64.dll" = "' + STUB_SHA + '" }',
         f"sha256 = {{ {table} }}",
     )
-    runtimes = tmp_path / "vc_runtimes.toml"
+    runtimes = tmp_path / "openssl_runtimes.toml"
     runtimes.write_text(text, encoding="utf-8")
     return runtimes
 
 
 def test_two_files_with_one_name_in_different_folders_are_verified_separately(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
-    other = b"14.44 copy of the Visual C++ runtime"
-    (root / "_internal" / "PySide6" / "VCRUNTIME140.dll").write_bytes(other)
-    runtimes = _vc_runtimes(
+    other = b"a second copy of the OpenSSL runtime, with other bytes"
+    (root / "_internal" / "PySide6" / "libcrypto-3-x64.dll").write_bytes(other)
+    runtimes = _openssl_runtimes(
         tmp_path,
         {
-            "_internal/VCRUNTIME140.dll": STUB_SHA,
-            "_internal/PySide6/VCRUNTIME140.dll": hashlib.sha256(other).hexdigest(),
+            "_internal/libcrypto-3-x64.dll": STUB_SHA,
+            "_internal/PySide6/libcrypto-3-x64.dll": hashlib.sha256(other).hexdigest(),
         },
     )
     problems = problems_of(run_gate(root, runtimes))
-    assert not any("VCRUNTIME140" in p for p in problems), problems
+    assert not any("libcrypto-3-x64.dll" in p for p in problems), problems
 
 
 def test_copy_in_one_folder_is_not_checked_against_the_digest_of_another(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
-    (root / "_internal" / "PySide6" / "VCRUNTIME140.dll").write_bytes(b"14.44 copy of the Visual C++ runtime")
-    runtimes = _vc_runtimes(
+    (root / "_internal" / "PySide6" / "libcrypto-3-x64.dll").write_bytes(b"a second copy with other bytes")
+    runtimes = _openssl_runtimes(
         tmp_path,
-        {"_internal/VCRUNTIME140.dll": STUB_SHA, "_internal/PySide6/VCRUNTIME140.dll": STUB_SHA},
+        {"_internal/libcrypto-3-x64.dll": STUB_SHA, "_internal/PySide6/libcrypto-3-x64.dll": STUB_SHA},
     )
     problems = problems_of(run_gate(root, runtimes))
-    assert any("sha256 differs" in p and "_internal/PySide6/VCRUNTIME140.dll" in p for p in problems), problems
+    assert any("sha256 differs" in p and "_internal/PySide6/libcrypto-3-x64.dll" in p for p in problems), problems
 
 
 def test_bundled_runtime_copy_without_a_path_key_fails_and_is_named(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
-    (root / "_internal" / "PySide6" / "VCRUNTIME140.dll").write_bytes(STUB)
-    runtimes = _vc_runtimes(tmp_path, {"_internal/VCRUNTIME140.dll": STUB_SHA})
+    (root / "_internal" / "PySide6" / "libcrypto-3-x64.dll").write_bytes(STUB)
+    runtimes = _openssl_runtimes(tmp_path, {"_internal/libcrypto-3-x64.dll": STUB_SHA})
     problems = problems_of(run_gate(root, runtimes))
     assert any(
-        "has no sha256 for its own path" in p and "_internal/PySide6/VCRUNTIME140.dll" in p for p in problems
+        "has no sha256 for its own path" in p and "_internal/PySide6/libcrypto-3-x64.dll" in p for p in problems
     ), problems
 
 
 def test_name_only_digest_key_does_not_verify_a_bundled_copy(tmp_path):
     root, _runtimes = build_valid_bundle(tmp_path)
-    runtimes = _vc_runtimes(tmp_path, {"VCRUNTIME140.dll": STUB_SHA})
+    runtimes = _openssl_runtimes(tmp_path, {"libcrypto-3-x64.dll": STUB_SHA})
     problems = problems_of(run_gate(root, runtimes))
     assert any(
-        "has no sha256 for its own path" in p and "_internal/VCRUNTIME140.dll" in p for p in problems
+        "has no sha256 for its own path" in p and "_internal/libcrypto-3-x64.dll" in p for p in problems
     ), problems
 
 
@@ -1235,3 +1222,218 @@ def test_lgpl_runtime_outside_pyside_folders_fails_and_is_named(tmp_path):
     # The rejected runtime is not inventoried, so its file is also reported as not inventoried.
     native = section_problems(sections, "native binaries inventoried")
     assert any("pyside6.abi3.dll" in p and "not inventoried" in p for p in native), native
+
+
+# ---------------------------------------------------------------- Microsoft runtime files are not bundled
+
+MS_SECTION = "Microsoft runtime not bundled"
+IMPORT_SECTION = "native imports bundled or Windows OS DLLs"
+MS_RUNTIME_NAMES = {
+    "MSVCP140.dll", "MSVCP140_1.dll", "MSVCP140_2.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "ucrtbase.dll",
+}
+MS_RUNTIME_PATTERNS = {"MSVCP140*.dll", "VCRUNTIME140*.dll", "ucrtbase.dll", "api-ms-win-*.dll"}
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+
+def _load_build():
+    """packaging/build.py as a module. Importing it has no side effects, and main() is not run."""
+    spec = importlib.util.spec_from_file_location("build_for_license_gate", REPO / "packaging" / "build.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "MSVCP140.dll",
+        "_internal/MSVCP140.dll",
+        "_internal/PySide6/MSVCP140_1.dll",
+        "_internal/PySide6/MSVCP140_2.dll",
+        "_internal/PySide6/VCRUNTIME140.dll",
+        "_internal/shiboken6/VCRUNTIME140_1.dll",
+        "_internal/ucrtbase.dll",
+        "_internal/api-ms-win-core-synch-l1-1-0.dll",
+        "_internal/PySide6/plugins/styles/api-ms-win-crt-time-l1-1-0.dll",
+    ],
+)
+def test_microsoft_runtime_file_in_the_bundle_fails_and_is_named(tmp_path, rel):
+    root, runtimes = build_valid_bundle(tmp_path)
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(STUB)
+    problems = section_problems(run_gate(root, runtimes), MS_SECTION)
+    assert any(rel in p and "must not be bundled" in p for p in problems), problems
+
+
+def test_microsoft_runtime_file_name_is_matched_whatever_its_case(tmp_path):
+    root, runtimes = build_valid_bundle(tmp_path)
+    (root / "_internal" / "msvcp140_1.DLL").write_bytes(STUB)
+    problems = section_problems(run_gate(root, runtimes), MS_SECTION)
+    assert any("msvcp140_1.DLL" in p for p in problems), problems
+
+
+def test_valid_bundle_has_the_microsoft_check_and_it_passes(tmp_path):
+    root, runtimes = build_valid_bundle(tmp_path)
+    sections = run_gate(root, runtimes)
+    assert MS_SECTION in [title for title, _problems in sections]
+    assert section_problems(sections, MS_SECTION) == []
+
+
+def test_microsoft_check_fails_closed_without_its_manifest_table(tmp_path):
+    root, _runtimes = build_valid_bundle(tmp_path)
+    problems = vb._run_check(vb.check_microsoft_runtime_absent, root, {})
+    assert problems and all("(fail closed)" in p for p in problems), problems
+
+
+def test_microsoft_runtime_import_is_accepted_while_its_file_is_absent(tmp_path):
+    root, runtimes = build_valid_bundle(tmp_path)
+    imports = dict(VALID_IMPORTS)
+    imports["QtCore.pyd"] = [
+        "python3.dll", "KERNEL32.dll", "VCRUNTIME140.dll", "MSVCP140_1.dll", "ucrtbase.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+    ]
+    sections = run_gate(root, runtimes, imports)
+    assert section_problems(sections, IMPORT_SECTION) == [], problems_of(sections)
+
+
+def test_microsoft_runtime_import_is_refused_when_its_file_is_bundled(tmp_path):
+    root, runtimes = build_valid_bundle(tmp_path)
+    (root / "_internal" / "VCRUNTIME140.dll").write_bytes(STUB)
+    imports = dict(VALID_IMPORTS)
+    imports["QtCore.pyd"] = ["python3.dll", "VCRUNTIME140.dll"]
+    sections = run_gate(root, runtimes, imports)
+    problems = section_problems(sections, IMPORT_SECTION)
+    assert any("QtCore.pyd" in p and "vcruntime140.dll" in p.lower() and "must not be bundled" in p for p in problems), problems
+
+
+def test_manifest_lists_the_microsoft_prerequisites_and_no_longer_lists_ucrt_as_a_system_dll():
+    manifest = vb.load_manifest(MANIFEST)
+    table = manifest["microsoft_prerequisites"]
+    assert set(table["names"]) == MS_RUNTIME_NAMES
+    assert set(table["patterns"]) == MS_RUNTIME_PATTERNS
+    assert table["redistributable_url"] == VC_REDIST_URL
+    assert "ucrtbase.dll" not in manifest["system_dlls"]["names"]
+    assert manifest["system_dlls"]["prefixes"] == []
+
+
+def test_build_removal_patterns_are_the_manifest_patterns():
+    build = _load_build()
+    manifest = vb.load_manifest(MANIFEST)
+    assert sorted(build.MICROSOFT_RUNTIME_PATTERNS) == sorted(manifest["microsoft_prerequisites"]["patterns"])
+    build.check_microsoft_manifest(manifest)
+
+
+def test_build_refuses_to_run_when_the_patterns_drift():
+    build = _load_build()
+    drifted = {"microsoft_prerequisites": {"patterns": ["MSVCP140*.dll"], "redistributable_url": VC_REDIST_URL}}
+    with pytest.raises(SystemExit, match="differ from MICROSOFT_RUNTIME_PATTERNS"):
+        build.check_microsoft_manifest(drifted)
+
+
+def test_build_refuses_to_run_when_the_redistributable_link_differs():
+    build = _load_build()
+    manifest = vb.load_manifest(MANIFEST)
+    changed = {
+        "microsoft_prerequisites": dict(manifest["microsoft_prerequisites"], redistributable_url="https://example.com/x.exe")
+    }
+    with pytest.raises(SystemExit, match="redistributable_url"):
+        build.check_microsoft_manifest(changed)
+
+
+def test_build_removes_microsoft_runtime_files_in_every_folder_and_logs_each(tmp_path, capsys):
+    build = _load_build()
+    bundle = tmp_path / "MeridianDesktop"
+    doomed = [
+        "_internal/MSVCP140.dll",
+        "_internal/MSVCP140_1.dll",
+        "_internal/VCRUNTIME140.dll",
+        "_internal/VCRUNTIME140_1.dll",
+        "_internal/PySide6/MSVCP140_1.dll",
+        "_internal/PySide6/MSVCP140_2.dll",
+        "_internal/PySide6/VCRUNTIME140.dll",
+        "_internal/shiboken6/MSVCP140.dll",
+        "_internal/shiboken6/VCRUNTIME140_1.dll",
+        "_internal/ucrtbase.dll",
+        "_internal/api-ms-win-core-synch-l1-1-0.dll",
+        "_internal/PySide6/plugins/styles/api-ms-win-crt-time-l1-1-0.dll",
+    ]
+    kept = [
+        "MeridianDesktop.exe",
+        "_internal/python312.dll",
+        "_internal/PySide6/Qt6Core.dll",
+        "_internal/PySide6/plugins/platforms/qwindows.dll",
+    ]
+    for rel in doomed + kept:
+        target = bundle / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(STUB)
+    removed = build.remove_microsoft_runtime(bundle)
+    assert sorted(removed) == sorted(doomed)
+    for rel in doomed:
+        assert not (bundle / rel).exists(), rel
+    for rel in kept:
+        assert (bundle / rel).is_file(), rel
+    out = capsys.readouterr().out
+    for rel in doomed:
+        assert f"removed Microsoft runtime file: {rel}" in out, rel
+
+
+def test_failed_removal_stops_the_build(tmp_path, monkeypatch):
+    build = _load_build()
+    bundle = tmp_path / "MeridianDesktop"
+    (bundle / "_internal").mkdir(parents=True)
+    (bundle / "_internal" / "MSVCP140.dll").write_bytes(STUB)
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError("held open by another process")
+
+    monkeypatch.setattr(build.Path, "unlink", refuse)
+    with pytest.raises(SystemExit, match="could not remove Microsoft runtime file _internal/MSVCP140.dll"):
+        build.remove_microsoft_runtime(bundle)
+
+
+def test_bundle_readme_names_the_redistributable_link_and_the_ucrt(tmp_path, monkeypatch):
+    build = _load_build()
+    text = (REPO / "packaging" / "README.bundle.txt").read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    assert "Microsoft Visual C++ Redistributable (x64) 2015-2022" in flat
+    assert "NOT included in this folder" in flat
+    assert VC_REDIST_URL in flat
+    assert "Universal CRT" in flat and "Windows 10 and later" in flat
+    build.check_bundle_readme_source()
+    target = tmp_path / "README.txt"
+    monkeypatch.setattr(build, "BUNDLE_README", target)
+    build.write_bundle_readme()
+    assert target.read_text(encoding="utf-8") == text
+
+
+def test_native_runtimes_list_no_microsoft_file():
+    manifest = vb.load_manifest(MANIFEST)
+    names, patterns = vb.load_microsoft_prerequisites(manifest)
+    data = tomllib.loads((REPO / "packaging" / "native_runtimes.toml").read_text(encoding="utf-8"))
+    for entry in data["runtime"]:
+        assert "microsoft" not in entry["name"].lower(), entry["name"]
+        for file_name in entry["files"]:
+            assert not vb.is_microsoft_runtime_name(file_name, names, patterns), file_name
+
+
+def test_eula_has_a_requirements_section_before_network_use():
+    text = (REPO / "EULA.txt").read_text(encoding="utf-8")
+    assert text.index("7. Requirements") < text.index("8. Network use") < text.index("9. Termination")
+    section = text[text.index("7. Requirements"):text.index("8. Network use")]
+    flat = " ".join(section.split())
+    assert "Microsoft Visual C++ 2015-2022 Redistributable (x64)" in flat
+    assert VC_REDIST_URL in section
+    assert "Microsoft's own licence governs that download" in flat
+
+
+def test_notice_has_prerequisites_and_no_microsoft_runtime_rows():
+    text = (REPO / "NOTICE.md").read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    assert "## Prerequisites" in text
+    assert VC_REDIST_URL in flat
+    assert "Universal CRT" in flat
+    assert "| Microsoft VC++ runtime |" not in text
+    assert "| Microsoft UCRT |" not in text
+    assert "LicenseRef-Microsoft" not in text

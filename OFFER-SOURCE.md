@@ -35,11 +35,12 @@ publishes next to the archive.
 For at least three years from the date you receive this copy of MeridianDesktop, and for as
 long as we offer customer support for this version, we will give any third party who asks the
 complete corresponding source code for the components above. There is no charge beyond the
-cost of a physical copy. This is the written offer that LGPL-3.0 section 6(b) describes. Send
-requests to hello@usemeridian.us.
+cost of a physical copy. This is the written offer under GPL-3.0 section 6(b)(1), which LGPL-3.0
+section 4(d)(0) applies to the corresponding source of the Qt components. Send requests to
+hello@usemeridian.us.
 
 The upstream locations in the table are also offered as equivalent access to the corresponding
-source, under LGPL-3.0 section 6(d).
+source, under GPL-3.0 section 6(d).
 
 ## Host decision
 

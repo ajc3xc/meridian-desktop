@@ -14,7 +14,7 @@
 #   files         exact file names, without folder parts, as they appear in the bundle
 #   sha256        a [runtime.sha256] table. Each key is the path of one bundled copy, relative
 #                 to the bundle root (dist/MeridianDesktop), for example
-#                 "_internal/PySide6/MSVCP140.dll". Each value is that copy's 64-digit
+#                 "_internal/python3.dll". Each value is that copy's 64-digit
 #                 lower-case sha256. Every name in files needs at least one key, and every
 #                 bundled copy of a listed name needs its own key. Several keys may share one
 #                 file name. A key's file name must be in files.
@@ -28,9 +28,6 @@
 # Versions: pixi env meridian-desktop-8257345453352236247 (env "default"), conda-meta files,
 # read 2026-10-17. The Qt entry's version is PySide6 6.12.0 from its dist-info METADATA.
 #
-# The Microsoft entries are split into two runtimes because the VC++ runtime and the UCRT are
-# separate packages with different versions. Their SPDX ids, LicenseRef-Microsoft-VC-Redist and
-# LicenseRef-Microsoft-Windows-SDK, cover only the redistributable runtime files listed here.
 #
 # CPython's extension modules (.pyd) are listed under CPython. No dist-info in the bundle owns them.
 #
@@ -157,133 +154,13 @@ notice_url = "https://zlib.net/zlib_license.html"
 "_internal/zlib.dll" = "f4f26ea6300c8449daad4650915e01ac80aafc6ca8b73a50be450f1fb66cdd63"
 
 
-# Visual C++ runtime (D2). Two versions ship in the bundle, and both are kept. Version
-# 14.51.36247 is at the bundle root: _internal/MSVCP140.dll, _internal/VCRUNTIME140.dll and
-# _internal/VCRUNTIME140_1.dll. Version 14.44.35211.0 is in _internal/PySide6/ and
-# _internal/shiboken6/. _internal/PySide6/MSVCP140_1.dll and _internal/PySide6/MSVCP140_2.dll
-# exist only in _internal/PySide6/, as 14.44.35211.0. Each copy has its own path digest, and
-# nothing is pruned from either version.
-[[runtime]]
-name = "Microsoft VC++ runtime"
-version = "14.51.36247"
-spdx = "LicenseRef-Microsoft-VC-Redist"
-files = [
-    "MSVCP140.dll",
-    "MSVCP140_1.dll",
-    "MSVCP140_2.dll",
-    "VCRUNTIME140.dll",
-    "VCRUNTIME140_1.dll",
-]
-notice_url = "https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files"
-
-[runtime.sha256]
-"_internal/MSVCP140.dll" = "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
-"_internal/PySide6/MSVCP140.dll" = "f6f1d55bfd64027820ddce48f9cd8cf46d53bfa34047e6acf4ef348d492a05cb"
-"_internal/shiboken6/MSVCP140.dll" = "1ba4d7c0a95d375da138a057a57593b33510ad5bda6c5e2686afd68faa5b4231"
-"_internal/PySide6/MSVCP140_1.dll" = "2be87527c41e1ba8aff48e326e0adcd4743516e0bbcc9304986c726e27de6aca"
-"_internal/PySide6/MSVCP140_2.dll" = "6a72ed8a87eae1671640bd1ca98eccb989f1772ae46ab84594e385bf6d4ac4fb"
-"_internal/PySide6/VCRUNTIME140.dll" = "a36e0cb185eb89533ed96d4568138f86a1315756a8b2644c5963a8ce23e32101"
-"_internal/VCRUNTIME140.dll" = "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
-"_internal/shiboken6/VCRUNTIME140.dll" = "e7be9112ee9a5b9f44b44bff24cb761cca9b1ed7550b612f77b70edfcf5fdabf"
-"_internal/PySide6/VCRUNTIME140_1.dll" = "302b1e160e858602490a55e32ae2e29ddfc0bec2a188e19550cb655cdaa58f9c"
-"_internal/VCRUNTIME140_1.dll" = "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
-"_internal/shiboken6/VCRUNTIME140_1.dll" = "f02cd4a862b85a9a3153d27e15e5a213f5df8e3d77004ed2e87b8a7e8873d97c"
-
-[[runtime]]
-name = "Microsoft UCRT"
-version = "10.0.26100.0"
-spdx = "LicenseRef-Microsoft-Windows-SDK"
-files = [
-    "ucrtbase.dll",
-    "api-ms-win-core-console-l1-1-0.dll",
-    "api-ms-win-core-datetime-l1-1-0.dll",
-    "api-ms-win-core-debug-l1-1-0.dll",
-    "api-ms-win-core-errorhandling-l1-1-0.dll",
-    "api-ms-win-core-fibers-l1-1-0.dll",
-    "api-ms-win-core-fibers-l1-1-1.dll",
-    "api-ms-win-core-file-l1-1-0.dll",
-    "api-ms-win-core-file-l1-2-0.dll",
-    "api-ms-win-core-file-l2-1-0.dll",
-    "api-ms-win-core-handle-l1-1-0.dll",
-    "api-ms-win-core-heap-l1-1-0.dll",
-    "api-ms-win-core-interlocked-l1-1-0.dll",
-    "api-ms-win-core-kernel32-legacy-l1-1-1.dll",
-    "api-ms-win-core-libraryloader-l1-1-0.dll",
-    "api-ms-win-core-localization-l1-2-0.dll",
-    "api-ms-win-core-memory-l1-1-0.dll",
-    "api-ms-win-core-namedpipe-l1-1-0.dll",
-    "api-ms-win-core-processenvironment-l1-1-0.dll",
-    "api-ms-win-core-processthreads-l1-1-0.dll",
-    "api-ms-win-core-processthreads-l1-1-1.dll",
-    "api-ms-win-core-profile-l1-1-0.dll",
-    "api-ms-win-core-rtlsupport-l1-1-0.dll",
-    "api-ms-win-core-string-l1-1-0.dll",
-    "api-ms-win-core-synch-l1-1-0.dll",
-    "api-ms-win-core-synch-l1-2-0.dll",
-    "api-ms-win-core-sysinfo-l1-1-0.dll",
-    "api-ms-win-core-sysinfo-l1-2-0.dll",
-    "api-ms-win-core-timezone-l1-1-0.dll",
-    "api-ms-win-core-util-l1-1-0.dll",
-    "api-ms-win-crt-conio-l1-1-0.dll",
-    "api-ms-win-crt-convert-l1-1-0.dll",
-    "api-ms-win-crt-environment-l1-1-0.dll",
-    "api-ms-win-crt-filesystem-l1-1-0.dll",
-    "api-ms-win-crt-heap-l1-1-0.dll",
-    "api-ms-win-crt-locale-l1-1-0.dll",
-    "api-ms-win-crt-math-l1-1-0.dll",
-    "api-ms-win-crt-process-l1-1-0.dll",
-    "api-ms-win-crt-runtime-l1-1-0.dll",
-    "api-ms-win-crt-stdio-l1-1-0.dll",
-    "api-ms-win-crt-string-l1-1-0.dll",
-    "api-ms-win-crt-time-l1-1-0.dll",
-    "api-ms-win-crt-utility-l1-1-0.dll",
-]
-notice_url = "https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment"
-
-[runtime.sha256]
-"_internal/ucrtbase.dll" = "3239227d27667ba20d10a880751924e5719de0078f9fce232d149d383f7681f6"
-"_internal/api-ms-win-core-console-l1-1-0.dll" = "015bd08815c7b934a8952c3a7578e9ce59f21136e8a880d42bbd414bec2c6058"
-"_internal/api-ms-win-core-datetime-l1-1-0.dll" = "5534812cdbdae94ba45cb216e5eb9af686b853948df54365103555abbbaf9d9a"
-"_internal/api-ms-win-core-debug-l1-1-0.dll" = "837d2b1b2cd03e03fc6ccb050698b6b5763af17c201304872342a5eae9e0a2d2"
-"_internal/api-ms-win-core-errorhandling-l1-1-0.dll" = "de43b165f568c276c00e95acd454e3092f352a18e95874595f4f4658c06d2ec7"
-"_internal/api-ms-win-core-fibers-l1-1-0.dll" = "3cebc45bf479ad74cfabf2c6bfd4994d7ad639ed1221025981d19cedf9ce0416"
-"_internal/api-ms-win-core-fibers-l1-1-1.dll" = "5ef70308bcca628ce6b0e2856b15b1c7ae340c3f9bbbc4c1071d8c191a34a5c3"
-"_internal/api-ms-win-core-file-l1-1-0.dll" = "250ac829f2617bcac1c6e5b8c4f630462e20765863ba573526a3e11bbfb94a9a"
-"_internal/api-ms-win-core-file-l1-2-0.dll" = "ae14079a114733f60ce87b92cba42acd8083c2cd67594e53bc37dc0b97a4b465"
-"_internal/api-ms-win-core-file-l2-1-0.dll" = "914bf26a298713119477ea0a8e7bd43171b91344ebe24fb47ad77c49686e3d87"
-"_internal/api-ms-win-core-handle-l1-1-0.dll" = "ab5489955e371b15f77906c08ec3c7affe2c7a46a08c514ca628768b4478974b"
-"_internal/api-ms-win-core-heap-l1-1-0.dll" = "c70f9644d8377fa39c5b71f2e9734c1400d7598904fdeb772e8502099982dcb7"
-"_internal/api-ms-win-core-interlocked-l1-1-0.dll" = "f8129710188e407bb0e6f46d30aeba277d67b947ece5fe09e883fde2323f3ae6"
-"_internal/api-ms-win-core-kernel32-legacy-l1-1-1.dll" = "5200b16cb2ddc61cfc07373a9a84aa85a3ab50806ca96c879c883275832944c1"
-"_internal/api-ms-win-core-libraryloader-l1-1-0.dll" = "48786fb88b001dcd1f63acea903d3ca9cc0b3060d5a325e3f2f3cbc3bfd53166"
-"_internal/api-ms-win-core-localization-l1-2-0.dll" = "9ec3898f7eba91faa28b51616c211a2689e3a13aeef8de6e13cb674e49d689eb"
-"_internal/api-ms-win-core-memory-l1-1-0.dll" = "3a6cbc524c99e1cd80d5368f5601402a37ad602528b1ab628093573ef638eb3b"
-"_internal/api-ms-win-core-namedpipe-l1-1-0.dll" = "97145ef89c44949fcf0f04ac834a8bc7d687ef49ee73ae9fc32f3c11136b7201"
-"_internal/api-ms-win-core-processenvironment-l1-1-0.dll" = "8bc7c10b1851aea644e9c9f381cdb935e091fee6b0be3d3aedc6fffaac96adb7"
-"_internal/api-ms-win-core-processthreads-l1-1-0.dll" = "d8030b777617c71f0f94564607699dbf7561487d779db9756aed378c5675213f"
-"_internal/api-ms-win-core-processthreads-l1-1-1.dll" = "f5e676713340f73a03a3d41a6ec9883b431da7d16c7f07bd0a920fb80e6c0753"
-"_internal/api-ms-win-core-profile-l1-1-0.dll" = "f023d47e44d3eea6b0743580f57e8c6ba81e79d5ebfa7da26250076c647b980e"
-"_internal/api-ms-win-core-rtlsupport-l1-1-0.dll" = "9746d8930704153578a628c010638a5f818ffe5a927e25591b108e256dc6afca"
-"_internal/api-ms-win-core-string-l1-1-0.dll" = "7c53ae24c982d16ffd1bf7f918d115b11b7f30e57bc7feaa18cb9781e4abb926"
-"_internal/api-ms-win-core-synch-l1-1-0.dll" = "56d9d62ca5dba79a6581b8d574a7d8b2a64a5ecb71e47dcf06ed0285708b1859"
-"_internal/api-ms-win-core-synch-l1-2-0.dll" = "f6482bbec5612c39ecb4822787a333f2b7570f7a5f922a4059be41ba957bb372"
-"_internal/api-ms-win-core-sysinfo-l1-1-0.dll" = "272d02765fdd3582618236c2d309abba069642f9bc1062ede069d0c144e17007"
-"_internal/api-ms-win-core-sysinfo-l1-2-0.dll" = "8a0900788859d0eb51c2f48f50cc6ed376a120b518100fa20e11d7702ccde260"
-"_internal/api-ms-win-core-timezone-l1-1-0.dll" = "ff35de6c03812b332e140f17dade25c5dd4775156da9eeb1eaae3fddd27236ec"
-"_internal/api-ms-win-core-util-l1-1-0.dll" = "191ef3e98641a57296f19d572d8eb62489470ff1ef6030d136af170c2f835173"
-"_internal/api-ms-win-crt-conio-l1-1-0.dll" = "54ee5ec719a051496ff60aa00dbeaa94b9a7d2cdac27fe9b7317f1a666b6a2aa"
-"_internal/api-ms-win-crt-convert-l1-1-0.dll" = "8b94662429171019fcd63c70bbf2095a075170599704a5e7dcdbe3da13f3a429"
-"_internal/api-ms-win-crt-environment-l1-1-0.dll" = "39e5929593709e8af3bc9e0a75ec1155778d6f4a247f4cdfc58928ad6db88434"
-"_internal/api-ms-win-crt-filesystem-l1-1-0.dll" = "5a8ecebac32edf4e1f3c5c6c1c8ea1a1add6cda4f9c9cb26f752fb295bea6865"
-"_internal/api-ms-win-crt-heap-l1-1-0.dll" = "c71080cbcb43bf1f8f3e391deb12a582eb0abefc80946f340675a2c616e4feb4"
-"_internal/api-ms-win-crt-locale-l1-1-0.dll" = "6c68648e524187e03c4ad9aaa4a99113c6ee9f29fb39cc0ed93f951975138e63"
-"_internal/api-ms-win-crt-math-l1-1-0.dll" = "d4fbcccbe29371cbce431e43b2eb4f7ba9a6f04a3d740a071f02457a505e9dc8"
-"_internal/api-ms-win-crt-process-l1-1-0.dll" = "47c1935942e3ac0812e4dcf18c0e265e565f0194a3349111c299712f5565f7ac"
-"_internal/api-ms-win-crt-runtime-l1-1-0.dll" = "72adc1b3677e0814d9c4ebf0964000e84bb2acf67336c8963061665e44f78029"
-"_internal/api-ms-win-crt-stdio-l1-1-0.dll" = "900afc3989673c9bb1a687ed38c192f46db9e6ba6d11a668898a539e7fc23798"
-"_internal/api-ms-win-crt-string-l1-1-0.dll" = "fcf12466cc12fd3b73611fc0763a5a1f9d44e90349513c34a0c83b0f36421793"
-"_internal/api-ms-win-crt-time-l1-1-0.dll" = "886e57c4a6adb299b38f02945369f590a67da4e79a798359fc60aaa067212d7c"
-"_internal/api-ms-win-crt-utility-l1-1-0.dll" = "5f8f26b216ade615b67a41f6fbbb910972fc6153315a65bb8f09912be50215b1"
+# Microsoft runtime files are not bundled, so they have no entries here. The Visual C++ 2015-2022
+# runtime (MSVCP140*.dll, VCRUNTIME140*.dll) and the Universal CRT (ucrtbase.dll and api-ms-win-*.dll)
+# were removed on purpose. build.py deletes them from the bundle, and verify_bundle.py fails the build
+# when any of them is present. Users install Microsoft's Visual C++ Redistributable (x64) first, from
+# https://aka.ms/vs/17/release/vc_redist.x64.exe. The Universal CRT comes with Windows 10 and later.
+# The names and patterns are in [microsoft_prerequisites] in packaging/lgpl_manifest.toml, and
+# packaging/README.bundle.txt tells the user what to install.
 
 # Qt for Python extension binaries (D4). pyside6.abi3.dll is in _internal/PySide6/ and
 # shiboken6.abi3.dll is in _internal/shiboken6/. Both are pinned by path. Their licence is the

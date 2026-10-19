@@ -94,8 +94,10 @@ forbidden_dlls = [
 ]
 
 # Non-Qt DLLs in the PySide6 folder, classified explicitly. allowed_other_dlls are
-# the MSVC runtime and PySide6's own core DLL, the only ones the closure needs. The
-# MSVC runtime must be named in packaging/native_runtimes.toml. pyside6.abi3 must be
+# the Visual C++ runtime files that the PySide6 wheel ships, and PySide6's own core DLL.
+# They are classified here so that the installed folder is fully accounted for. They
+# are not bundled: build.py removes the Visual C++ runtime files, and
+# [microsoft_prerequisites] names them as system prerequisites. pyside6.abi3 must be
 # pinned in [hashes]. forbidden_other_dlls are FFmpeg (QtMultimedia), the Mesa software
 # renderer, QML, and OpenMP and Concurrency runtimes. verify_bundle.py rejects any
 # bundled DLL, PYD or EXE with one of these stems, and build.py prunes them.
@@ -175,22 +177,46 @@ distributions = ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6",
 
 [system_dlls]
 # Windows OS DLLs a bundled binary may import without shipping them. Exact lower-case
-# file names, and the api-ms-win- API-set prefix. Each name is a Windows component, and
-# the ICU names are the ICU libraries that Windows 10 1703 and later ship (icu.dll,
-# icuin.dll and icuuc.dll are present in System32 on Windows 11). icuuc.dll is what
-# Qt6Core.dll imports. The other names are OS DLLs that the Qt, Python and app binaries
-# of the 2026-10-17 bundle import, read from their PE import tables.
+# file names. Each name is a Windows component, and the ICU names are the ICU libraries
+# that Windows 10 1703 and later ship (icu.dll, icuin.dll and icuuc.dll are present in
+# System32 on Windows 11). icuuc.dll is what Qt6Core.dll imports. The other names are OS
+# DLLs that the Qt, Python and app binaries of the 2026-10-17 bundle import, read from
+# their PE import tables. The Microsoft runtime names (the Visual C++ runtime, ucrtbase.dll
+# and the api-ms-win- stubs) are not listed here. They are in [microsoft_prerequisites],
+# which accepts them only while their files are absent from the bundle.
 names = [
     "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "shell32.dll",
     "ole32.dll", "oleaut32.dll", "ws2_32.dll", "bcrypt.dll", "crypt32.dll",
-    "ucrtbase.dll", "icu.dll", "icuin.dll", "icuuc.dll",
+    "icu.dll", "icuin.dll", "icuuc.dll",
     "authz.dll", "comctl32.dll", "comdlg32.dll", "d3d9.dll", "d3d11.dll", "d3d12.dll",
     "dwmapi.dll", "dwrite.dll", "dxgi.dll", "imm32.dll", "iphlpapi.dll", "mpr.dll",
     "mscms.dll", "netapi32.dll", "ntdll.dll", "propsys.dll", "rpcrt4.dll", "setupapi.dll",
     "shlwapi.dll", "uiautomationcore.dll", "userenv.dll", "uxtheme.dll", "version.dll",
     "winmm.dll", "wtsapi32.dll",
 ]
-prefixes = ["api-ms-win-"]
+prefixes = []
+
+[microsoft_prerequisites]
+# Microsoft runtime files that MeridianDesktop does NOT bundle. Users install Microsoft's
+# own Visual C++ 2015-2022 Redistributable (x64) first. The Universal CRT comes with
+# Windows 10 and later. packaging/build.py deletes every file that matches `patterns`,
+# in every folder of the bundle, and it fails before PyInstaller runs when its own
+# MICROSOFT_RUNTIME_PATTERNS differs from `patterns` here. verify_bundle.py fails the build
+# when any file or folder in the bundle matches `names` or `patterns`. A bundled binary
+# may import one of these names only while its file is absent from the bundle.
+# packaging/README.bundle.txt, EULA.txt section 7 and NOTICE.md (Prerequisites) give the
+# same links.
+redistributable_url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+ucrt_url = "https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment"
+# The Visual C++ runtime files (14.44 and 14.51 copies) and ucrtbase.dll, by exact name.
+names = [
+    "MSVCP140.dll", "MSVCP140_1.dll", "MSVCP140_2.dll",
+    "VCRUNTIME140.dll", "VCRUNTIME140_1.dll",
+    "ucrtbase.dll",
+]
+# Case-insensitive file name patterns. The first two cover the Visual C++ runtime family,
+# ucrtbase.dll is the Universal CRT, and api-ms-win-*.dll are the Universal CRT API-set stubs.
+patterns = ["MSVCP140*.dll", "VCRUNTIME140*.dll", "ucrtbase.dll", "api-ms-win-*.dll"]
 
 [runtimes]
 # SPDX ids allowed for native runtimes listed in packaging/native_runtimes.toml. Each
@@ -198,16 +224,15 @@ prefixes = ["api-ms-win-"]
 # bzip2-1.0.6 is the bzip2 licence id. MSL-1.0 is included because the licence audit
 # cites MSL section 6, so a component of the bundle is under MSL-1.0. Counsel must
 # confirm which runtime it covers.
-# The two Microsoft ids cover only the redistributable runtime files listed in
-# native_runtimes.toml: LicenseRef-Microsoft-VC-Redist for the Visual C++ runtime, and
-# LicenseRef-Microsoft-Windows-SDK for the UCRT and api-ms-win stubs.
+# The two Microsoft ids are kept for Microsoft's runtime licences. No native_runtimes.toml
+# entry uses them now, because the Visual C++ runtime and the UCRT are not bundled (see
+# [microsoft_prerequisites]). A Microsoft runtime file in the bundle still fails the gate.
 allowed_spdx = [
     "PSF-2.0", "Apache-2.0", "MIT", "Zlib", "0BSD", "bzip2-1.0.6", "MSL-1.0",
     "LicenseRef-Microsoft-VC-Redist", "LicenseRef-Microsoft-Windows-SDK",
 ]
 # Runtime digests in native_runtimes.toml are keyed by path relative to the bundle root
-# (D2). The Visual C++ runtime appears twice, as 14.44 under _internal/PySide6/ and
-# _internal/shiboken6/ and as 14.51 at _internal/. Each copy has its own digest.
+# (D2). A runtime file that appears in more than one folder needs one digest for each path.
 # LGPL-3.0-only is not on this list. The gate accepts an LGPL-3.0-only runtime (the Qt
 # extension binaries, D4) only when every one of its files is under _internal/PySide6/ or
 # _internal/shiboken6/.

@@ -64,32 +64,31 @@ environment was built from. Versions come from the conda-meta files of that envi
 | bzip2 | 1.0.8 | bzip2-1.0.6 | libbz2.dll | https://gitlab.com/bzip2/bzip2 | `THIRD_PARTY_LICENSES.txt`, section `== bzip2 1.0.8 (bzip2-1.0.6) ==` |
 | XZ Utils | 5.8.3 | 0BSD | liblzma.dll | https://github.com/tukaani-project/xz/blob/master/COPYING.0BSD | `THIRD_PARTY_LICENSES.txt`, section `== XZ Utils 5.8.3 (0BSD) ==` |
 | zlib | 1.3.2 | Zlib | zlib.dll | https://zlib.net/zlib_license.html | `THIRD_PARTY_LICENSES.txt`, section `== zlib 1.3.2 (Zlib) ==` |
-| Microsoft VC++ runtime | 14.51.36247 | LicenseRef-Microsoft-VC-Redist | MSVCP140.dll, MSVCP140_1.dll, MSVCP140_2.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll, in 11 bundled copies | https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files | `THIRD_PARTY_LICENSES.txt`, section `== Microsoft VC++ runtime 14.51.36247 (LicenseRef-Microsoft-VC-Redist) ==` |
-| Microsoft UCRT | 10.0.26100.0 | LicenseRef-Microsoft-Windows-SDK | ucrtbase.dll and 42 api-ms-win-*.dll stubs | https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment | `THIRD_PARTY_LICENSES.txt`, section `== Microsoft UCRT 10.0.26100.0 (LicenseRef-Microsoft-Windows-SDK) ==` |
 | Qt for Python extension binaries | 6.12.0 | LGPL-3.0-only (elected) | pyside6.abi3.dll (`_internal/PySide6/`), shiboken6.abi3.dll (`_internal/shiboken6/`) | https://www.qt.io/development/qt-framework/qt-licensing | `LICENSES/LGPL-3.0.txt`. THIRD_PARTY_LICENSES.txt section `== Qt for Python extension binaries 6.12.0 (LGPL-3.0-only) ==` |
 
-The two Microsoft SPDX ids, LicenseRef-Microsoft-VC-Redist and LicenseRef-Microsoft-Windows-SDK, cover
-only the redistributable runtime files listed in `packaging/native_runtimes.toml`.
-
-- The Visual C++ runtime has two versions in the bundle, and both are kept (decision D2). `_internal/MSVCP140.dll`,
-  `_internal/VCRUNTIME140.dll` and `_internal/VCRUNTIME140_1.dll` have file version 14.51.36247.0, the version in
-  the header. `_internal/PySide6/MSVCP140_1.dll` and `_internal/PySide6/MSVCP140_2.dll` have file version
-  14.44.35211.0 and are the only copies of those two files. The six other copies, in `_internal/PySide6/`
-  (MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll) and `_internal/shiboken6/` (MSVCP140.dll,
-  VCRUNTIME140.dll, VCRUNTIME140_1.dll), also have file version 14.44.35211.0 and different bytes. Each of the
-  eleven bundled copies has its own sha256, keyed by its path in `packaging/native_runtimes.toml`, and the build
-  checks each one.
-- The version in the UCRT header is the conda package version. The file version of `ucrtbase.dll` in
-  the bundle is 10.0.26100.4654.
 - The CPython text is the PSF licence, version 2. conda-forge labels the same package `Python-2.0`.
   This file uses the SPDX identifier PSF-2.0 for the text.
-- The Microsoft licence texts come from the conda packages `vc14_runtime` and `ucrt`. The VC++
-  runtime text is the converted copy that Microsoft's package supplies with its disclaimer.
 - The full file list, and the sha256 of each bundled copy keyed by its path relative to the bundle root,
   are in `packaging/native_runtimes.toml`. The build fails if a listed file is missing from the bundle,
   if a bundled copy of a listed file has no sha256 for its path, or if a native runtime DLL in the bundle
   is not listed there. A bundled copy whose sha256 differs from the value declared for its path is printed
   as RELEASE BLOCKED.
+
+## Prerequisites
+
+These two Microsoft components are not in the bundle. The build deletes them, and verify_bundle.py fails
+if any copy is present. Install them on the computer before you run MeridianDesktop.
+
+- **Microsoft Visual C++ 2015-2022 Redistributable (x64).** It provides the Visual C++ runtime: MSVCP140.dll,
+  MSVCP140_1.dll, MSVCP140_2.dll, VCRUNTIME140.dll and VCRUNTIME140_1.dll. Install it from Microsoft at
+  https://aka.ms/vs/17/release/vc_redist.x64.exe. Microsoft's own licence governs that download and its use.
+  The upstream page is https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files.
+- **Universal CRT (UCRT).** It provides ucrtbase.dll and the api-ms-win-*.dll files. It comes with Windows 10
+  and later, so it needs no install. The upstream page is
+  https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment.
+
+The file `packaging/README.bundle.txt` is copied into the bundle as `README.txt`. It tells the user to install
+the redistributable first.
 
 ## Other bundled Python distributions
 
@@ -162,10 +161,6 @@ packaging/build.py checks.
   removes it after review. packaging/build.py --release refuses to build while it is present.
 - Source offer host: the owner must confirm the upstream-only host decision in OFFER-SOURCE.md.
 - LICENSES/LGPL-3.0.txt provenance against the FSF copy is not verified.
-- Visual C++ runtime, two versions: both ship (decision D2). The header of the Microsoft VC++ section gives
-  14.51.36247, and six copies in `_internal/PySide6/` and `_internal/shiboken6/` are 14.44.35211.0. Each
-  copy has its own digest in `packaging/native_runtimes.toml`. The owner must confirm that the Microsoft
-  redistributable terms cover the 14.44 copies.
 - PyInstaller licences: settled from PyInstaller's COPYING.txt. The bootloader and boot module carry the
   Bootloader Exception (GPL-2.0-or-later WITH Bootloader-exception). The run-time hooks and fake modules are
   Apache-2.0. The earlier label "PyInstaller-exception" was wrong and has been removed.

@@ -8,12 +8,17 @@ excluded so they are not bundled.
 Steps, in order. A failed check stops the build:
 1. Pin check: every licence text the build reads or ships must match its
    sha256 in packaging/licenses/SHA256SUMS, and each text must be the text it
-   claims to be (LGPL, GPL, MSL).
+   claims to be (LGPL, GPL, MSL). The Microsoft runtime patterns in this file must
+   equal [microsoft_prerequisites] in packaging/lgpl_manifest.toml.
 2. PyInstaller runs with --copy-metadata for each bundled distribution, so each
    dist-info, with its licence files, is in _internal. setuptools is excluded:
    nothing the app or its direct dependencies imports it, and its vendored
    packages carry no licence files in the bundle.
-3. Forbidden Qt files are pruned (packaging/lgpl_manifest.toml).
+3. Forbidden Qt files are pruned (packaging/lgpl_manifest.toml). Microsoft runtime
+   files (the Visual C++ runtime, ucrtbase.dll and the api-ms-win- stubs) are removed
+   from every folder of the bundle, and each removal is logged. The build fails if one
+   cannot be removed. packaging/README.bundle.txt is then written to the bundle root as
+   README.txt, which tells the user to install the Visual C++ redistributable first.
 4. NOTICE.md, OFFER-SOURCE.md, EULA.txt and LICENSES/ are copied to the bundle root.
 5. THIRD_PARTY_LICENSES.txt is written at the bundle root. It has one section per
    bundled distribution (from its dist-info), one per native runtime (from
@@ -38,6 +43,7 @@ Next step: python packaging/verify_bundle.py
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import importlib.metadata
 import re
@@ -140,7 +146,8 @@ EXCLUDED_MODULES = ["setuptools", "pkg_resources", "_distutils_hack"]
 SPDX_OVERRIDES = {"jaraco-classes": "MIT"}
 
 # Native DLL names. A DLL in the bundle that matches a pattern must be listed in
-# native_runtimes.toml, or the build fails.
+# native_runtimes.toml, or the build fails. The Microsoft runtime files match some of
+# these patterns, but they are removed before this check runs (see below).
 NATIVE_DLL_PATTERNS = [
     r"python3\d*\.dll",
     r"libcrypto-\d-x64\.dll",
@@ -155,6 +162,16 @@ NATIVE_DLL_PATTERNS = [
     r"ucrtbase\.dll",
     r"(?:api-ms|ext-ms)-win-\S+\.dll",
 ]
+
+# Microsoft runtime files are NOT shipped. Users install Microsoft's own Visual C++ 2015-2022
+# Redistributable (x64), from MICROSOFT_VC_REDIST_URL. The Universal CRT comes with Windows 10
+# and later. These patterns are matched, case-insensitively, against every file name in the
+# bundle, in every folder. verify_bundle.py reads the same patterns from [microsoft_prerequisites]
+# in packaging/lgpl_manifest.toml, and check_microsoft_manifest() fails the build when they differ.
+MICROSOFT_RUNTIME_PATTERNS = ("MSVCP140*.dll", "VCRUNTIME140*.dll", "ucrtbase.dll", "api-ms-win-*.dll")
+MICROSOFT_VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+BUNDLE_README_SOURCE = REPO / "packaging" / "README.bundle.txt"
+BUNDLE_README = BUNDLE_DIR / "README.txt"
 
 LICENCE_FILE_NAME = re.compile(r"(LICEN[CS]E|COPYING|NOTICE)", re.IGNORECASE)
 
@@ -244,6 +261,70 @@ def prune_forbidden(bundle_root: Path, qt: dict) -> list[str]:
             path.unlink()
             removed.append(path.relative_to(bundle_root).as_posix())
     return removed
+
+
+def check_microsoft_manifest(manifest: dict) -> None:
+    """The removal patterns are the manifest's [microsoft_prerequisites] patterns, and the link is the same (fail closed)."""
+    table = manifest.get("microsoft_prerequisites")
+    if not isinstance(table, dict) or "patterns" not in table or "redistributable_url" not in table:
+        raise SystemExit(f"{MANIFEST.name} has no [microsoft_prerequisites] patterns or redistributable_url (fail closed)")
+    listed = sorted(str(pattern).lower() for pattern in table["patterns"])
+    if listed != sorted(pattern.lower() for pattern in MICROSOFT_RUNTIME_PATTERNS):
+        raise SystemExit(
+            f"[microsoft_prerequisites] patterns in {MANIFEST.name} differ from MICROSOFT_RUNTIME_PATTERNS in "
+            "build.py. Make the two lists the same (fail closed)"
+        )
+    if table["redistributable_url"] != MICROSOFT_VC_REDIST_URL:
+        raise SystemExit(
+            f"[microsoft_prerequisites] redistributable_url in {MANIFEST.name} differs from MICROSOFT_VC_REDIST_URL "
+            "in build.py (fail closed)"
+        )
+
+
+def check_bundle_readme_source() -> None:
+    """packaging/README.bundle.txt exists and gives the Visual C++ redistributable link (fail closed)."""
+    if not BUNDLE_README_SOURCE.is_file():
+        raise SystemExit(f"missing bundle README: {BUNDLE_README_SOURCE} (fail closed)")
+    if MICROSOFT_VC_REDIST_URL not in BUNDLE_README_SOURCE.read_text(encoding="utf-8"):
+        raise SystemExit(f"{BUNDLE_README_SOURCE.name} does not give {MICROSOFT_VC_REDIST_URL} (fail closed)")
+
+
+def microsoft_runtime_files(bundle_root: Path) -> list[Path]:
+    """Every file in the bundle, in any folder, whose name matches a Microsoft runtime pattern."""
+    patterns = [pattern.lower() for pattern in MICROSOFT_RUNTIME_PATTERNS]
+    return [
+        path
+        for path in sorted(bundle_root.rglob("*"))
+        if path.is_file() and any(fnmatch.fnmatchcase(path.name.lower(), pattern) for pattern in patterns)
+    ]
+
+
+def remove_microsoft_runtime(bundle_root: Path) -> list[str]:
+    """Delete every Microsoft runtime file from the bundle, log each removal, and return the removed paths.
+
+    A failed removal stops the build. A second scan afterwards must find nothing, or the build stops too.
+    """
+    removed: list[str] = []
+    for path in microsoft_runtime_files(bundle_root):
+        rel = path.relative_to(bundle_root).as_posix()
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise SystemExit(f"could not remove Microsoft runtime file {rel}: {exc} (fail closed)") from exc
+        print(f"removed Microsoft runtime file: {rel}")
+        removed.append(rel)
+    left = [path.relative_to(bundle_root).as_posix() for path in microsoft_runtime_files(bundle_root)]
+    if left:
+        raise SystemExit(f"Microsoft runtime files are still in the bundle: {', '.join(left)} (fail closed)")
+    return removed
+
+
+def write_bundle_readme() -> None:
+    """Copy packaging/README.bundle.txt to the bundle root as README.txt."""
+    check_bundle_readme_source()
+    shutil.copyfile(BUNDLE_README_SOURCE, BUNDLE_README)
+    if not BUNDLE_README.is_file():
+        raise SystemExit(f"bundle README was not written: {BUNDLE_README} (fail closed)")
 
 
 # ---------------------------------------------------------------- licence pins
@@ -673,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
     check_licence_texts()
     check_pyinstaller_notice()
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    check_microsoft_manifest(manifest)
+    check_bundle_readme_source()
     runtimes = load_runtimes()
     problems = release_problems()
     for problem in problems:
@@ -689,6 +772,9 @@ def main(argv: list[str] | None = None) -> int:
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     PRUNE_REPORT.write_text("\n".join(removed) + "\n", encoding="utf-8")
     print(f"pruned {len(removed)} forbidden or unlisted files (list: {PRUNE_REPORT})")
+    removed_microsoft = remove_microsoft_runtime(BUNDLE_DIR)
+    print(f"removed {len(removed_microsoft)} Microsoft runtime files: the bundle does not ship them")
+    write_bundle_readme()
     copy_notices()
     copy_problems = write_third_party(manifest, runtimes)
     for problem in copy_problems:
