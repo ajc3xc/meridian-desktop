@@ -3,12 +3,15 @@
 The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
 (wave 2), with the connection settings (local URL, database file, saved mode) above
 its rows. The Writing tab holds the LaTeX engine probe under its section label (wave 2).
-The other tabs are still placeholders. Qt code lives in meridian_desktop/ui/ (and the
-listed exception tray.py). Settings go through settings_store and the RunPod key goes
-through secret_store, and neither imports Qt. The only network calls are loopback calls:
-to the local Meridian server at the local_url setting, and to the local LaTeX engine at
-the engine_url setting. The panels and the Projects tab make them when a tab is first
-shown and when a button is pressed. No other host is contacted.
+The Tunnel, Services and Logs tabs are built in wave 3 and are read-only. The other tabs
+are still placeholders. Qt code lives in meridian_desktop/ui/ (and the listed exception
+tray.py). Settings go through settings_store and the RunPod key goes through secret_store,
+and neither imports Qt. The only network calls are loopback calls: to the local Meridian
+server at the local_url setting, to the local LaTeX engine at the engine_url setting, and
+to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
+when a tab is first shown and when a button is pressed. The Services check and the Logs
+read run only when their button is pressed, and the Tunnel tab makes no request. No other
+host is contacted.
 """
 
 from __future__ import annotations
@@ -27,9 +30,12 @@ from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.latex_panel import LatexPanel
+from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
+from meridian_desktop.ui.services_page import ServicesPage
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
+from meridian_desktop.ui.tunnel_page import TunnelPage
 
 # (tab name, wave that builds it). Display order is the tuple order.
 TAB_SPECS = (
@@ -51,7 +57,7 @@ WRITING_SECTIONS = (
     "Google Docs (approach not decided)",
 )
 
-STATUS_MESSAGE = "No services checked yet"
+STATUS_MESSAGE = "No services checked yet. Press Check services on the Services tab."
 
 # The window opens at this size (width, height). It fits the full tab bar and gives the
 # Settings panel room for its key row and pods table.
@@ -114,6 +120,15 @@ class MainWindow(QMainWindow):
                 # The LaTeX probe sits under its section label. Makes no request until shown.
                 latex = LatexPanel(self._store, parent=self.tabs)
                 page = _placeholder_page(name, wave, self.tabs, {LATEX_SECTION: latex})
+            elif name == "Tunnel":
+                # No slot-state source in this build, so the page says the states are not available.
+                page = TunnelPage(self.tabs)
+            elif name == "Services":
+                # The checks run only when Check services is pressed. Nothing is probed on build or show.
+                page = ServicesPage(self._store, parent=self.tabs)
+            elif name == "Logs":
+                # The reads run only when Refresh is pressed. Nothing is read on build or show.
+                page = LogsPage(parent=self.tabs)
             else:
                 page = _placeholder_page(name, wave, self.tabs)
             self.tabs.addTab(page, name)

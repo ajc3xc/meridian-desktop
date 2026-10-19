@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QTableWidget,
@@ -34,8 +35,11 @@ from meridian_desktop.data_source import (
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
+from meridian_desktop.ui.latex_panel import LatexPanel
+from meridian_desktop.ui.logs_page import INTRO_UNREAD_TEXT, LogsPage
 from meridian_desktop.ui.main_window import TAB_NAMES, WRITING_SECTIONS, MainWindow
 from meridian_desktop.ui.projects_tab import default_sources
+from meridian_desktop.ui.services_page import NOT_CHECKED, UNCHECKED_TEXT, ServicesPage
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
     LOCAL_URL_SAVED_TEXT,
@@ -44,17 +48,22 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
+from meridian_desktop.ui.tunnel_page import NOT_AVAILABLE_TEXT, TunnelPage
 
 EXPECTED_TABS = ("Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Logs", "Settings")
+# The tabs that are still placeholders after wave 3, with the wave that builds each.
 EXPECTED_WAVES = {
     "Writing": 5,
     "Zotero": 4,
-    "Tunnel": 3,
-    "Services": 3,
     "Code": 6,
-    "Logs": 3,
 }
-STATUS = "No services checked yet"
+# The wave-3 tabs, each with its page's object name and class.
+WAVE3_PAGES = {
+    "Tunnel": ("tunnel-page", TunnelPage),
+    "Services": ("services-page", ServicesPage),
+    "Logs": ("logs-page", LogsPage),
+}
+STATUS = "No services checked yet. Press Check services on the Services tab."
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
 
@@ -179,6 +188,58 @@ def test_placeholders_name_their_wave(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     for name, wave in EXPECTED_WAVES.items():
         assert f"Not built yet (wave {wave})" in _label_texts(_page(window, name)), name
+
+
+def test_wave3_tabs_replace_placeholders_and_keep_others(qtbot, settings_path, monkeypatch):
+    # The health probe records its calls, so the test can show that showing the window makes none.
+    health_calls = []
+
+    def recording_probe(url, timeout=None):
+        health_calls.append(url)
+        return local_client.HEALTH_NOT_RUNNING
+
+    monkeypatch.setattr(local_client, "probe_health", recording_probe)
+    window = _shown_window(qtbot, settings_path)
+    assert _tab_names(window) == EXPECTED_TABS
+
+    # Tunnel, Services and Logs host their own pages. No placeholder and no wave-3 text is left on them.
+    for name, (object_name, page_type) in WAVE3_PAGES.items():
+        page = _page(window, name)
+        assert isinstance(page, page_type), name
+        assert page.objectName() == object_name, name
+        assert "Not built yet (wave 3)" not in _all_text(page), name
+        assert not any("Not built yet" in text for text in _label_texts(page)), name
+
+    # Tunnel says the slot states are not available, and shows no rows. This build has no slot-state source.
+    tunnel = _page(window, "Tunnel")
+    assert tunnel.findChild(QLabel, "tunnel-status").text() == NOT_AVAILABLE_TEXT
+    assert tunnel.findChild(QTableWidget, "tunnel-slot-table").rowCount() == 0
+
+    # Services and Logs show their unchecked state. Showing the window made no health request and checked no port.
+    services = _page(window, "Services")
+    assert services.findChild(QLabel, "services-intro").text() == UNCHECKED_TEXT
+    assert f"Local server health: {NOT_CHECKED}" in _label_texts(services)
+    assert services.findChild(QLabel, "services-ports-status").text() == f"Slot ports: {NOT_CHECKED}"
+    assert services.findChild(QTableWidget, "services-ports-table").rowCount() == 0
+    assert health_calls == []
+
+    logs = _page(window, "Logs")
+    assert logs.findChild(QLabel, "logs-intro").text() == INTRO_UNREAD_TEXT
+    assert logs.findChild(QPlainTextEdit, "logs-tunnel-text").toPlainText() == ""
+    assert logs.findChild(QPlainTextEdit, "logs-runner-text").toPlainText() == ""
+
+    # The other tabs keep their state. Projects and Settings are built, Writing keeps its LaTeX section,
+    # and Zotero and Code are still placeholders.
+    assert _page(window, "Projects").objectName() == "projects-tab"
+    assert _page(window, "Settings").objectName() == "runpod-panel"
+    writing = _page(window, "Writing")
+    assert writing.findChild(LatexPanel) is not None
+    for section in WRITING_SECTIONS:
+        assert section in _label_texts(writing)
+    for name, wave in EXPECTED_WAVES.items():
+        page = _page(window, name)
+        assert page.objectName() == f"placeholder-{name.lower()}", name
+        assert f"Not built yet (wave {wave})" in _label_texts(page), name
 
 
 def test_settings_tab_holds_runpod_panel_not_placeholder(qtbot, settings_path):
