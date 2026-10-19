@@ -1,11 +1,12 @@
 """Main window: a mode selector on top, then one tab per area.
 
-The Settings tab holds the RunPod panel (wave 2). The other tabs are still
-placeholders. Qt code lives in meridian_desktop/ui/ (and the listed exception
-tray.py). Settings go through settings_store and the RunPod key goes through
-secret_store, and neither imports Qt. The only network calls are loopback calls
-to the local Meridian server at the local_url setting. The panel makes them when
-it is first shown and when a button is pressed. No other host is contacted.
+The Projects tab is read-only (wave 2) and the Settings tab holds the RunPod
+panel (wave 2). The other tabs are still placeholders. Qt code lives in
+meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
+settings_store and the RunPod key goes through secret_store, and neither imports
+Qt. The only network calls are loopback calls to the local Meridian server at the
+local_url setting. The panel and the Projects tab make them when a tab is first
+shown and when a button is pressed. No other host is contacted.
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 
 # (tab name, wave that builds it). Display order is the tuple order.
@@ -66,16 +69,19 @@ def _placeholder_page(name: str, wave: int, parent: QWidget) -> QWidget:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above one tab per area. Settings holds the RunPod panel."""
+    """Mode selector above one tab per area. Projects is read-only. Settings holds the RunPod panel."""
 
     def __init__(
         self,
         settings_store: SettingsStore | None = None,
         secret_store: SecretStore | None = None,
+        data_sources: DataSources | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
+        # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
+        self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
         self.setWindowTitle("Meridian")
 
         central = QWidget(self)
@@ -84,8 +90,11 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget(central)
         for name, wave in TAB_SPECS:
-            if name == "Settings":
-                page: QWidget = RunPodPanel(self._store, self._secrets, parent=self.tabs)
+            if name == "Projects":
+                self._projects = ProjectsTab(self._store, self._sources, parent=self.tabs)
+                page: QWidget = self._projects
+            elif name == "Settings":
+                page = RunPodPanel(self._store, self._secrets, parent=self.tabs)
             else:
                 page = _placeholder_page(name, wave, self.tabs)
             self.tabs.addTab(page, name)
@@ -133,6 +142,8 @@ class MainWindow(QMainWindow):
             return
         self._saved_mode = mode
         self.settings_warning.hide()
+        # The Projects tab reads from the source the new mode names.
+        self._projects.refresh()
 
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""
