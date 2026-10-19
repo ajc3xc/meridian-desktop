@@ -195,6 +195,153 @@ def case_build_tree_is_not_scanned(checker, root):
     assert checker.check(root) == []
 
 
+# Dynamic imports (rule a2). Each snippet loads a Qt root by a literal name outside ui/
+# and must produce exactly one violation, on the given line, naming the expected text.
+DYNAMIC_QT_CALLS = {
+    "importlib.import_module": {
+        "source": "import importlib\n\nQT = importlib.import_module('PySide6.QtCore')\n",
+        "line": 3,
+        "qt_name": "PySide6.QtCore",
+    },
+    "__import__": {
+        "source": "QT = __import__('PySide6.QtCore')\n",
+        "line": 1,
+        "qt_name": "PySide6.QtCore",
+    },
+}
+DYNAMIC_QT_FORMS = {
+    "module_alias": {
+        "source": "import importlib as il\n\nQT = il.import_module('PySide6.QtGui')\n",
+        "line": 3,
+        "qt_name": "PySide6.QtGui",
+    },
+    "from_import_alias": {
+        "source": "from importlib import import_module as load\n\nQT = load('PySide6.QtGui')\n",
+        "line": 3,
+        "qt_name": "PySide6.QtGui",
+    },
+    "importlib_dunder_import": {
+        "source": "import importlib\n\nQT = importlib.__import__('PySide6')\n",
+        "line": 3,
+        "qt_name": "PySide6",
+    },
+    "builtins_dunder_import": {
+        "source": "import builtins\n\nQT = builtins.__import__('PySide6')\n",
+        "line": 3,
+        "qt_name": "PySide6",
+    },
+    "from_builtins_import": {
+        "source": "from builtins import __import__ as load\n\nQT = load('PySide6')\n",
+        "line": 3,
+        "qt_name": "PySide6",
+    },
+    "keyword_name": {
+        "source": "import importlib\n\nQT = importlib.import_module(name='PySide6.QtCore')\n",
+        "line": 3,
+        "qt_name": "PySide6.QtCore",
+    },
+    "keyword_name_dunder": {
+        "source": "QT = __import__(name='PySide6')\n",
+        "line": 1,
+        "qt_name": "PySide6",
+    },
+    "relative_with_package": {
+        "source": "import importlib\n\nQT = importlib.import_module('.QtCore', 'PySide6')\n",
+        "line": 3,
+        "qt_name": ".QtCore in package PySide6",
+    },
+    "function_body": {
+        "source": (
+            "import importlib\n\n\ndef load():\n    return importlib.import_module('PySide6.QtCore')\n"
+        ),
+        "line": 5,
+        "qt_name": "PySide6.QtCore",
+    },
+    "exec_literal": {
+        "source": "exec('import PySide6')\n",
+        "line": 1,
+        "qt_name": "PySide6",
+    },
+    "eval_literal_dunder": {
+        "source": "VALUE = eval(\"__import__('PySide6.QtCore')\")\n",
+        "line": 1,
+        "qt_name": "PySide6.QtCore",
+    },
+    "exec_bytes_literal": {
+        "source": "exec(b'import PySide6')\n",
+        "line": 1,
+        "qt_name": "PySide6",
+    },
+    "exec_uses_module_importlib": {
+        "source": "import importlib\n\nexec(\"importlib.import_module('PySide6')\")\n",
+        "line": 3,
+        "qt_name": "PySide6",
+    },
+}
+
+# Dynamic imports that must not be flagged: non-Qt names, near-miss roots, and
+# relative names whose package is not Qt.
+DYNAMIC_NON_QT_SOURCE = (
+    "import builtins\n"
+    "import importlib\n"
+    "\n"
+    "JSON = importlib.import_module('json')\n"
+    "OS_PATH = __import__('os.path')\n"
+    "COLLECTIONS = builtins.__import__('collections')\n"
+    "NEAR_MISS = importlib.import_module('PySide6_helpers')\n"
+    "RELATIVE = importlib.import_module('.helpers', 'meridian_desktop')\n"
+    "exec('import json')\n"
+)
+
+
+def case_dynamic_qt_import_outside_ui_fails(checker, root, *, source, line, qt_name):
+    _clean_tree(root)
+    _write(root, "meridian_desktop/logic.py", source)
+    problems = checker.check(root)
+    assert len(problems) == 1, problems
+    assert f"logic.py:{line}:" in problems[0], problems[0]
+    assert qt_name in problems[0], problems[0]
+
+
+def case_dynamic_non_qt_import_passes(checker, root):
+    _clean_tree(root)
+    _write(root, "meridian_desktop/logic.py", DYNAMIC_NON_QT_SOURCE)
+    assert checker.check(root) == []
+
+
+def case_dynamic_qt_import_in_ui_passes(checker, root):
+    _clean_tree(root)
+    _write(
+        root,
+        "meridian_desktop/ui/dynamic.py",
+        "import importlib\nQT = importlib.import_module('PySide6.QtCore')\n",
+    )
+    _write(root, "meridian_desktop/tray.py", "QT = __import__('PySide6.QtGui')\n")
+    assert checker.check(root) == []
+
+
+def case_dynamic_relative_import_passes(checker, root):
+    # A relative from-import is a package's own module, not the stdlib one, and a
+    # relative __import__ resolves against the caller's package.
+    _clean_tree(root)
+    _write(
+        root,
+        "meridian_desktop/logic.py",
+        "from .importlib import import_module\n"
+        "\n"
+        "PLUGIN = import_module('PySide6')\n"
+        "LEVEL = __import__('PySide6', None, None, None, 1)\n",
+    )
+    assert checker.check(root) == []
+
+
+def case_unparseable_source_literal_passes(checker, root):
+    # The runner raises SyntaxError before any import runs, so there is nothing to flag.
+    _clean_tree(root)
+    _write(root, "meridian_desktop/logic.py", "exec('def(')\n")
+    assert checker.check(root) == []
+
+
 BOUNDARY_CASES = [
     (f"qt_root_{name}", partial(case_qt_root_outside_ui_fails, qt_root=name))
     for name in QT_ROOT_NAMES
@@ -203,6 +350,14 @@ BOUNDARY_CASES = [
     ("uppercase_windows_reference", case_uppercase_windows_reference_fails),
     ("syntax_error_fails_closed", case_syntax_error_fails_closed),
     ("build_tree_not_scanned", case_build_tree_is_not_scanned),
+] + [
+    (f"dynamic_{key.replace('.', '_')}", partial(case_dynamic_qt_import_outside_ui_fails, **spec))
+    for key, spec in {**DYNAMIC_QT_CALLS, **DYNAMIC_QT_FORMS}.items()
+] + [
+    ("dynamic_non_qt_passes", case_dynamic_non_qt_import_passes),
+    ("dynamic_in_ui_passes", case_dynamic_qt_import_in_ui_passes),
+    ("dynamic_relative_passes", case_dynamic_relative_import_passes),
+    ("unparseable_source_literal_passes", case_unparseable_source_literal_passes),
 ]
 
 
@@ -225,3 +380,29 @@ def test_syntax_error_fails_closed(tmp_path):
 
 def test_build_tree_is_not_scanned(tmp_path):
     case_build_tree_is_not_scanned(check_boundary, tmp_path)
+
+
+@pytest.mark.parametrize("form", sorted(DYNAMIC_QT_CALLS))
+def test_dynamic_qt_import_outside_ui_fails(tmp_path, form):
+    case_dynamic_qt_import_outside_ui_fails(check_boundary, tmp_path, **DYNAMIC_QT_CALLS[form])
+
+
+@pytest.mark.parametrize("form", sorted(DYNAMIC_QT_FORMS))
+def test_dynamic_import_form_outside_ui_fails(tmp_path, form):
+    case_dynamic_qt_import_outside_ui_fails(check_boundary, tmp_path, **DYNAMIC_QT_FORMS[form])
+
+
+def test_dynamic_non_qt_import_passes(tmp_path):
+    case_dynamic_non_qt_import_passes(check_boundary, tmp_path)
+
+
+def test_dynamic_qt_import_in_ui_passes(tmp_path):
+    case_dynamic_qt_import_in_ui_passes(check_boundary, tmp_path)
+
+
+def test_dynamic_relative_import_passes(tmp_path):
+    case_dynamic_relative_import_passes(check_boundary, tmp_path)
+
+
+def test_unparseable_source_literal_passes(tmp_path):
+    case_unparseable_source_literal_passes(check_boundary, tmp_path)
