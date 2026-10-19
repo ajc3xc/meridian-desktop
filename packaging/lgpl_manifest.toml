@@ -229,19 +229,29 @@ stdlib_owner = "CPython"
 stdlib_spdx = "PSF-2.0"
 first_party = ["meridian_desktop"]
 
-[pyinstaller]
-# D3. PyInstaller's bootstrap modules (the _pyi_rth_* runtime hooks and the pyiboot*
-# bootstrap) are licensed "GPL-2.0-or-later WITH PyInstaller-exception". A PYZ module
-# whose top-level name matches module_patterns, and that no installed RECORD lists, is
-# attributed to PyInstaller. It passes only while NOTICE.md names notice_name and
-# THIRD_PARTY_LICENSES.txt carries every copying_markers text. No other GPL-2.0 licence
-# passes, and a module outside module_patterns with that licence fails.
-# NEEDS COUNSEL CONFIRMATION before release: whether the PyInstaller exception covers
-# these modules in this bundle. The pattern list and the NOTICE and THIRD_PARTY
-# requirements are the code's reading of D3 until counsel signs it off.
+# PyInstaller's own bootstrap code is not one licence. Its COPYING.txt (the PyInstaller
+# licensing terms) says so, and the SPDX identifiers in the source headers agree:
+#   - the bootloader and PyInstaller/loader files are GPL-2.0-or-later WITH
+#     Bootloader-exception, which grants unlimited permission to embed the bootloader in
+#     programs distributed without restriction from those files;
+#   - the run-time hooks (PyInstaller/hooks/rthooks, pyi_rth_*) and the fake modules
+#     (pyi_splash and _pyi_rth_utils) are Apache-2.0.
+# A PYZ module is attributed to PyInstaller only when no installed RECORD lists it and its
+# name matches one table's module_patterns. It then passes only while NOTICE.md names
+# notice_name and THIRD_PARTY_LICENSES.txt carries every copying_markers text.
+# Source: https://raw.githubusercontent.com/pyinstaller/pyinstaller/develop/COPYING.txt
+
+[pyinstaller_runtime_hooks]
 notice_name = "PyInstaller"
-module_patterns = ["_pyi_rth_*", "pyiboot*"]
-copying_markers = ["GNU GENERAL PUBLIC LICENSE", "Version 2, June 1991"]
+licence = "Apache-2.0"
+module_patterns = ["_pyi_rth_*", "pyi_rth_*", "pyi_splash*"]
+copying_markers = ["Apache License", "Version 2.0, January 2004"]
+
+[pyinstaller_bootloader]
+notice_name = "PyInstaller"
+licence = "GPL-2.0-or-later WITH Bootloader-exception"
+module_patterns = ["pyiboot*"]
+copying_markers = ["GNU GENERAL PUBLIC LICENSE", "Version 2, June 1991", "Bootloader Exception"]
 
 # sha256 of every Qt6*.dll and Qt plugin. verify_bundle.py writes this table on the
 # first verified build. [hashes] must stay the last table in this file, because

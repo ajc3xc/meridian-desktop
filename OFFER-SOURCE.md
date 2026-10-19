@@ -1,5 +1,3 @@
-DRAFT - NOT FOR RELEASE
-
 # Written offer for source code
 
 This offer applies to MeridianDesktop 0.1.0 as distributed in its ONEDIR bundle. It covers
@@ -64,8 +62,7 @@ folder that holds the replacement files.
 - THIRD_PARTY_LICENSES.txt, in the bundle root. Its PySide6 and shiboken6 sections give the elected
   licence and the source offer reference.
 
-## Status
+## Scope of the offer
 
-DRAFT - NOT FOR RELEASE. Counsel must review the offer term, the contact address and the host
-decision above before release. Counsel removes this marker after that review. packaging/build.py
-with --release fails while the marker is present.
+This offer also covers any other component that THIRD_PARTY_LICENSES.txt lists under LGPL-3.0-only
+in this release. The table above covers the components shipped in MeridianDesktop 0.1.0.

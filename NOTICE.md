@@ -115,18 +115,20 @@ Qt section above.
 
 ## Build tool: PyInstaller 6.22.3 (bootloader and runtime exception)
 
-PyInstaller is used to build the bundle. Its package is not bundled, but its bootloader is compiled into
-`MeridianDesktop.exe`, and its bootstrap modules (`_pyi_rth_*` and `pyiboot*`) are embedded in that exe.
-The licence recorded for the bootloader and these modules is GPL-2.0-or-later WITH PyInstaller-exception.
-PyInstaller's package metadata reads its licence as "GPLv2-or-later with a special exception which allows
-to use PyInstaller to build and distribute non-free programs (including commercial ones)". The exception is
-the Bootloader Exception in PyInstaller's COPYING.txt: the authors give unlimited permission to link or embed
-the compiled bootloader and related files into combinations with other programs, and to distribute those
-combinations without restriction from the use of those files. So the bootloader may be distributed with the
-program under the program's own licence. The licence file is `COPYING.txt`, from the PyInstaller 6.22.3
-distribution (https://github.com/pyinstaller/pyinstaller/blob/v6.22.3/COPYING.txt).
-THIRD_PARTY_LICENSES.txt includes this text in a section titled "PyInstaller 6.22.3 (GPL-2.0-or-later
-WITH PyInstaller-exception)". The build fails if this file does not name PyInstaller and that licence.
+PyInstaller is used to build the bundle. Its package is not bundled, but two parts of its code are embedded
+in `MeridianDesktop.exe`, under two licences that PyInstaller's COPYING.txt states:
+
+- The bootloader and the boot module (`pyiboot01_bootstrap`) are GPL-2.0-or-later WITH Bootloader-exception
+  (SPDX). The Bootloader Exception gives unlimited permission to link or embed the compiled bootloader into
+  programs distributed without restriction from those files, so the program may carry its own licence.
+- The run-time hooks and fake modules (`_pyi_rth_*`, `pyi_rth_*`, `pyi_splash*`) are Apache-2.0. Apache-2.0
+  section 4 applies to them: a copy of the licence is included below, and no NOTICE text is attributed to them.
+
+The licence file is `COPYING.txt`, from the PyInstaller 6.22.3 distribution
+(https://github.com/pyinstaller/pyinstaller/blob/v6.22.3/COPYING.txt). THIRD_PARTY_LICENSES.txt includes
+the bootloader section "PyInstaller 6.22.3 (GPL-2.0-or-later WITH Bootloader-exception)" and the run-time
+hooks section "PyInstaller 6.22.3 (Apache-2.0)", with the Apache-2.0 text. The build fails if this file does
+not name PyInstaller and both licences.
 
 ## Desktop code and the repository licence
 
@@ -164,10 +166,6 @@ packaging/build.py checks.
   14.51.36247, and six copies in `_internal/PySide6/` and `_internal/shiboken6/` are 14.44.35211.0. Each
   copy has its own digest in `packaging/native_runtimes.toml`. The owner must confirm that the Microsoft
   redistributable terms cover the 14.44 copies.
-- PyInstaller licence, for counsel: the licence recorded for PyInstaller's bootloader and bootstrap modules
-  is GPL-2.0-or-later WITH PyInstaller-exception (decision D3). Two points need confirmation before release.
-  First, PyInstaller's own files name this exception "Bootloader-exception": `PyInstaller/loader/pyiboot01_bootstrap.py`
-  reads "GPL-2.0-or-later WITH Bootloader-exception". Second, PyInstaller's run-time hooks
-  (`PyInstaller/hooks/rthooks/pyi_rth_*.py`) carry "SPDX-License-Identifier: Apache-2.0" headers, and COPYING.txt
-  places run-time hooks under Apache-2.0. Counsel must confirm the licence of each `_pyi_rth_*` and `pyiboot*`
-  module that the bundle embeds.
+- PyInstaller licences: settled from PyInstaller's COPYING.txt. The bootloader and boot module carry the
+  Bootloader Exception (GPL-2.0-or-later WITH Bootloader-exception). The run-time hooks and fake modules are
+  Apache-2.0. The earlier label "PyInstaller-exception" was wrong and has been removed.

@@ -1115,22 +1115,29 @@ def test_name_only_digest_key_does_not_verify_a_bundled_copy(tmp_path):
 GPL2_COPYING = (
     "                    GNU GENERAL PUBLIC LICENSE\n"
     "                       Version 2, June 1991\n"
+    "Bootloader Exception\n"
+)
+APACHE2_COPYING = (
+    "                                 Apache License\n"
+    "                           Version 2.0, January 2004\n"
 )
 
 
 def _pyinstaller_bundle(tmp_path: Path) -> Path:
-    """A valid bundle whose NOTICE.md names PyInstaller and whose THIRD_PARTY_LICENSES.txt carries its COPYING text."""
+    """A valid bundle whose NOTICE.md names PyInstaller and whose THIRD_PARTY_LICENSES.txt carries both
+    PyInstaller licence texts: the Bootloader Exception (GPL-2) and the Apache-2.0 text of the run-time hooks."""
     root, _runtimes = build_valid_bundle(tmp_path)
     (root / "NOTICE.md").write_text(
-        NOTICE + "PyInstaller 6.0.0 (GPL-2.0-or-later WITH PyInstaller-exception): bootloader and runtime hooks.\n",
+        NOTICE + "PyInstaller 6.0.0 (GPL-2.0-or-later WITH Bootloader-exception; Apache-2.0): bootloader and run-time hooks.\n",
         encoding="utf-8",
     )
-    copying_section = "== PyInstaller 6.0.0 (GPL-2.0-or-later WITH PyInstaller-exception) ==\n" + GPL2_COPYING + BODY
-    (root / "THIRD_PARTY_LICENSES.txt").write_text(third_party_text() + copying_section + "\n", encoding="utf-8")
+    bootloader = "== PyInstaller 6.0.0 (GPL-2.0-or-later WITH Bootloader-exception) ==\n" + GPL2_COPYING + BODY
+    hooks = "== PyInstaller 6.0.0 (Apache-2.0) ==\n" + APACHE2_COPYING + BODY
+    (root / "THIRD_PARTY_LICENSES.txt").write_text(third_party_text() + bootloader + hooks + "\n", encoding="utf-8")
     return root
 
 
-def test_pyinstaller_bootstrap_modules_under_the_exception_pass(tmp_path):
+def test_pyinstaller_runtime_hooks_and_bootloader_pass_under_their_own_licences(tmp_path):
     root = _pyinstaller_bundle(tmp_path)
     manifest = vb.load_manifest(MANIFEST)
     names = ["_pyi_rth_utils", "_pyi_rth_utils.qt", "pyiboot01_bootstrap"]
@@ -1170,7 +1177,7 @@ def test_pyinstaller_exception_licence_does_not_cover_other_modules(tmp_path):
     dist = FakeDist(
         "pyiexc",
         "1.0",
-        {"License-Expression": "GPL-2.0-or-later WITH PyInstaller-exception"},
+        {"License-Expression": "GPL-2.0-or-later WITH Bootloader-exception"},
         files=["pyiexcmod.py"],
         root=tmp_path,
     )

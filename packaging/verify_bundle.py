@@ -42,7 +42,7 @@ Licence gate (run_license_gate, plus the PYZ owner check in run):
       [pyz_owners]), or the project's own package ([pyz_owners] first_party). Each
       owner is classified by the same licence rules as a dist-info in the bundle.
       A module with no owner fails, and the message names it. The one exception is a
-      PyInstaller bootstrap module (module_patterns in [pyinstaller], D3). It passes
+      PyInstaller bootstrap module (module_patterns in a [pyinstaller_*] table, D3). It passes
       only while NOTICE.md names PyInstaller and THIRD_PARTY_LICENSES.txt carries its
       GPL-2.0 text. Counsel must confirm that exception before release.
   (b) every .dll, .pyd and .exe, and every file whose first two bytes are MZ, must
@@ -984,6 +984,11 @@ def _listed(items: list[str], limit: int = 5) -> str:
     return shown + (f" and {len(items) - limit} more" if len(items) > limit else "")
 
 
+# The only licences a PyInstaller bootstrap table may carry (lgpl_manifest.toml). Apache-2.0 is
+# for the run-time hooks and fake modules; the Bootloader Exception is for the bootloader.
+PYINSTALLER_ALLOWED_LICENCES = {"Apache-2.0", "GPL-2.0-or-later WITH Bootloader-exception"}
+
+
 def _pyinstaller_module(module: str, cfg: dict) -> bool:
     """True when a PYZ module's top-level name matches a PyInstaller bootstrap pattern ([pyinstaller], D3)."""
     top = module.partition(".")[0]
@@ -999,7 +1004,7 @@ def _pyinstaller_exception_reasons(root: Path | None, cfg: dict) -> list[str]:
     if root is None:
         return ["the bundle root is needed to read NOTICE.md and THIRD_PARTY_LICENSES.txt"]
     if not cfg.get("module_patterns") or not cfg.get("copying_markers"):
-        return ["the [pyinstaller] table in lgpl_manifest.toml is incomplete"]
+        return ["a [pyinstaller_*] table in lgpl_manifest.toml is incomplete"]
     name = str(cfg.get("notice_name", "PyInstaller"))
     reasons: list[str] = []
     notice = root / "NOTICE.md"
@@ -1029,7 +1034,7 @@ def pyz_owner_problems(
     first_party = set(owner_cfg["first_party"])
     stdlib_owner = owner_cfg["stdlib_owner"]
     stdlib_spdx = owner_cfg["stdlib_spdx"]
-    pyi_cfg = manifest.get("pyinstaller", {})
+    pyi_cfgs = [manifest[t] for t in ("pyinstaller_runtime_hooks", "pyinstaller_bootloader") if t in manifest]
     problems: list[str] = []
     if stdlib_spdx not in set(lic["allowed_spdx"]):
         problems.append(f"{stdlib_owner} standard library licence {stdlib_spdx} is not on the allowed list (fail closed)")
@@ -1048,19 +1053,21 @@ def pyz_owner_problems(
         top = module.partition(".")[0]
         if top in first_party or top in sys.stdlib_module_names:
             continue  # first-party code, or the standard library (owned by the CPython runtime)
-        if _pyinstaller_module(module, pyi_cfg):
-            pyinstaller_modules.append(module)  # PyInstaller's own bootstrap code, checked below
+        matched = next((cfg for cfg in pyi_cfgs if _pyinstaller_module(module, cfg)), None)
+        if matched is not None:
+            pyinstaller_modules.append((module, matched))  # PyInstaller's own bootstrap code, checked below
             continue
         problems.append(f"PYZ module {module} has no owning distribution (fail closed)")
 
-    if pyinstaller_modules:
-        reasons = _pyinstaller_exception_reasons(root, pyi_cfg)
-        for module in pyinstaller_modules:
-            if reasons:
-                problems.append(
-                    f"PYZ module {module} has no owning distribution, and the PyInstaller exception is not "
-                    f"confirmed: {'; '.join(reasons)} (fail closed)"
-                )
+    for module, cfg in pyinstaller_modules:
+        reasons = _pyinstaller_exception_reasons(root, cfg)
+        if cfg.get("licence") not in PYINSTALLER_ALLOWED_LICENCES:
+            reasons.append(f"the table licence {cfg.get('licence')!r} is not a PyInstaller licence this gate accepts")
+        if reasons:
+            problems.append(
+                f"PYZ module {module} has no owning distribution, and its PyInstaller licence "
+                f"({cfg.get('licence')}) is not confirmed: {'; '.join(reasons)} (fail closed)"
+            )
 
     for key in sorted(owners_by_key):
         owner = owners_by_key[key]

@@ -18,8 +18,8 @@ Steps, in order. A failed check stops the build:
 5. THIRD_PARTY_LICENSES.txt is written at the bundle root. It has one section per
    bundled distribution (from its dist-info), one per native runtime (from
    packaging/native_runtimes.toml) and one for PyInstaller (its bootloader and
-   bootstrap modules, under GPL-2.0-or-later WITH PyInstaller-exception, with its
-   COPYING.txt). Every section starts with the line "== name version (SPDX) ==".
+   boot module under GPL-2.0-or-later WITH Bootloader-exception, and its run-time hooks
+   under Apache-2.0). Every section starts with the line "== name version (SPDX) ==".
    The build fails, naming the item, when a licence file or a version is missing,
    when a licence is GPL-only or AGPL, when a native runtime DLL in the bundle is
    not listed in native_runtimes.toml, when a bundled copy of a listed file has no
@@ -62,10 +62,13 @@ THIRD_PARTY = BUNDLE_DIR / "THIRD_PARTY_LICENSES.txt"
 
 RELEASE_MARKER = "DRAFT - NOT FOR RELEASE"
 LGPL_ELECTED = "LGPL-3.0-only"
-# PyInstaller's bootloader and bootstrap modules (_pyi_rth_* and pyiboot*). Counsel must confirm
-# this licence (D3, see the note in packaging/native_runtimes.toml). It may appear in
-# THIRD_PARTY_LICENSES.txt only while NOTICE.md names PyInstaller and this string.
-PYINSTALLER_LICENCE = "GPL-2.0-or-later WITH PyInstaller-exception"
+# PyInstaller's own code is two licences (its COPYING.txt, and the SPDX headers in its source).
+# The bootloader and the boot module (pyiboot*) are under the Bootloader Exception. The run-time
+# hooks and fake modules (_pyi_rth_*, pyi_rth_*, pyi_splash*) are Apache-2.0. Each section may
+# appear in THIRD_PARTY_LICENSES.txt only while NOTICE.md names PyInstaller and its licence.
+PYINSTALLER_BOOTLOADER_LICENCE = "GPL-2.0-or-later WITH Bootloader-exception"
+PYINSTALLER_HOOKS_LICENCE = "Apache-2.0"
+APACHE2_TEXT = REPO / "packaging" / "licenses" / "Apache-2.0.txt"
 
 # Qt modules the skeleton does not use. Excluding them keeps their DLLs and
 # plugins out of the bundle. verify_bundle.py fails the build if any of them
@@ -457,7 +460,7 @@ def runtime_section(entry: dict) -> str:
 
 
 def bootloader_section() -> str:
-    """PyInstaller's bootloader and bootstrap modules, under PYINSTALLER_LICENCE (D3).
+    """PyInstaller's bootloader and boot module, under PYINSTALLER_BOOTLOADER_LICENCE.
 
     The section carries PyInstaller's COPYING.txt in full. The build fails when that text has no
     Bootloader Exception section, because the licence depends on it.
@@ -469,10 +472,10 @@ def bootloader_section() -> str:
     if "Bootloader Exception" not in licence:
         raise SystemExit("PyInstaller's licenses/COPYING.txt has no Bootloader Exception section (fail closed)")
     lines = [
-        f"== PyInstaller {dist.version} ({PYINSTALLER_LICENCE}) ==",
-        "PyInstaller builds MeridianDesktop.exe. Its bootloader is compiled into the exe, and its bootstrap",
-        "modules (_pyi_rth_* and pyiboot*) are embedded in the exe. The licence named in the header covers the",
-        "bootloader and these modules, and its Bootloader Exception is in the text below. The text is PyInstaller's COPYING.txt.",
+        f"== PyInstaller {dist.version} ({PYINSTALLER_BOOTLOADER_LICENCE}) ==",
+        "PyInstaller builds MeridianDesktop.exe. Its bootloader is compiled into the exe, and its boot module",
+        "(pyiboot01_bootstrap) is embedded in the exe. The licence named in the header covers the bootloader and",
+        "the boot module, and its Bootloader Exception is in the text below. The text is PyInstaller's COPYING.txt.",
         "",
         "--- licence file: PyInstaller licenses/COPYING.txt ---",
         licence.rstrip(),
@@ -480,10 +483,31 @@ def bootloader_section() -> str:
     return "\n".join(lines) + "\n"
 
 
+def hooks_section() -> str:
+    """PyInstaller's run-time hooks and fake modules, under Apache-2.0 (COPYING.txt, Run-time Hooks).
+
+    They are embedded in the exe (_pyi_rth_*, pyi_rth_*, pyi_splash*). Apache-2.0 section 4 needs a
+    copy of the licence with the redistribution, so the full text is included.
+    """
+    dist = importlib.metadata.distribution("pyinstaller")
+    text = APACHE2_TEXT.read_text(encoding="utf-8") if APACHE2_TEXT.is_file() else ""
+    if "Apache License" not in text or "Version 2.0, January 2004" not in text:
+        raise SystemExit("packaging/licenses/Apache-2.0.txt is missing or is not the Apache-2.0 text (fail closed)")
+    lines = [
+        f"== PyInstaller {dist.version} ({PYINSTALLER_HOOKS_LICENCE}) ==",
+        "PyInstaller's run-time hooks and fake modules are embedded in MeridianDesktop.exe (for example",
+        "_pyi_rth_utils and pyi_rth_* modules). They are under the Apache License 2.0 text below.",
+        "",
+        "--- licence file: packaging/licenses/Apache-2.0.txt ---",
+        text.rstrip(),
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def check_pyinstaller_notice() -> None:
     """The PyInstaller section (D3) may be written only while NOTICE.md names PyInstaller and its licence."""
     text = " ".join((REPO / "NOTICE.md").read_text(encoding="utf-8").split())
-    for marker in ("PyInstaller", PYINSTALLER_LICENCE):
+    for marker in ("PyInstaller", PYINSTALLER_BOOTLOADER_LICENCE, PYINSTALLER_HOOKS_LICENCE):
         if marker not in text:
             raise SystemExit(f"NOTICE.md does not name {marker!r}, which the PyInstaller section needs (fail closed)")
 
@@ -628,6 +652,7 @@ def write_third_party(manifest: dict, runtimes: list[dict]) -> list[str]:
     sections = [distribution_section(p) for p in ordered]
     sections += [runtime_section(e) for e in sorted(runtimes, key=lambda e: e["name"].lower())]
     sections.append(bootloader_section())
+    sections.append(hooks_section())
     text = "\n".join(PREAMBLE) + "\n\n" + "\n".join(sections)
     THIRD_PARTY.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {THIRD_PARTY.name}: {len(sections)} sections")

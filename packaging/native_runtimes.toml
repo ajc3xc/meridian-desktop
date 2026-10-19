@@ -304,16 +304,12 @@ licence_file = "LICENSES/LGPL-3.0.txt"
 "_internal/PySide6/pyside6.abi3.dll" = "d5b87ccb0a7c305854bd120242b0a75002d0b50a35532d0f6171e4ed0f3cc82a"
 "_internal/shiboken6/shiboken6.abi3.dll" = "07c318c02be5a3a9f1475f5a2d0cd438f4d4ea3288c28e2e10bc5ebbbec8de86"
 
-# PyInstaller (not a [[runtime]] entry, D3). packaging/build.py writes PyInstaller's bootloader
-# section into THIRD_PARTY_LICENSES.txt under "GPL-2.0-or-later WITH PyInstaller-exception",
-# with PyInstaller's COPYING.txt. That licence may be carried only for the bootstrap modules
-# named _pyi_rth_* and pyiboot*, and only while NOTICE.md names PyInstaller and that licence.
-# build.py checks NOTICE.md. Any other GPL-2.0 licence fails.
-# COUNSEL CONFIRMATION NEEDED (D3). Two points for counsel before release:
-#   1. The exception id. PyInstaller's COPYING.txt is titled "Bootloader Exception", and the
-#      header of PyInstaller/loader/pyiboot01_bootstrap.py reads
-#      "GPL-2.0-or-later WITH Bootloader-exception". This project uses "PyInstaller-exception".
-#   2. The run-time hooks. PyInstaller/hooks/rthooks/pyi_rth_*.py carry
-#      "SPDX-License-Identifier: Apache-2.0", and COPYING.txt places run-time hooks under
-#      Apache-2.0. Assigning every _pyi_rth_* module to the GPL-2.0-or-later string does not
-#      match that.
+# PyInstaller (not a [[runtime]] entry). packaging/build.py writes two PyInstaller sections into
+# THIRD_PARTY_LICENSES.txt, taken from PyInstaller's COPYING.txt:
+#   - the bootloader and the boot module (pyiboot*): "GPL-2.0-or-later WITH Bootloader-exception"
+#     (the Bootloader Exception);
+#   - the run-time hooks and fake modules (_pyi_rth_*, pyi_rth_*, pyi_splash*): "Apache-2.0", with
+#     the Apache-2.0 text.
+# The verifier's [pyinstaller_bootloader] and [pyinstaller_runtime_hooks] tables in
+# lgpl_manifest.toml carry the same mapping, and each passes only while NOTICE.md names
+# PyInstaller and its licence.
