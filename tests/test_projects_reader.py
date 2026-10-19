@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from meridian_desktop import projects_reader
-from meridian_desktop.projects_reader import PROJECT_COLUMNS, get_project, list_projects
+from meridian_desktop.projects_reader import PROJECT_COLUMNS, NoDatabase, get_project, list_projects
 
 # The core projects table, reduced to the columns the desktop may read. executor_config and
 # agent_instructions are included so the test can prove the reader never selects them.
@@ -122,3 +122,51 @@ def test_get_project_reads_one_row_by_id_or_none(db_path, reader_log):
 
     assert opened and all(args[0].endswith("?mode=ro") for args, _kwargs in opened)
     assert statements and all(sql.lstrip().upper().startswith("SELECT ") for sql in statements)
+
+
+def test_reader_is_read_only_and_never_creates_missing_file(db_path, tmp_path):
+    # A missing file raises NoDatabase, which names the path, and no file is created there.
+    missing = tmp_path / "absent-meridian.db"
+    with pytest.raises(NoDatabase) as info:
+        list_projects(missing)
+    assert str(missing) in str(info.value)
+    assert info.value.path == str(missing)
+    assert not missing.exists()
+
+    with pytest.raises(NoDatabase):
+        get_project(missing, "p-new")
+    assert not missing.exists()
+
+    # The reader connection refuses a write. The rows are unchanged afterwards.
+    conn = projects_reader._connect(db_path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "INSERT INTO projects (id, name, created_at) VALUES ('p-injected', 'Injected', '2026-04-01 00:00:00')"
+            )
+    finally:
+        conn.close()
+    assert [row["id"] for row in list_projects(db_path)] == ["p-new", "p-mid", "p-old"]
+
+
+def test_reader_lists_wal_rows_while_writer_is_open(tmp_path):
+    path = tmp_path / "meridian.db"
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.executescript(SCHEMA)
+        writer.executemany("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?)", ROWS)
+        writer.commit()
+        # The writer keeps a transaction open. The reader must list only the committed rows.
+        writer.execute(
+            "INSERT INTO projects VALUES ('p-open', 'Open', NULL, NULL, 'active', 'P2', NULL, "
+            "'2026-04-01 00:00:00', 'EXEC-SECRET-OPEN', 'AGENT-NOTE-OPEN')"
+        )
+        assert (tmp_path / "meridian.db-wal").exists()
+        assert (tmp_path / "meridian.db-shm").exists()
+
+        rows = list_projects(path)
+        assert [row["id"] for row in rows] == ["p-new", "p-mid", "p-old"]
+    finally:
+        writer.rollback()
+        writer.close()
