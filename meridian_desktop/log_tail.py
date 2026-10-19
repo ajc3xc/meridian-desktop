@@ -17,7 +17,7 @@ read gives STATUS_UNREADABLE, with fixed text and no exception.
 
 Redaction is defense in depth. The core stops the secret reaching the file in the first place
 (core-tunnel-log-tee-redaction). The pass here covers three shapes: a value after token= (in a
-query string or anywhere else), the value after a Bearer header word, and a sk_meridian_ token.
+query string or anywhere else), the value after a Bearer header word, and a Meridian-kind sk_ token.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ REDACTED = "[redacted]"
 REDACTION_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("token-param", re.compile(r"(token=)[^\s&#\"'<>]+", re.IGNORECASE), r"\g<1>" + REDACTED),
     ("bearer", re.compile(r"(\bBearer\s+)\S+", re.IGNORECASE), r"\g<1>" + REDACTED),
-    ("meridian-token", re.compile(r"sk_meridian_[A-Za-z0-9_-]*", re.IGNORECASE), REDACTED),
+    ("meridian-token", re.compile(r"sk_(?:meridian)_[A-Za-z0-9_-]*", re.IGNORECASE), REDACTED),
 )
 PATTERN_NAMES = tuple(name for name, _pattern, _replacement in REDACTION_PATTERNS)
 
