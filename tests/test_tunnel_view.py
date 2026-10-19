@@ -9,18 +9,23 @@ Nothing here makes a request.
 import ast
 from pathlib import Path
 
-from PySide6.QtWidgets import QLabel, QTableWidget
+from PySide6.QtWidgets import QAbstractButton, QLabel, QTableWidget
 
 from meridian_desktop import tunnel_view
 from meridian_desktop.tunnel_view import (
     DISABLED_NOTE,
     MISSING_NOTE,
     NO_STATE,
+    NOT_REPORTED,
+    NOT_RUNNING_NOTE,
     RETIRED_LABEL,
+    RETIRED_NOTE,
     RETIRED_SLOT,
     SERVER_STATES,
     UNSHOWN_NOTE,
+    SlotDetail,
     SlotRow,
+    slot_details,
     slot_rows,
     slots_of,
 )
@@ -203,6 +208,32 @@ def test_builtin_slot_keys_are_the_core_names():
     assert tuple(FIVE_STATE_SLOTS) == BUILTIN_SLOTS
 
 
+def test_healthy_row_carries_health_basis_and_age():
+    healthy = {**_entry("healthy"), "health_basis": "client_reported", "health_age_seconds": 42.0}
+    assumed = {**_entry("healthy"), "health_basis": "default_assumed", "health_age_seconds": None}
+    stale = {**_entry("stale"), "health_basis": "client_reported", "health_age_seconds": 9.0}
+    word = {**_entry("healthy"), "health_basis": "client_reported", "health_age_seconds": 3.0}
+    snapshot = _snapshot({"fs": healthy, "code": assumed, "extract": stale, "word": word})
+
+    details = {detail.row.slot: detail for detail in slot_details(snapshot)}
+    assert details["fs"] == SlotDetail(SlotRow("fs", "healthy"), "client_reported", "42")
+    assert details["code"] == SlotDetail(SlotRow("code", "healthy"), "default_assumed", NOT_REPORTED)
+    # Only a healthy row shows health text. A stale row and the retired word row show none.
+    assert details["extract"] == SlotDetail(SlotRow("extract", "stale"))
+    assert details["word"] == SlotDetail(SlotRow(RETIRED_SLOT, RETIRED_LABEL, RETIRED_NOTE))
+
+
+def test_missing_health_values_read_as_not_reported():
+    blank_basis = {**_entry("healthy"), "health_basis": "   ", "health_age_seconds": True}
+    infinite_age = {**_entry("healthy"), "health_basis": None, "health_age_seconds": float("inf")}
+    huge_age = {**_entry("healthy"), "health_basis": None, "health_age_seconds": 10**400}
+    details = slot_details(_snapshot({"fs": blank_basis, "code": infinite_age, "ppt": huge_age}))
+    assert [detail.row.state for detail in details] == ["healthy", "healthy", "healthy"]
+    for detail in details:
+        assert detail.health_basis == NOT_REPORTED
+        assert detail.health_age == NOT_REPORTED
+
+
 # ---------------------------------------------------------------- the Qt page
 
 
@@ -287,3 +318,85 @@ def test_page_replaces_rows_when_a_new_snapshot_arrives(qtbot):
     page.set_snapshot(None)
     assert table.rowCount() == 0
     assert page.findChild(QLabel, "tunnel-status").text() == NOT_AVAILABLE_TEXT
+
+
+def test_slot_rows_never_show_saved_setting_as_active(qtbot):
+    # The dashboard has the slot on (dashboard_configured.enabled true), but no process is running.
+    # The saved setting must not make the row read as active, so no state may show healthy here.
+    for reported in (*SERVER_STATES, "disabled", "mystery_state"):
+        entry = _entry(reported, enabled=True, process_active=False)
+        (row,) = slot_rows(_snapshot({"fs": entry}))
+        assert row.state != "healthy", reported
+        assert row.state in (NO_STATE, "stale", "degraded", "quarantined", "restart_required"), reported
+
+    saved_but_off = _snapshot({"fs": _entry("healthy", enabled=True, process_active=False)})
+    assert slot_rows(saved_but_off) == [SlotRow("fs", NO_STATE, NOT_RUNNING_NOTE)]
+
+    # A missing process_active counts as not running.
+    no_process_field = _entry("healthy")
+    del no_process_field["process_active"]
+    assert slot_rows(_snapshot({"fs": no_process_field})) == [SlotRow("fs", NO_STATE, NOT_RUNNING_NOTE)]
+
+    # A slot that is running keeps its healthy state.
+    assert slot_rows(_snapshot({"fs": _entry("healthy", enabled=True, process_active=True)})) == [
+        SlotRow("fs", "healthy")
+    ]
+
+    # The page: the saved-but-not-running rows never show healthy, and they show no health text.
+    mixed = _snapshot(
+        {
+            "fs": _entry("healthy", enabled=True, process_active=False),
+            "code": _entry("healthy", enabled=True, process_active=True),
+        }
+    )
+    page = TunnelPage()
+    qtbot.addWidget(page)
+    page.set_snapshot(mixed)
+
+    table = page.findChild(QTableWidget, "tunnel-slot-table")
+    assert [_cell(table, row, 1) for row in range(table.rowCount())] == [NO_STATE, "healthy"]
+    assert _cell(table, 0, 2) == NOT_RUNNING_NOTE
+    assert (_cell(table, 0, 3), _cell(table, 0, 4)) == ("", "")
+
+
+def test_page_shows_health_basis_and_age_beside_healthy_rows(qtbot):
+    healthy = {**_entry("healthy"), "health_basis": "client_reported", "health_age_seconds": 42.0}
+    stale = {**_entry("stale"), "health_basis": "client_reported", "health_age_seconds": 9.0}
+    page = TunnelPage()
+    qtbot.addWidget(page)
+    page.set_snapshot(_snapshot({"fs": healthy, "code": stale}))
+
+    table = page.findChild(QTableWidget, "tunnel-slot-table")
+    headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+    assert headers[3:] == ["Health basis", "Health age (s)"]
+    assert (_cell(table, 0, 3), _cell(table, 0, 4)) == ("client_reported", "42")
+    assert (_cell(table, 1, 3), _cell(table, 1, 4)) == ("", "")
+
+
+def _page_buttons(page):
+    """Every button under the page, except the select-all corner button Qt puts inside a QTableWidget.
+
+    That corner button belongs to the table and does nothing with NoSelection, so it is not a
+    control the page offers. Any other button counts.
+    """
+    table = page.findChild(QTableWidget, "tunnel-slot-table")
+    buttons = page.findChildren(QAbstractButton)
+    for button in buttons:
+        if button.objectName() == "qt_tableview_cornerbutton":
+            assert button.parent() is table
+    return [button for button in buttons if button.objectName() != "qt_tableview_cornerbutton"]
+
+
+def test_tunnel_page_has_no_start_stop_or_restart_button(qtbot):
+    page = TunnelPage()
+    qtbot.addWidget(page)
+    assert _page_buttons(page) == []
+
+    page.set_snapshot(FIVE_STATE_SNAPSHOT)
+    assert _page_buttons(page) == []
+
+    # The module imports no button class either, so none can be added without this failing.
+    page_path = REPO / "meridian_desktop" / "ui" / "tunnel_page.py"
+    tree = ast.parse(page_path.read_text(encoding="utf-8"))
+    imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+    assert not {name for name in imported if name.endswith("Button")}

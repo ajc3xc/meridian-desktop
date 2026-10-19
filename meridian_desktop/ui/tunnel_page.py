@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop.tunnel_view import slot_rows, slots_of
+from meridian_desktop.tunnel_view import slot_details, slots_of
 
 NOT_AVAILABLE_TEXT = (
     "Tunnel slot states are not available. This build has no local source for them yet: "
@@ -29,7 +29,8 @@ NOT_AVAILABLE_TEXT = (
 )
 NO_SLOTS_TEXT = "The tunnel snapshot lists no slots."
 SHOWN_TEXT = "Slot states from the tunnel snapshot."
-SLOT_COLUMNS = ("Slot", "State", "Note")
+# The health columns come after Note, so the first three keep their positions.
+SLOT_COLUMNS = ("Slot", "State", "Note", "Health basis", "Health age (s)")
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -61,18 +62,23 @@ class TunnelPage(QWidget):
         layout.addWidget(self._table, 1)
 
     def set_snapshot(self, snapshot: Any) -> None:
-        """Show one row per slot in ``snapshot``. None, or a snapshot with no slots dict, says not available."""
-        rows = slot_rows(snapshot)
+        """Show one row per slot in ``snapshot``. None, or a snapshot with no slots dict, says not available.
+
+        The page has no start, stop or restart control. It only shows what it is given.
+        """
+        details = slot_details(snapshot)
         if slots_of(snapshot) is None:
             self._status.setText(NOT_AVAILABLE_TEXT)
-        elif not rows:
+        elif not details:
             self._status.setText(NO_SLOTS_TEXT)
         else:
             self._status.setText(SHOWN_TEXT)
 
-        self._table.setRowCount(len(rows))
-        for index, row in enumerate(rows):
-            for column, text in enumerate((row.slot, row.state, row.note)):
+        self._table.setRowCount(len(details))
+        for index, detail in enumerate(details):
+            row = detail.row
+            cells = (row.slot, row.state, row.note, detail.health_basis, detail.health_age)
+            for column, text in enumerate(cells):
                 self._table.setItem(index, column, QTableWidgetItem(text))
 
 
