@@ -157,6 +157,7 @@ NATIVE_DLL_PATTERNS = [
     r"libbz2\.dll",
     r"liblzma\.dll",
     r"zlib\d*\.dll",
+    r"sqlite3\.dll",
     r"msvcp140\S*\.dll",
     r"vcruntime140\S*\.dll",
     r"ucrtbase\.dll",

@@ -227,9 +227,11 @@ patterns = ["MSVCP140*.dll", "VCRUNTIME140*.dll", "ucrtbase.dll", "api-ms-win-*.
 # The two Microsoft ids are kept for Microsoft's runtime licences. No native_runtimes.toml
 # entry uses them now, because the Visual C++ runtime and the UCRT are not bundled (see
 # [microsoft_prerequisites]). A Microsoft runtime file in the bundle still fails the gate.
+# blessing is the SPDX id of SQLite's public-domain dedication (https://www.sqlite.org/copyright.html).
+# The SQLite entry in native_runtimes.toml is the only runtime that uses it.
 allowed_spdx = [
     "PSF-2.0", "Apache-2.0", "MIT", "Zlib", "0BSD", "bzip2-1.0.6", "MSL-1.0",
-    "LicenseRef-Microsoft-VC-Redist", "LicenseRef-Microsoft-Windows-SDK",
+    "LicenseRef-Microsoft-VC-Redist", "LicenseRef-Microsoft-Windows-SDK", "blessing",
 ]
 # Runtime digests in native_runtimes.toml are keyed by path relative to the bundle root
 # (D2). A runtime file that appears in more than one folder needs one digest for each path.

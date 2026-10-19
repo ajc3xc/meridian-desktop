@@ -57,13 +57,14 @@ environment was built from. Versions come from the conda-meta files of that envi
 
 | Runtime | Version | SPDX | Files in the bundle | Source (upstream licence page) | Licence text in the bundle |
 |---|---|---|---|---|---|
-| CPython | 3.12.15 | PSF-2.0 | python312.dll, python3.dll and 15 extension modules (.pyd) | https://docs.python.org/3/license.html | `THIRD_PARTY_LICENSES.txt`, section `== CPython 3.12.15 (PSF-2.0) ==` |
+| CPython | 3.12.15 | PSF-2.0 | python312.dll, python3.dll and 16 extension modules (.pyd) | https://docs.python.org/3/license.html | `THIRD_PARTY_LICENSES.txt`, section `== CPython 3.12.15 (PSF-2.0) ==` |
 | OpenSSL | 3.6.5 | Apache-2.0 | libcrypto-3-x64.dll, libssl-3-x64.dll | https://openssl-library.org/source/license/index.html | `THIRD_PARTY_LICENSES.txt`, section `== OpenSSL 3.6.5 (Apache-2.0) ==` |
 | libffi | 3.7.0 | MIT | ffi-8.dll | https://github.com/libffi/libffi/blob/master/LICENSE | `THIRD_PARTY_LICENSES.txt`, section `== libffi 3.7.0 (MIT) ==` |
 | expat | 2.8.5 | MIT | libexpat.dll | https://github.com/libexpat/libexpat/blob/master/expat/COPYING | `THIRD_PARTY_LICENSES.txt`, section `== expat 2.8.5 (MIT) ==` |
 | bzip2 | 1.0.8 | bzip2-1.0.6 | libbz2.dll | https://gitlab.com/bzip2/bzip2 | `THIRD_PARTY_LICENSES.txt`, section `== bzip2 1.0.8 (bzip2-1.0.6) ==` |
 | XZ Utils | 5.8.3 | 0BSD | liblzma.dll | https://github.com/tukaani-project/xz/blob/master/COPYING.0BSD | `THIRD_PARTY_LICENSES.txt`, section `== XZ Utils 5.8.3 (0BSD) ==` |
 | zlib | 1.3.2 | Zlib | zlib.dll | https://zlib.net/zlib_license.html | `THIRD_PARTY_LICENSES.txt`, section `== zlib 1.3.2 (Zlib) ==` |
+| SQLite | 3.54.0 | blessing (public domain dedication) | sqlite3.dll (library for the `_sqlite3` module) | https://www.sqlite.org/copyright.html | `THIRD_PARTY_LICENSES.txt`, section `== SQLite 3.54.0 (blessing) ==` |
 | Qt for Python extension binaries | 6.12.0 | LGPL-3.0-only (elected) | pyside6.abi3.dll (`_internal/PySide6/`), shiboken6.abi3.dll (`_internal/shiboken6/`) | https://www.qt.io/development/qt-framework/qt-licensing | `LICENSES/LGPL-3.0.txt`. THIRD_PARTY_LICENSES.txt section `== Qt for Python extension binaries 6.12.0 (LGPL-3.0-only) ==` |
 
 - The CPython text is the PSF licence, version 2. conda-forge labels the same package `Python-2.0`.
@@ -73,6 +74,11 @@ environment was built from. Versions come from the conda-meta files of that envi
   if a bundled copy of a listed file has no sha256 for its path, or if a native runtime DLL in the bundle
   is not listed there. A bundled copy whose sha256 differs from the value declared for its path is printed
   as RELEASE BLOCKED.
+- SQLite 3.54.0 is dedicated to the public domain by its authors. Its licence text is the copyright statement
+  at https://www.sqlite.org/copyright.html, fetched on 2026-10-19 and pinned as
+  `packaging/licenses/native/sqlite.txt`. That text is not a conda package file. The version is from the
+  `libsqlite-3.54.0` conda-meta record and the DLL's file version. conda-forge records the licence as the
+  SPDX identifier `blessing`, which `packaging/lgpl_manifest.toml` allows for native runtimes.
 
 ## Prerequisites
 

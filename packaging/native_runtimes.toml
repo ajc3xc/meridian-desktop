@@ -52,6 +52,7 @@ files = [
     "_overlapped.pyd",
     "_queue.pyd",
     "_socket.pyd",
+    "_sqlite3.pyd",
     "_ssl.pyd",
     "_wmi.pyd",
     "pyexpat.pyd",
@@ -73,6 +74,7 @@ notice_url = "https://docs.python.org/3/license.html"
 "_internal/_overlapped.pyd" = "9953a5c4b90dfa9e29a17c76c6be704cbf76512eb4af29c667806559b206de2b"
 "_internal/_queue.pyd" = "b015f12fcb5d27ade024cc47808e1c3f95d23f80f35e472bf07882ac1ce57554"
 "_internal/_socket.pyd" = "b4047c86ef5facc7a75052c3afc5d6cc766b02a16970ef33b7d5eb56cbec96b8"
+"_internal/_sqlite3.pyd" = "c7b8dfac4ffe7d6e603f1e13dba6b618bcb1bbf863bd4b22d8a347a30908e4e9"
 "_internal/_ssl.pyd" = "53ebf568c64758d71c579c6387ad3d349b0dbaf979ae763ca4971835ade8b609"
 "_internal/_wmi.pyd" = "ab9774c4f96297d92e5867d8e0d6da145c336f4d9d415d4ad0408bbdd5f87376"
 "_internal/pyexpat.pyd" = "1beb87913332197d8869623261421f010d46cab789057f6382c91bb715dcfc53"
@@ -152,6 +154,23 @@ notice_url = "https://zlib.net/zlib_license.html"
 
 [runtime.sha256]
 "_internal/zlib.dll" = "f4f26ea6300c8449daad4650915e01ac80aafc6ca8b73a50be450f1fb66cdd63"
+
+# SQLite is the library behind the sqlite3 module (_sqlite3.pyd, listed under CPython). Its licence is
+# the SQLite public-domain dedication, which conda-forge records as the SPDX id "blessing". The licence
+# text is the statement at https://www.sqlite.org/copyright.html, pinned as
+# packaging/licenses/native/sqlite.txt. The version 3.54.0 is from conda-meta/libsqlite-3.54.0-hf5d6505_101.json
+# and the DLL's FileVersion.
+[[runtime]]
+name = "SQLite"
+version = "3.54.0"
+spdx = "blessing"
+files = [
+    "sqlite3.dll",
+]
+notice_url = "https://www.sqlite.org/copyright.html"
+
+[runtime.sha256]
+"_internal/sqlite3.dll" = "aa42d12130f9962d81fae4e655d20e760759d2c8551b44817f7c3181a7307cb1"
 
 
 # Microsoft runtime files are not bundled, so they have no entries here. The Visual C++ 2015-2022
