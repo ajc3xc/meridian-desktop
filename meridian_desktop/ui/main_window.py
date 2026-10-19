@@ -2,11 +2,12 @@
 
 The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
 (wave 2), with the connection settings (local URL, database file, saved mode) above
-its rows. The other tabs are still placeholders. Qt code lives in
-meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
-settings_store and the RunPod key goes through secret_store, and neither imports
-Qt. The only network calls are loopback calls to the local Meridian server at the
-local_url setting. The panel and the Projects tab make them when a tab is first
+its rows. The Writing tab holds the LaTeX engine probe under its section label (wave 2).
+The other tabs are still placeholders. Qt code lives in meridian_desktop/ui/ (and the
+listed exception tray.py). Settings go through settings_store and the RunPod key goes
+through secret_store, and neither imports Qt. The only network calls are loopback calls:
+to the local Meridian server at the local_url setting, and to the local LaTeX engine at
+the engine_url setting. The panels and the Projects tab make them when a tab is first
 shown and when a button is pressed. No other host is contacted.
 """
 
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
@@ -42,9 +44,10 @@ TAB_SPECS = (
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
 
+LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
 WRITING_SECTIONS = (
     "DOCX (meridian-docs)",
-    "LaTeX (local engine on 127.0.0.1:8471)",
+    LATEX_SECTION,
     "Google Docs (approach not decided)",
 )
 
@@ -55,7 +58,14 @@ STATUS_MESSAGE = "No services checked yet"
 DEFAULT_WINDOW_SIZE = (960, 640)
 
 
-def _placeholder_page(name: str, wave: int, parent: QWidget) -> QWidget:
+def _placeholder_page(
+    name: str,
+    wave: int,
+    parent: QWidget,
+    section_widgets: dict[str, QWidget] | None = None,
+) -> QWidget:
+    """A tab that is not built yet. ``section_widgets`` maps a Writing section label to a widget
+    placed directly below that label, so a built section keeps its label."""
     page = QWidget(parent)
     page.setObjectName(f"placeholder-{name.lower()}")
     layout = QVBoxLayout(page)
@@ -63,6 +73,8 @@ def _placeholder_page(name: str, wave: int, parent: QWidget) -> QWidget:
     if name == "Writing":
         for section in WRITING_SECTIONS:
             layout.addWidget(QLabel(section, page))
+            if section_widgets and section in section_widgets:
+                layout.addWidget(section_widgets[section])
     layout.addStretch(1)
     return page
 
@@ -98,6 +110,10 @@ class MainWindow(QMainWindow):
                 # so the Settings page is still the RunPod panel.
                 self._settings_tab = SettingsTab(self._store, parent=page)
                 page.layout().insertWidget(0, self._settings_tab)
+            elif name == "Writing":
+                # The LaTeX probe sits under its section label. Makes no request until shown.
+                latex = LatexPanel(self._store, parent=self.tabs)
+                page = _placeholder_page(name, wave, self.tabs, {LATEX_SECTION: latex})
             else:
                 page = _placeholder_page(name, wave, self.tabs)
             self.tabs.addTab(page, name)
