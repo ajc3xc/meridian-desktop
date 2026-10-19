@@ -100,6 +100,8 @@ class MainWindow(QMainWindow):
 
     def _build_mode_bar(self, parent: QWidget) -> QHBoxLayout:
         result = self._store.load()
+        # The mode the selector last saved, or loaded at start. A failed save reverts to it.
+        self._saved_mode = result.settings.mode
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Mode:", parent))
 
@@ -125,7 +127,17 @@ class MainWindow(QMainWindow):
         try:
             self._store.set_mode(mode)
         except (OSError, ValueError) as exc:
+            self._revert_mode_selector()
             self.settings_warning.setText(f"Settings: could not save mode ({exc.__class__.__name__})")
             self.settings_warning.show()
             return
+        self._saved_mode = mode
         self.settings_warning.hide()
+
+    def _revert_mode_selector(self) -> None:
+        """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""
+        self.mode_selector.blockSignals(True)
+        try:
+            self.mode_selector.setCurrentIndex(self.mode_selector.findData(self._saved_mode))
+        finally:
+            self.mode_selector.blockSignals(False)

@@ -3,6 +3,7 @@
 from PySide6.QtWidgets import QLabel
 
 from meridian_desktop import __main__ as entry
+from meridian_desktop import settings_store
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import TAB_NAMES, WRITING_SECTIONS, MainWindow
 
@@ -91,6 +92,40 @@ def test_mode_selector_reads_saved_mode(qtbot, settings_path):
     SettingsStore(settings_path).set_mode("hosted")
     window = _window(qtbot, settings_path)
     assert window.mode_selector.currentData() == "hosted"
+
+
+def test_failed_mode_save_reverts_selector(qtbot, settings_path, monkeypatch):
+    SettingsStore(settings_path).set_mode("hosted")
+    before = settings_path.read_bytes()
+    window = _window(qtbot, settings_path)
+    window.show()
+    qtbot.waitExposed(window)
+    combo = window.mode_selector
+    assert combo.currentData() == "hosted"
+
+    attempts = []
+    real_save = SettingsStore.save
+
+    def counting_save(self, settings):
+        attempts.append(settings.mode)
+        return real_save(self, settings)
+
+    def failing_replace(src, dst):
+        # The last step of the atomic save. Failing here leaves settings.json as it was.
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(SettingsStore, "save", counting_save)
+    monkeypatch.setattr(settings_store.os, "replace", failing_replace)
+
+    combo.setCurrentIndex(combo.findData("local"))
+
+    # One attempt for the user's change. The revert must not trigger a second save.
+    assert attempts == ["local"]
+    assert combo.currentData() == "hosted"
+    assert "could not save mode" in window.settings_warning.text()
+    assert window.settings_warning.isVisible()
+    assert settings_path.read_bytes() == before
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == ["settings.json"]
 
 
 def test_status_bar_text(qtbot, settings_path):
