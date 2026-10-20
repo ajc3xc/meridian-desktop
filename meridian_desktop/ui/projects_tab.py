@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import local_client, projects_reader, token_store
+from meridian_desktop import hosted_client, local_client, projects_reader, token_store
 from meridian_desktop.data_source import (
     SOURCE_FILE,
     SOURCE_HOSTED,
@@ -80,23 +80,19 @@ def _server_rows_not_built(url: str) -> list[dict[str, Any]]:
     raise SourceNotBuilt("reading projects from the running server is not built yet")
 
 
-def _hosted_rows_not_built(url: str, token: str) -> list[dict[str, Any]]:
-    # The token is not used. No hosted call is made, so nothing is sent to any host.
-    raise SourceNotBuilt("reading hosted projects is not built yet")
-
-
 def default_sources(secrets: SecretStore) -> DataSources:
-    """The data sources the app uses. Probe, file and token are real. The server and hosted readers are not built yet.
+    """The data sources the app uses. Probe, file, token and hosted reader are real. Only the running-server reader is not built.
 
     The probe is loopback only (local_client.probe_health). The file reader opens the database
     read-only. The token comes from the keychain through token_store, and only in hosted mode.
+    The hosted reader is hosted_client.list_projects: one GET /projects with the bearer token.
     """
     return DataSources(
         probe=lambda url: local_client.probe_health(url, PROBE_TIMEOUT),
         read_server=_server_rows_not_built,
         read_file=projects_reader.list_projects,
         get_token=lambda: token_store.get_token(store=secrets),
-        list_hosted=_hosted_rows_not_built,
+        list_hosted=hosted_client.list_projects,
     )
 
 

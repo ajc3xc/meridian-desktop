@@ -13,12 +13,13 @@ Hosted mode:
 
 This module makes no network call and reads no file itself. Each outside effect is an
 injected callable in DataSources. The app passes the real functions (local_client.probe_health,
-a server reader, projects_reader.list_projects, token_store.get_token and the hosted client),
+a server reader, projects_reader.list_projects, token_store.get_token and hosted_client.list_projects),
 and tests pass fakes. The token goes only to the hosted client. It never appears in a
 Resolution, a message or an error.
 
-A failed read gives state "read_failed", with the chosen source and no rows. Its message
-names the exception class only, never a path, a token or a response body.
+A failed read gives state "read_failed", with the chosen source and no rows. A HostedError
+(from hosted_client) gives its own fixed text, which holds no token, body or path. Any other
+exception is named by its class only, never a path, a token or a response body.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from meridian_desktop import local_client
+from meridian_desktop.hosted_client import HostedError
 from meridian_desktop.settings_store import VALID_MODES, Settings
 
 SOURCE_SERVER = "server"
@@ -45,8 +47,8 @@ NO_LOCAL_DATA_MESSAGE = (
     "file was found. Start Meridian on this computer, or choose a database file in Settings."
 )
 NOT_SIGNED_IN_MESSAGE = (
-    "Hosted mode is not signed in, so no hosted projects are loaded. "
-    "Sign in to hosted Meridian on this computer to load them."
+    "No hosted token is saved, so no hosted projects are loaded. "
+    "Paste your hosted token in Settings and press Save token."
 )
 _READ_FAILED_TEXT = {
     SOURCE_SERVER: "The local Meridian server could not be read",
@@ -93,6 +95,9 @@ def _is_file(text: str) -> bool:
 
 
 def _read_failed_message(source: str, exc: BaseException) -> str:
+    if isinstance(exc, HostedError):
+        # The hosted client's messages are fixed text: no token, no response body, no raw exception.
+        return f"{_READ_FAILED_TEXT[source]}. {exc}"
     return f"{_READ_FAILED_TEXT[source]} ({exc.__class__.__name__})."
 
 
