@@ -1,13 +1,16 @@
-"""Connection settings on the Settings tab: the local server URL and the database file, and the saved mode.
+"""Connection settings on the Settings tab: the hosted Meridian URL and token, the local server URL, the database file, and the saved mode.
 
-This is Qt code and sits in ui/, so the boundary check allows it. The main window places it
-above the RunPod panel, in that panel's own layout, so the Settings tab's page stays the RunPod
-panel.
+This is Qt code and sits in ui/, so the boundary check allows it. The main window places it above
+the RunPod panel, in that panel's own layout, so the Settings tab's page stays the RunPod panel.
 
-The local URL is checked with local_client.assert_loopback before anything is written. A value
-that is not an http loopback URL is refused inline, and the settings file is not touched. The
-database file is picked with a file dialog, and only its path is saved. The hosted token is not
-shown or entered here, and this module does not import token_store.
+The hosted URL is checked with hosted_client.validate_base_url before anything is written. The
+hosted token is typed into a password field, saved to the keychain through token_store, and never
+written to the settings file. The tab shows only whether a token is set. Test connection makes one
+GET /projects with the saved URL and token, on a worker thread, and shows the result in plain words.
+
+The local URL is checked with local_client.assert_loopback before anything is written. A value that
+is not an http loopback URL is refused inline, and the settings file is not touched. The database
+file is picked with a file dialog, and only its path is saved.
 
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the
 main window calls refresh() after each save, so both always show the same saved mode.
@@ -18,12 +21,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
+from meridian_desktop import hosted_client, token_store
+from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
-from meridian_desktop.settings_store import DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
+from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -36,14 +44,37 @@ NOT_CHOSEN_TEXT = "No database file chosen yet."
 LOCAL_URL_SAVED_TEXT = "Local URL saved."
 DB_SAVED_TEXT = "Database file saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
+HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
+TOKEN_SET_TEXT = "Hosted token: set"
+TOKEN_NOT_SET_TEXT = "Hosted token: not set"
+TOKEN_EMPTY_TEXT = "Paste the hosted token into the box, then press Save token."
+TOKEN_SAVED_TEXT = "Hosted token saved in the keychain. The box is cleared."
+TOKEN_REMOVED_TEXT = "Hosted token removed from the keychain."
+TOKEN_NOTHING_REMOVED_TEXT = "No hosted token was saved, so nothing was removed."
+TEST_RUNNING_TEXT = "Testing the saved hosted URL and token..."
+TEST_CONNECTED_TEXT = "Connected to {url}. Hosted Meridian returned {count} project(s)."
+TEST_UNEXPECTED_TEXT = "Connection test failed ({name})."
 
 # A file chooser takes (parent, start directory) and returns the chosen path, or "" when cancelled.
 FileChooser = Callable[[QWidget, str], str]
+# The hosted list call: (hosted URL, token or None) -> the project rows. hosted_client.list_projects by default.
+ListHostedFn = Callable[[str, str | None], list[Any]]
 
 
 def mode_text(mode: str) -> str:
     """The saved mode as this tab shows it."""
     return f"Mode: {MODE_LABELS.get(mode, mode)} (set by the Mode selector above)"
+
+
+def describe_test_failure(exc: BaseException) -> str:
+    """Plain words for a failed connection test.
+
+    A HostedError carries fixed text, with no token, body or raw exception. Any other error is
+    named by its class only, so its text (which may hold a value) is never shown.
+    """
+    if isinstance(exc, HostedError):
+        return str(exc)
+    return TEST_UNEXPECTED_TEXT.format(name=exc.__class__.__name__)
 
 
 def _choose_database_file(parent: QWidget, start_dir: str) -> str:
@@ -66,19 +97,46 @@ def _set_message(label: QLabel, text: str) -> None:
     label.setVisible(bool(text))
 
 
+class _ConnectionTestJob(QRunnable):
+    """Run one connection test on the thread pool and deliver its plain-words text."""
+
+    def __init__(self, work: Callable[[], str], deliver: Callable[[str], None]) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._work = work
+        self._deliver = deliver
+
+    def run(self) -> None:
+        try:
+            text = self._work()
+        except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+            text = describe_test_failure(exc)
+        try:
+            self._deliver(text)
+        except RuntimeError:
+            pass  # the tab was deleted while the test ran
+
+
 class SettingsTab(QWidget):
-    """Edit the local server URL and the database file, and show the saved mode."""
+    """Edit the hosted URL and token, test the hosted connection, edit the local URL and the database file, and show the saved mode."""
+
+    _test_done = Signal(str)
 
     def __init__(
         self,
         settings_store: SettingsStore,
         parent: QWidget | None = None,
         choose_database: FileChooser = _choose_database_file,
+        secrets: SecretStore | None = None,
+        list_hosted: ListHostedFn | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
         self._store = settings_store
         self._choose_database = choose_database
+        self._secrets = secrets if secrets is not None else KeyringSecretStore()
+        self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
+        self._test_done.connect(self._on_test_done)
         self._build()
         self.refresh()
 
@@ -91,9 +149,59 @@ class SettingsTab(QWidget):
         self._mode = _label(self, "settings-mode")
         layout.addWidget(self._mode)
 
+        settings = self._store.load().settings
+
+        # Hosted Meridian: the URL, then the token, then the connection test.
+        hosted_url_row = QHBoxLayout()
+        hosted_url_row.addWidget(make_selectable(QLabel("Hosted URL:", self)))
+        self._hosted_url = QLineEdit(settings.hosted_url, self)
+        self._hosted_url.setObjectName("settings-hosted-url")
+        self._hosted_url.setPlaceholderText(DEFAULT_HOSTED_URL)
+        hosted_url_row.addWidget(self._hosted_url, 1)
+        self._save_hosted_url = QPushButton("Save hosted URL", self)
+        self._save_hosted_url.setObjectName("settings-save-hosted-url")
+        hosted_url_row.addWidget(self._save_hosted_url)
+        layout.addLayout(hosted_url_row)
+
+        self._hosted_url_message = _label(self, "settings-hosted-url-message")
+        self._hosted_url_message.setVisible(False)
+        layout.addWidget(self._hosted_url_message)
+
+        token_row = QHBoxLayout()
+        self._token_status = _label(self, "settings-token-status")
+        token_row.addWidget(self._token_status)
+        self._token_input = QLineEdit(self)
+        self._token_input.setObjectName("settings-token-input")
+        self._token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._token_input.setPlaceholderText("Paste the hosted token")
+        token_row.addWidget(self._token_input, 1)
+        self._save_token = QPushButton("Save token", self)
+        self._save_token.setObjectName("settings-save-token")
+        token_row.addWidget(self._save_token)
+        self._remove_token = QPushButton("Remove token", self)
+        self._remove_token.setObjectName("settings-remove-token")
+        token_row.addWidget(self._remove_token)
+        layout.addLayout(token_row)
+
+        self._token_message = _label(self, "settings-token-message")
+        self._token_message.setVisible(False)
+        layout.addWidget(self._token_message)
+
+        test_row = QHBoxLayout()
+        self._test_button = QPushButton("Test connection", self)
+        self._test_button.setObjectName("settings-test-connection")
+        test_row.addWidget(self._test_button)
+        test_row.addStretch(1)
+        layout.addLayout(test_row)
+
+        self._test_result = _label(self, "settings-test-result")
+        self._test_result.setVisible(False)
+        layout.addWidget(self._test_result)
+
+        # Local Meridian server and the database file.
         url_row = QHBoxLayout()
         url_row.addWidget(make_selectable(QLabel("Local URL:", self)))
-        self._local_url = QLineEdit(self._store.load().settings.local_url, self)
+        self._local_url = QLineEdit(settings.local_url, self)
         self._local_url.setObjectName("settings-local-url")
         self._local_url.setPlaceholderText(DEFAULT_LOCAL_URL)
         url_row.addWidget(self._local_url, 1)
@@ -119,21 +227,108 @@ class SettingsTab(QWidget):
         self._db_message.setVisible(False)
         layout.addWidget(self._db_message)
 
+        self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
+        self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
+        self._save_token.clicked.connect(self._on_save_token_clicked)
+        self._token_input.returnPressed.connect(self._on_save_token_clicked)
+        self._remove_token.clicked.connect(self._on_remove_token_clicked)
+        self._test_button.clicked.connect(self._on_test_clicked)
         self._save_url.clicked.connect(self._on_save_url_clicked)
         self._local_url.returnPressed.connect(self._on_save_url_clicked)
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
 
     def refresh(self) -> None:
-        """Show the saved mode and database file. The main window calls this after a mode change."""
+        """Show the saved mode, the database file and whether a hosted token is set. The main window calls this after a mode change."""
         settings = self._store.load().settings
         self._mode.setText(mode_text(settings.mode))
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
+        self._refresh_token_status()
+
+    def _refresh_token_status(self) -> None:
+        """Show only whether a token is saved. The value is read here and never shown.
+
+        A keychain read that fails reads as not set, the same as the resolver reads it.
+        """
+        stored = bool(token_store.get_token(store=self._secrets))
+        self._token_status.setText(TOKEN_SET_TEXT if stored else TOKEN_NOT_SET_TEXT)
 
     # ----------------------------------------------------------- saving
 
     def _update(self, **changes: object) -> None:
         """Save changed fields through the store. Every other field in the saved file is kept."""
         self._store.save(replace(self._store.load().settings, **changes))
+
+    @Slot()
+    def _on_save_hosted_url_clicked(self) -> None:
+        try:
+            url = hosted_client.validate_base_url(self._hosted_url.text())
+        except BadBaseUrl as exc:
+            # The text is fixed wording from hosted_client. The value typed is not repeated.
+            _set_message(self._hosted_url_message, f"Not saved. {exc}")
+            return
+        try:
+            self._update(hosted_url=url)
+        except (OSError, ValueError):
+            _set_message(self._hosted_url_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        self._hosted_url.setText(url)
+        _set_message(self._hosted_url_message, HOSTED_URL_SAVED_TEXT)
+
+    @Slot()
+    def _on_save_token_clicked(self) -> None:
+        value = self._token_input.text()
+        if not value.strip():
+            _set_message(self._token_message, TOKEN_EMPTY_TEXT)
+            return
+        try:
+            hosted_client.usable_token(value)  # refuses a value with spaces before the keychain sees it
+        except HostedError as exc:
+            _set_message(self._token_message, f"Not saved. {exc}")
+            return
+        try:
+            token_store.set_token(value, store=self._secrets)
+        except TokenStoreError as exc:
+            # TokenStoreError text names the step and the error class only, never the token.
+            _set_message(self._token_message, f"Not saved. {exc}")
+            return
+        self._token_input.clear()
+        self._refresh_token_status()
+        _set_message(self._token_message, TOKEN_SAVED_TEXT)
+
+    @Slot()
+    def _on_remove_token_clicked(self) -> None:
+        try:
+            removed = token_store.delete_token(store=self._secrets)
+        except TokenStoreError as exc:
+            _set_message(self._token_message, f"Not removed. {exc}")
+            return
+        self._refresh_token_status()
+        _set_message(self._token_message, TOKEN_REMOVED_TEXT if removed else TOKEN_NOTHING_REMOVED_TEXT)
+
+    # ----------------------------------------------------------- connection test
+
+    @Slot()
+    def _on_test_clicked(self) -> None:
+        self._test_button.setEnabled(False)
+        _set_message(self._test_result, TEST_RUNNING_TEXT)
+        QThreadPool.globalInstance().start(_ConnectionTestJob(self._run_connection_test, self._test_done.emit))
+
+    def _run_connection_test(self) -> str:
+        """Runs on a worker. One GET /projects with the saved URL and token. Returns the text to show."""
+        url = self._store.load().settings.hosted_url
+        token = token_store.get_token(store=self._secrets)
+        try:
+            rows = self._list_hosted(url, token)
+        except Exception as exc:  # noqa: BLE001 - shown as plain words, never as the raw exception
+            return describe_test_failure(exc)
+        return TEST_CONNECTED_TEXT.format(url=url, count=len(rows))
+
+    @Slot(str)
+    def _on_test_done(self, text: str) -> None:
+        self._test_button.setEnabled(True)
+        _set_message(self._test_result, text)
+
+    # ----------------------------------------------------------- local settings
 
     @Slot()
     def _on_save_url_clicked(self) -> None:
@@ -170,10 +365,16 @@ class SettingsTab(QWidget):
 __all__ = [
     "DB_FILE_FILTER",
     "DB_SAVED_TEXT",
+    "HOSTED_URL_SAVED_TEXT",
     "LOCAL_URL_SAVED_TEXT",
     "MODE_ITEMS",
     "NOT_CHOSEN_TEXT",
     "NOT_WRITTEN_TEXT",
+    "TEST_CONNECTED_TEXT",
+    "TEST_UNEXPECTED_TEXT",
+    "TOKEN_NOT_SET_TEXT",
+    "TOKEN_SET_TEXT",
     "SettingsTab",
+    "describe_test_failure",
     "mode_text",
 ]

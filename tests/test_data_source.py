@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from _fakes import QuietServer
-from meridian_desktop import data_source, local_client
+from _fakes import MemoryKeyring, QuietServer
+from meridian_desktop import data_source, hosted_client, local_client
 from meridian_desktop.data_source import (
     NO_LOCAL_DATA_MESSAGE,
     NOT_SIGNED_IN_MESSAGE,
@@ -325,3 +325,73 @@ def test_resolver_module_imports_no_qt():
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             imported.append(node.module)
     assert [name for name in imported if name.split(".")[0] in QT_ROOTS] == []
+
+
+def test_hosted_failure_gives_the_client_text_and_no_token(db_file):
+    fakes = FakeSources(token=FAKE_TOKEN, hosted_error=hosted_client.HostedUnreachable())
+
+    result = resolve(hosted_settings(db_file), fakes.sources())
+
+    assert result.state == STATE_READ_FAILED
+    assert result.source == SOURCE_HOSTED
+    assert result.rows == []
+    assert result.message == f"Hosted Meridian projects could not be loaded. {hosted_client.UNREACHABLE_TEXT}"
+    assert FAKE_TOKEN not in result.message
+
+
+def test_hosted_url_refusal_is_shown_in_plain_words(db_file):
+    refusal = hosted_client.BadBaseUrl(hosted_client.BAD_SCHEME_TEXT)
+    fakes = FakeSources(token=FAKE_TOKEN, hosted_error=refusal)
+
+    result = resolve(hosted_settings(db_file), fakes.sources())
+
+    assert result.state == STATE_READ_FAILED
+    assert result.message == f"Hosted Meridian projects could not be loaded. {hosted_client.BAD_SCHEME_TEXT}"
+
+
+def test_not_signed_in_message_says_where_to_save_the_token():
+    assert "Settings" in NOT_SIGNED_IN_MESSAGE
+    assert "Save token" in NOT_SIGNED_IN_MESSAGE
+    assert "sign in" not in NOT_SIGNED_IN_MESSAGE.lower()
+
+
+def test_default_hosted_reader_is_the_hosted_client(db_file, monkeypatch):
+    # The real wiring: default_sources reads the hosted client at call time. The client is replaced
+    # here, so no request is made, and the call shows the URL and token it was given.
+    from meridian_desktop.secret_store import KeyringSecretStore
+    from meridian_desktop.token_store import set_token
+    from meridian_desktop.ui.projects_tab import default_sources
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_list(base_url, token, **_options):
+        calls.append((base_url, token))
+        return list(HOSTED_ROWS)
+
+    monkeypatch.setattr(hosted_client, "list_projects", fake_list)
+    backend = MemoryKeyring()
+    secrets = KeyringSecretStore(backend=backend)
+    set_token(FAKE_TOKEN, store=secrets)
+
+    result = resolve(hosted_settings(db_file), default_sources(secrets))
+
+    assert result.state == STATE_OK
+    assert result.source == SOURCE_HOSTED
+    assert result.rows == HOSTED_ROWS
+    assert calls == [(HOSTED_URL, FAKE_TOKEN)]
+
+
+def test_default_hosted_reader_without_a_token_sends_nothing(db_file, monkeypatch):
+    from meridian_desktop.secret_store import KeyringSecretStore
+    from meridian_desktop.ui.projects_tab import default_sources
+
+    def no_call(*args, **kwargs):
+        raise AssertionError("the hosted client was called with no token")
+
+    monkeypatch.setattr(hosted_client, "list_projects", no_call)
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+
+    result = resolve(hosted_settings(db_file), default_sources(secrets))
+
+    assert result.state == STATE_NOT_SIGNED_IN
+    assert result.message == NOT_SIGNED_IN_MESSAGE
