@@ -60,6 +60,8 @@ DIST_DIR = REPO / "dist"
 BUILD_DIR = REPO / "build"
 BUNDLE_DIR = DIST_DIR / APP_NAME
 INTERNAL_DIR = BUNDLE_DIR / "_internal"  # PyInstaller 6 keeps dist-infos and data here
+# The exe's embedded icon, which the Start Menu and desktop shortcuts show. Made by make_icon.ps1.
+ICON = REPO / "packaging" / "assets" / "meridian-desktop.ico"
 MANIFEST = REPO / "packaging" / "lgpl_manifest.toml"
 RUNTIMES = REPO / "packaging" / "native_runtimes.toml"
 SHA256SUMS = REPO / "packaging" / "licenses" / "SHA256SUMS"
@@ -207,6 +209,8 @@ def pyinstaller_command(metadata: list[str]) -> list[str]:
         "--clean",
         "--onedir",
         "--windowed",
+        "--icon",
+        str(ICON),
         "--name",
         APP_NAME,
         "--distpath",
@@ -751,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not ENTRY.is_file():
         raise SystemExit(f"entry point not found: {ENTRY}")
+    if not ICON.is_file():
+        raise SystemExit(f"icon not found: {ICON} (run packaging/make_icon.ps1)")
     check_licence_pins()
     check_licence_texts()
     check_pyinstaller_notice()
