@@ -50,11 +50,13 @@ from meridian_desktop.ui.settings_tab import (
 )
 from meridian_desktop.ui.tunnel_page import NOT_AVAILABLE_TEXT, TunnelPage
 
-EXPECTED_TABS = ("Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Logs", "Settings")
-# The tabs that are still placeholders, with what each one says is missing. Zotero is a working tab.
+EXPECTED_TABS = (
+    "Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Outputs", "Research", "Logs", "Settings",
+)
+# The tabs that are still placeholders, with what each one says is missing. Only Writing is left:
+# its DOCX and Google Docs sections are not built. Zotero, Code, Outputs and Research are working tabs.
 EXPECTED_PLACEHOLDERS = {
     "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
-    "Code": "Code search is not in this build yet. It needs a search route on the local server (megasprint item MS-049).",
 }
 # The wave-3 tabs, each with its page's object name and class.
 WAVE3_PAGES = {

@@ -35,8 +35,11 @@ from meridian_desktop import zotero_client
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.code_panel import CodePanel
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
+from meridian_desktop.ui.outputs_panel import OutputsPanel
+from meridian_desktop.ui.research_panel import ResearchPanel
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.services_page import ServicesPage
@@ -53,6 +56,8 @@ TAB_SPECS = (
     ("Tunnel", 3),
     ("Services", 3),
     ("Code", 6),
+    ("Outputs", 6),
+    ("Research", 6),
     ("Logs", 3),
     ("Settings", 2),
 )
@@ -68,7 +73,6 @@ WRITING_SECTIONS = (
 # What a placeholder tab says is missing, in plain words. Nothing here says "not built yet".
 PLACEHOLDER_REASONS = {
     "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
-    "Code": "Code search is not in this build yet. It needs a search route on the local server (megasprint item MS-049).",
 }
 
 STATUS_MESSAGE = "No services checked yet. Press Check services on the Services tab."
@@ -149,6 +153,13 @@ class MainWindow(QMainWindow):
                 # The status check runs when the tab is first shown and when Refresh is pressed.
                 # Zotero starts only after the owner confirms in the dialog.
                 page = ZoteroPanel(client=self._zotero, parent=self.tabs)
+            elif name == "Code":
+                # Search runs only when the owner presses Search. The local URL is read at that moment.
+                page = CodePanel(self._current_local_url, parent=self.tabs)
+            elif name == "Outputs":
+                page = OutputsPanel(self._current_local_url, parent=self.tabs)
+            elif name == "Research":
+                page = ResearchPanel(self._current_local_url, parent=self.tabs)
             else:
                 page = _placeholder_page(name, self.tabs)
             self.tabs.addTab(page, name)
@@ -160,6 +171,10 @@ class MainWindow(QMainWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
+
+    def _current_local_url(self) -> str:
+        """The local server URL as saved now. The Code, Outputs and Research panels call this when they search."""
+        return self._store.load().settings.local_url
 
     def _build_mode_bar(self, parent: QWidget) -> QHBoxLayout:
         result = self._store.load()
