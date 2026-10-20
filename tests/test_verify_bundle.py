@@ -7,6 +7,7 @@ lines, never tracebacks). Bundles here are small fakes built in tmp_path.
 
 import importlib.metadata
 import importlib.util
+import sys
 import types
 from pathlib import Path
 
@@ -264,6 +265,7 @@ def test_zip_member_errors_are_reported_not_raised(tmp_path):
     assert any("zip archive not scanned" in p for p in problems)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="reads Qt6Core.dll from the Windows PySide6 wheel")
 def test_real_qt_core_version_is_read_from_resources():
     import importlib.util
     from pathlib import Path

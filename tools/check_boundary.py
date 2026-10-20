@@ -49,6 +49,7 @@ FORBIDDEN_REFS = (
 # Generated or dependency trees. They are not repo content.
 SKIP_DIRS = {
     ".git",
+    ".claude",  # agent worktrees are full checkouts of this repo, scanned once per worktree
     ".pixi",
     ".venv",
     "venv",

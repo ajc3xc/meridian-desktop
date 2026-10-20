@@ -856,6 +856,7 @@ def test_namespace_package_is_owned_by_the_distributions_beneath_it(tmp_path):
     assert vb.pyz_owner_problems(["ns"], manifest, dists=[dist]) == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="expects the Windows keyring backend and the Windows bundle layout")
 def test_real_environment_owns_every_pyz_module_it_ships():
     manifest = vb.load_manifest(MANIFEST)
     names = [

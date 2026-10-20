@@ -6,14 +6,19 @@ Missing PySide6 or an unreadable PE file fails the test (fail closed).
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from importlib import util
 from pathlib import Path
 
 import pefile
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / "packaging" / "lgpl_manifest.toml"
+
+# Every test here reads Windows PE binaries (.dll and .pyd). Off Windows they have nothing to read.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="checks Windows PE binaries; runs on Windows only")
 
 
 def pyside_dir() -> Path:
