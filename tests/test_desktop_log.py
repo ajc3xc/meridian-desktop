@@ -349,10 +349,13 @@ def start_order(monkeypatch):
     return events, calls
 
 
-def test_main_starts_the_desktop_log_before_the_window_is_built(start_order, tmp_path, capsys):
+def test_main_starts_the_desktop_log_before_the_window_is_built(start_order, tmp_path, capsys, monkeypatch):
     events, calls = start_order
+    # The real event loop runs until the window closes, and the first-run dialog waits for a person.
+    # The test needs main to reach the loop, so the loop is stubbed to return at once.
+    monkeypatch.setattr(app_module.QApplication, "exec", lambda self: 0)
 
-    code = app_module.main([], settings_path=tmp_path / "settings.json")
+    code = app_module.main([], settings_path=tmp_path / "settings.json", first_run=False)
 
     assert code == 0
     assert events == ["log", "qapp", "window"]

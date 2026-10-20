@@ -88,7 +88,12 @@ class MeridianStub:
     def stop(self) -> None:
         if not self._stopped:
             self._stopped = True
-            self._server.shutdown()
+            if self._thread.is_alive():
+                # shutdown() waits for serve_forever to return. Bound that wait so a stuck stub
+                # cannot hang the whole test run.
+                closer = threading.Thread(target=self._server.shutdown, daemon=True)
+                closer.start()
+                closer.join(timeout=5)
             self._server.server_close()
 
     def _stored(self) -> str | None:
