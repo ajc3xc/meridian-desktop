@@ -43,6 +43,7 @@ from meridian_desktop import local_client
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import PROBE_HOST, SlotPortResult, probe_slot_ports
+from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 HEALTH_TIMEOUT = 2.0
 NOT_AVAILABLE = "not available"
@@ -122,7 +123,7 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 class _ChecksJob(QRunnable):
@@ -204,9 +205,10 @@ class ServicesPage(QWidget):
         self._table.setObjectName("services-ports-table")
         self._table.setHorizontalHeaderLabels(list(PORT_COLUMNS))
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(True)
+        enable_table_copy(self._table)
         layout.addWidget(self._table, 1)
 
         self._check_button = QPushButton(CHECK_BUTTON_TEXT, self)

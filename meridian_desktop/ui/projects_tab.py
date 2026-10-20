@@ -45,6 +45,7 @@ from meridian_desktop.data_source import (
 from meridian_desktop.projects_reader import PROJECT_COLUMNS
 from meridian_desktop.secret_store import SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
 LOADING_TEXT = "Loading projects..."
@@ -171,7 +172,7 @@ class ProjectsTab(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
 
-        self._status = QLabel(LOADING_TEXT, self)
+        self._status = make_selectable(QLabel(LOADING_TEXT, self))
         self._status.setObjectName("projects-status")
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setWordWrap(True)
@@ -188,8 +189,9 @@ class ProjectsTab(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(True)
         self._table.itemSelectionChanged.connect(self._show_detail)
+        enable_table_copy(self._table)
 
-        self._detail = QLabel(DETAIL_EMPTY_TEXT)
+        self._detail = make_selectable(QLabel(DETAIL_EMPTY_TEXT))
         self._detail.setObjectName("projects-detail")
         self._detail.setTextFormat(Qt.TextFormat.PlainText)
         self._detail.setWordWrap(True)

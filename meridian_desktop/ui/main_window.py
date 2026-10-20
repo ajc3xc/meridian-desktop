@@ -35,6 +35,7 @@ from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.services_page import ServicesPage
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
+from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tunnel_page import TunnelPage
 
 # (tab name, wave that builds it). Display order is the tuple order.
@@ -75,10 +76,10 @@ def _placeholder_page(
     page = QWidget(parent)
     page.setObjectName(f"placeholder-{name.lower()}")
     layout = QVBoxLayout(page)
-    layout.addWidget(QLabel(f"Not built yet (wave {wave})", page))
+    layout.addWidget(make_selectable(QLabel(f"Not built yet (wave {wave})", page)))
     if name == "Writing":
         for section in WRITING_SECTIONS:
-            layout.addWidget(QLabel(section, page))
+            layout.addWidget(make_selectable(QLabel(section, page)))
             if section_widgets and section in section_widgets:
                 layout.addWidget(section_widgets[section])
     layout.addStretch(1)
@@ -146,7 +147,7 @@ class MainWindow(QMainWindow):
         # The mode the selector last saved, or loaded at start. A failed save reverts to it.
         self._saved_mode = result.settings.mode
         bar = QHBoxLayout()
-        bar.addWidget(QLabel("Mode:", parent))
+        bar.addWidget(make_selectable(QLabel("Mode:", parent)))
 
         self.mode_selector = QComboBox(parent)
         self.mode_selector.setObjectName("mode-selector")
@@ -156,7 +157,7 @@ class MainWindow(QMainWindow):
         self.mode_selector.currentIndexChanged.connect(self._on_mode_changed)
         bar.addWidget(self.mode_selector)
 
-        self.settings_warning = QLabel(parent)
+        self.settings_warning = make_selectable(QLabel(parent))
         self.settings_warning.setObjectName("settings-warning")
         if result.warning:
             self.settings_warning.setText(f"Settings: {result.warning}")

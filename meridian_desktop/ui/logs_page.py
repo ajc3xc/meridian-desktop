@@ -35,6 +35,7 @@ from meridian_desktop.log_tail import (
     redact_line,
 )
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
+from meridian_desktop.ui.text import make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
 INTRO_UNREAD_TEXT = "Press Refresh to read the last part of both logs. Nothing is read until then."
@@ -107,13 +108,14 @@ def _heading(parent: QWidget, name: str, text: str) -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 def _pane(parent: QWidget, name: str) -> QPlainTextEdit:
     pane = QPlainTextEdit(parent)
     pane.setObjectName(name)
     pane.setReadOnly(True)
+    make_selectable(pane)  # after setReadOnly, which otherwise allows mouse selection only
     pane.setUndoRedoEnabled(False)
     return pane
 

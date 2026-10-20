@@ -33,6 +33,7 @@ from meridian_desktop import local_client
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
 RUNPOD_TIMEOUT = 30.0
@@ -190,7 +191,7 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 class RunPodPanel(QWidget):
@@ -271,6 +272,7 @@ class RunPodPanel(QWidget):
         header = self._pods.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(True)
+        enable_table_copy(self._pods)
         layout.addWidget(self._pods, 1)
 
         self._save_button.clicked.connect(self._on_save_clicked)

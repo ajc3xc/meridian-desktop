@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 from meridian_desktop import latex_client
 from meridian_desktop.latex_client import PROBE_TIMEOUT, EngineStatus
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.text import make_selectable
 
 UNCHECKED_TEXT = "LaTeX engine: not checked yet"
 CHECKING_TEXT = "LaTeX engine: checking..."
@@ -32,7 +33,7 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 def engine_version_text(status: EngineStatus | None) -> str:

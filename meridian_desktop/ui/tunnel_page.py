@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop.tunnel_view import slot_details, slots_of
+from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 NOT_AVAILABLE_TEXT = (
     "Tunnel slot states are not available. This build has no local source for them yet: "
@@ -38,7 +39,7 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 class TunnelPage(QWidget):
@@ -56,9 +57,10 @@ class TunnelPage(QWidget):
         self._table.setObjectName("tunnel-slot-table")
         self._table.setHorizontalHeaderLabels(list(SLOT_COLUMNS))
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(True)
+        enable_table_copy(self._table)
         layout.addWidget(self._table, 1)
 
     def set_snapshot(self, snapshot: Any) -> None:

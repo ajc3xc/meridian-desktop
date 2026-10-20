@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPush
 
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.settings_store import DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
 MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"))
@@ -56,7 +57,7 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
-    return label
+    return make_selectable(label)
 
 
 def _set_message(label: QLabel, text: str) -> None:
@@ -91,7 +92,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._mode)
 
         url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("Local URL:", self))
+        url_row.addWidget(make_selectable(QLabel("Local URL:", self)))
         self._local_url = QLineEdit(self._store.load().settings.local_url, self)
         self._local_url.setObjectName("settings-local-url")
         self._local_url.setPlaceholderText(DEFAULT_LOCAL_URL)
@@ -106,7 +107,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._url_message)
 
         db_row = QHBoxLayout()
-        db_row.addWidget(QLabel("Database file:", self))
+        db_row.addWidget(make_selectable(QLabel("Database file:", self)))
         self._db_path = _label(self, "settings-db-path")
         db_row.addWidget(self._db_path, 1)
         self._choose_db = QPushButton("Choose database file...", self)
