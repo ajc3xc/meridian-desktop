@@ -1,21 +1,24 @@
-"""Logs tab: a read-only look at the tunnel log and the runner's log tail.
+"""Logs tab: a read-only look at the desktop log, the tunnel log and the runner's log tail.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The page reads nothing when it
 is built or shown, starts no timer and polls nothing. It reads only when Refresh is pressed, and
-the reads run on the thread pool, so the UI thread never blocks. The two reads are:
+the reads run on the thread pool, so the UI thread never blocks. The three reads are:
 
+- the desktop log: the bounded, redacted tail that desktop_log.read_desktop_log_tail returns;
 - the tunnel log: the bounded, redacted tail that log_tail.read_tunnel_log_tail returns;
 - the runner log: the tail-log reply of the runner client. runner_client passes only the read
-  verbs, so no mutating verb is ever run from this page. Each line of the runner's output goes
-  through the same redaction pass as the tunnel log.
+  verbs, so no mutating verb is ever run from this page.
+
+Every line of every pane goes through desktop_log.redact_text, so no source can show a raw secret.
 
 The page has one button, Refresh. It has no clear, delete, rotate or truncate control, and it never
-writes to either log. Both panes are read-only plain text (QPlainTextEdit with setPlainText), and
-every label is PlainText, so a log line is never read as HTML.
+writes to any log. Every pane is read-only plain text (QPlainTextEdit with setPlainText), and every
+label is PlainText, so a log line is never read as HTML. Labels and panes can be selected to copy.
 
-A missing log shows "No log yet". A log that cannot be read shows fixed text. The desktop has no
-setting for the core's interpreter or runner scope yet, so the runner pane reads "not available"
-and starts nothing, the same as the Services tab.
+When a log is missing or empty, its pane says which process writes it and what to run to produce
+it. The desktop has no setting for the core's interpreter or runner scope, so the runner pane says
+the desktop cannot read the runner from here, and it gives the command to run by hand. It starts
+no process.
 """
 
 from __future__ import annotations
@@ -27,39 +30,89 @@ from typing import Any
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from meridian_desktop.desktop_log import read_desktop_log_tail, redact_text
 from meridian_desktop.log_tail import (
+    STATUS_NO_LOG_YET,
     STATUS_OK,
-    UNREADABLE_TEXT,
     LogTail,
     read_tunnel_log_tail,
-    redact_line,
 )
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.ui.text import make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
-INTRO_UNREAD_TEXT = "Press Refresh to read the last part of both logs. Nothing is read until then."
+INTRO_UNREAD_TEXT = "Press Refresh to read the end of all three logs. Nothing is read until then."
 INTRO_READING_TEXT = "Reading the logs..."
-INTRO_SHOWN_TEXT = "Both logs are shown read-only, with secret-shaped values redacted. Press Refresh to read them again."
+INTRO_SHOWN_TEXT = (
+    "All three logs are shown read-only, with secret-shaped values redacted. Press Refresh to read them again."
+)
+DESKTOP_HEADING = "Desktop log:"
 TUNNEL_HEADING = "Tunnel log:"
-TUNNEL_HEADING_PATH = "Tunnel log: {}"
 RUNNER_HEADING = "Runner log (tail-log):"
 READING_TEXT = "reading..."
-EMPTY_TUNNEL_TEXT = "The tunnel log is empty."
-RUNNER_EMPTY_TEXT = "No log yet. The runner has not written a log file for this scope."
-RUNNER_NOT_AVAILABLE_PREFIX = "Runner log not available."
-NO_LOG_TAIL_TEXT = "The runner reply did not include a log tail."
 FAILED_TEXT = "The {} check failed unexpectedly ({})."
 NO_RESULT = "NoResult"
+
+# The commands the user runs by hand, in the Meridian core folder. The desktop starts none of them.
+TUNNEL_COMMAND = "pixi run python -m meridian --tunnel"
+RUNNER_START_COMMAND = (
+    "pixi run python -m meridian.local_runner start --scope tunnel -- python -m meridian --tunnel"
+)
+RUNNER_TAIL_COMMAND = "pixi run python -m meridian.local_runner tail-log --scope tunnel"
+
+DESKTOP_MISSING_TEXT = (
+    "No log yet. The Meridian Desktop app writes this file each time it starts. "
+    "Close the app, open it again, then press Refresh."
+)
+DESKTOP_EMPTY_TEXT = (
+    "The desktop log is empty. The Meridian Desktop app writes to it each time it starts. "
+    "Close the app, open it again, then press Refresh."
+)
+DESKTOP_UNREADABLE_TEXT = "The desktop log exists but could not be read."
+TUNNEL_MISSING_TEXT = (
+    "No log yet. The Meridian core's tunnel writes this file while it runs. "
+    f"To create it, run `{TUNNEL_COMMAND}` in the Meridian core folder, then press Refresh."
+)
+EMPTY_TUNNEL_TEXT = (
+    "The tunnel log is empty. The Meridian core's tunnel writes to it while it runs. "
+    f"To fill it, run `{TUNNEL_COMMAND}` in the Meridian core folder, then press Refresh."
+)
+TUNNEL_UNREADABLE_TEXT = "The tunnel log exists but could not be read."
+RUNNER_EMPTY_TEXT = (
+    "No log yet. The Meridian core's runner writes this log when it starts the tunnel for scope tunnel. "
+    f"To start it, run `{RUNNER_START_COMMAND}` in the Meridian core folder, then press Refresh."
+)
+RUNNER_NOT_AVAILABLE_PREFIX = "Runner log not available."
+RUNNER_NOT_CONNECTED_TEXT = (
+    "The desktop has no setting for the Meridian core's Python or runner scope, so it cannot read the runner log."
+)
+RUNNER_BY_HAND_TEXT = (
+    f"To read the runner's log by hand, run `{RUNNER_TAIL_COMMAND}` in the Meridian core folder."
+)
+NO_LOG_TAIL_TEXT = "The runner reply did not include a log tail."
 
 
 @dataclass(frozen=True)
 class LogsOutcome:
-    """One pass of the two reads. A read that raised is None here, and its class name is in ``failures``."""
+    """One pass of the three reads. A read that raised is None here, and its class name is in ``failures``."""
 
     tunnel: LogTail | None = None
     runner: RunnerResult | None = None
     failures: dict[str, str] = field(default_factory=dict)
+    desktop: LogTail | None = None
+
+
+@dataclass(frozen=True)
+class LogText:
+    """The text one file pane shows when its log is missing, empty, or cannot be read."""
+
+    missing: str
+    empty: str
+    unreadable: str
+
+
+DESKTOP_TEXT = LogText(DESKTOP_MISSING_TEXT, DESKTOP_EMPTY_TEXT, DESKTOP_UNREADABLE_TEXT)
+TUNNEL_TEXT = LogText(TUNNEL_MISSING_TEXT, EMPTY_TUNNEL_TEXT, TUNNEL_UNREADABLE_TEXT)
 
 
 def runner_tail_not_configured() -> RunnerResult:
@@ -81,24 +134,40 @@ def _lines(text: str) -> list[str]:
 def runner_log_text(result: RunnerResult) -> str:
     """The runner's log tail as the pane shows it, or the reason it is not available.
 
-    Each line goes through redact_line, the same pass the tunnel log gets. An empty tail is the
-    runner's "no log yet". A reply with no text tail reads as a missing piece, not as an empty log.
+    Each line goes through redact_text, the same pass every other pane gets. An empty tail is the
+    runner's "no log yet". A failed read or a reply with no text tail says why, and gives the
+    command to read the log by hand.
     """
     if not result.ok:
-        return f"{RUNNER_NOT_AVAILABLE_PREFIX} {result.error_message}"
+        parts = [RUNNER_NOT_AVAILABLE_PREFIX, result.error_message]
+        if result.error_code == ERR_NOT_AVAILABLE:
+            parts.append(RUNNER_NOT_CONNECTED_TEXT)
+        parts.append(RUNNER_BY_HAND_TEXT)
+        return " ".join(parts)
     tail = (result.payload or {}).get("log_tail")
     if not isinstance(tail, str):
-        return f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT}"
+        return f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_BY_HAND_TEXT}"
     if not tail:
         return RUNNER_EMPTY_TEXT
-    return "\n".join(redact_line(line) for line in _lines(tail))
+    return "\n".join(redact_text(line) for line in _lines(tail))
+
+
+def log_pane_text(tail: LogTail, texts: LogText) -> str:
+    """A file log's pane text: its redacted lines, or the fixed text for its missing, empty or unreadable state."""
+    if tail.status == STATUS_OK:
+        if not tail.lines:
+            return texts.empty
+        return "\n".join(redact_text(line) for line in tail.lines)
+    if tail.status == STATUS_NO_LOG_YET:
+        return texts.missing
+    return texts.unreadable
 
 
 def _guarded(name: str, failures: dict[str, str], work: Callable[[], Any]) -> Any:
-    """Run one read. If it raises, record only its class name, and return None so the other read still runs."""
+    """Run one read. If it raises, record only its class name, and return None so the other reads still run."""
     try:
         return work()
-    except Exception as exc:  # noqa: BLE001 - one failed read must not hide the other
+    except Exception as exc:  # noqa: BLE001 - one failed read must not hide the others
         failures[name] = exc.__class__.__name__
         return None
 
@@ -121,7 +190,7 @@ def _pane(parent: QWidget, name: str) -> QPlainTextEdit:
 
 
 class _ReadJob(QRunnable):
-    """Run both reads on the thread pool and deliver (outcome, failure_name).
+    """Run the reads on the thread pool and deliver (outcome, failure_name).
 
     Any exception that gets past the per-read guards is reduced to its class name here, so a
     raw exception never reaches the UI thread.
@@ -147,9 +216,9 @@ class _ReadJob(QRunnable):
 
 
 class LogsPage(QWidget):
-    """The Logs tab: one Refresh button, the tunnel log tail and the runner log tail.
+    """The Logs tab: one Refresh button and three log panes (desktop, tunnel, runner).
 
-    The two reads are injected. The app passes the defaults above. Tests pass fakes or temp files.
+    The three reads are injected. The app passes the defaults above. Tests pass fakes or temp files.
     """
 
     _reads_finished = Signal(object)
@@ -157,12 +226,14 @@ class LogsPage(QWidget):
     def __init__(
         self,
         *,
+        desktop_log: Callable[[], LogTail] = read_desktop_log_tail,
         tunnel_log: Callable[[], LogTail] = read_tunnel_log_tail,
         runner: Callable[[], RunnerResult] = runner_tail_not_configured,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("logs-page")
+        self._desktop_log = desktop_log
         self._tunnel_log = tunnel_log
         self._runner = runner
         self._busy = False
@@ -180,6 +251,11 @@ class LogsPage(QWidget):
 
         self._intro = _heading(self, "logs-intro", INTRO_UNREAD_TEXT)
         layout.addWidget(self._intro)
+
+        self._desktop_heading = _heading(self, "logs-desktop-heading", f"{DESKTOP_HEADING} not read yet.")
+        layout.addWidget(self._desktop_heading)
+        self._desktop_text = _pane(self, "logs-desktop-text")
+        layout.addWidget(self._desktop_text, 1)
 
         self._tunnel_heading = _heading(self, "logs-tunnel-heading", f"{TUNNEL_HEADING} not read yet.")
         layout.addWidget(self._tunnel_heading)
@@ -209,11 +285,12 @@ class LogsPage(QWidget):
         QThreadPool.globalInstance().start(_ReadJob(self._collect, self._reads_finished.emit))
 
     def _collect(self) -> LogsOutcome:
-        """Run the two reads in order. Runs on a worker thread, and never raises for one failed read."""
+        """Run the three reads in order. Runs on a worker thread, and never raises for one failed read."""
         failures: dict[str, str] = {}
+        desktop = _guarded("desktop", failures, self._desktop_log)
         tunnel = _guarded("tunnel", failures, self._tunnel_log)
         runner = _guarded("runner", failures, self._runner)
-        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures)
+        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures, desktop=desktop)
 
     @Slot(object)
     def _on_reads_finished(self, payload: tuple) -> None:
@@ -229,39 +306,62 @@ class LogsPage(QWidget):
 
     def _show_reading(self) -> None:
         self._intro.setText(INTRO_READING_TEXT)
+        self._desktop_heading.setText(f"{DESKTOP_HEADING} {READING_TEXT}")
         self._tunnel_heading.setText(f"{TUNNEL_HEADING} {READING_TEXT}")
         self._runner_heading.setText(f"{RUNNER_HEADING} {READING_TEXT}")
+        self._desktop_text.setPlainText("")
         self._tunnel_text.setPlainText("")
         self._runner_text.setPlainText("")
 
     def _show_all_failed(self, failure: str) -> None:
         text = FAILED_TEXT.format("logs", failure)
         self._intro.setText(INTRO_SHOWN_TEXT)
+        self._desktop_heading.setText(DESKTOP_HEADING)
         self._tunnel_heading.setText(TUNNEL_HEADING)
         self._runner_heading.setText(RUNNER_HEADING)
+        self._desktop_text.setPlainText(text)
         self._tunnel_text.setPlainText(text)
         self._runner_text.setPlainText(text)
 
     def _show(self, outcome: LogsOutcome) -> None:
         self._intro.setText(INTRO_SHOWN_TEXT)
-        self._show_tunnel(outcome)
+        self._show_file_pane(
+            self._desktop_heading,
+            self._desktop_text,
+            title=DESKTOP_HEADING,
+            label="desktop log",
+            tail=outcome.desktop,
+            failure=outcome.failures.get("desktop", NO_RESULT),
+            texts=DESKTOP_TEXT,
+        )
+        self._show_file_pane(
+            self._tunnel_heading,
+            self._tunnel_text,
+            title=TUNNEL_HEADING,
+            label="tunnel log",
+            tail=outcome.tunnel,
+            failure=outcome.failures.get("tunnel", NO_RESULT),
+            texts=TUNNEL_TEXT,
+        )
         self._show_runner(outcome)
 
-    def _show_tunnel(self, outcome: LogsOutcome) -> None:
-        tail = outcome.tunnel
+    def _show_file_pane(
+        self,
+        heading: QLabel,
+        pane: QPlainTextEdit,
+        *,
+        title: str,
+        label: str,
+        tail: object,
+        failure: str,
+        texts: LogText,
+    ) -> None:
         if not isinstance(tail, LogTail):
-            self._tunnel_heading.setText(TUNNEL_HEADING)
-            self._tunnel_text.setPlainText(
-                FAILED_TEXT.format("tunnel log", outcome.failures.get("tunnel", NO_RESULT))
-            )
+            heading.setText(title)
+            pane.setPlainText(FAILED_TEXT.format(label, failure))
             return
-        self._tunnel_heading.setText(TUNNEL_HEADING_PATH.format(tail.path))
-        if tail.status == STATUS_OK:
-            # The reader already redacts. The page does it again, so no source can show a raw secret.
-            lines = [redact_line(line) for line in tail.lines]
-            self._tunnel_text.setPlainText("\n".join(lines) if lines else EMPTY_TUNNEL_TEXT)
-        else:
-            self._tunnel_text.setPlainText(tail.message or UNREADABLE_TEXT)
+        heading.setText(f"{title} {tail.path}")
+        pane.setPlainText(log_pane_text(tail, texts))
 
     def _show_runner(self, outcome: LogsOutcome) -> None:
         result = outcome.runner
@@ -275,12 +375,18 @@ class LogsPage(QWidget):
 
 
 __all__ = [
+    "DESKTOP_MISSING_TEXT",
     "EMPTY_TUNNEL_TEXT",
+    "LogText",
     "LogsOutcome",
     "LogsPage",
     "REFRESH_BUTTON_TEXT",
+    "RUNNER_BY_HAND_TEXT",
     "RUNNER_EMPTY_TEXT",
     "RUNNER_NOT_AVAILABLE_PREFIX",
+    "RUNNER_NOT_CONNECTED_TEXT",
+    "TUNNEL_MISSING_TEXT",
+    "log_pane_text",
     "runner_log_text",
     "runner_tail_not_configured",
 ]

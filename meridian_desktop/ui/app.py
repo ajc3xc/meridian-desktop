@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from meridian_desktop.desktop_log import start_desktop_log
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tray import MeridianTray
 from meridian_desktop.ui.first_run import needs_first_run, run_first_run
@@ -25,6 +26,10 @@ SMOKE_FLAG = "--smoke"
 def main(argv: list[str] | None = None, *, settings_path: Path | None = None, first_run: bool = True) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     smoke = SMOKE_FLAG in args
+
+    # The desktop's own log starts before anything else is built. --smoke writes no log file.
+    if not smoke:
+        start_desktop_log()
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Meridian")

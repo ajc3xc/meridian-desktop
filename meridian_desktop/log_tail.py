@@ -5,15 +5,19 @@ MERIDIAN_TUNNEL_LOG environment variable (a file path), or ~/.meridian/tunnel.lo
 variable is unset or blank. This matches _tunnel_log_path in meridian/tunnel_client.py. When
 the log is over 5 MB at tunnel start, the core moves it to tunnel.log.1 and starts a new log.
 
-read_tunnel_log_tail reads the end of tunnel.log. When that is shorter than the budget, it also
-reads the end of tunnel.log.1 to fill the rest. The budget is max_bytes (default 65536) in
-total, counted in bytes read from disk. The older backup lines come first. A window that starts
-in the middle of a line drops that partial first line, so no fragment is shown. Every returned
-line then passes redact_line.
+read_log_tail reads the end of any log file (the desktop's and the tunnel's both use it). When
+that file is shorter than the budget, it also reads the end of its ``.1`` backup to fill the
+rest. The budget is max_bytes (default 65536) in total, counted in bytes read from disk. The
+older backup lines come first. A window that starts in the middle of a line drops that partial
+first line, so no fragment is shown. Every returned line then passes redact_line.
+
+read_tunnel_log_tail is the tunnel's entry point: it resolves the tunnel log's path and then
+calls read_log_tail.
 
 The module never creates, writes, truncates, renames or deletes a file. A missing log is not an
 error: the result has status STATUS_NO_LOG_YET and no lines. A log that exists but cannot be
-read gives STATUS_UNREADABLE, with fixed text and no exception.
+read gives STATUS_UNREADABLE, with fixed text and no exception. The Logs tab shows its own text
+for each source, so the fixed messages here are generic.
 
 Redaction is defense in depth. The core stops the secret reaching the file in the first place
 (core-tunnel-log-tee-redaction). The pass here covers three shapes: a value after token= (in a
@@ -48,8 +52,8 @@ STATUS_OK = "ok"
 STATUS_NO_LOG_YET = "no_log_yet"
 STATUS_UNREADABLE = "unreadable"
 
-NO_LOG_YET_TEXT = "No log yet. The tunnel has not written a log file."
-UNREADABLE_TEXT = "The tunnel log exists but could not be read."
+NO_LOG_YET_TEXT = "No log yet. The log file does not exist."
+UNREADABLE_TEXT = "The log file exists but could not be read."
 
 
 @dataclass(frozen=True)
@@ -137,22 +141,15 @@ def _complete_lines(window: _Window) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
-def read_tunnel_log_tail(
-    path: Path | str | None = None,
-    *,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    env: Mapping[str, str] | None = None,
-    home: Path | None = None,
-) -> LogTail:
-    """Return the redacted tail of the tunnel log, reading at most ``max_bytes`` from disk.
+def read_log_tail(path: Path | str, *, max_bytes: int = DEFAULT_MAX_BYTES) -> LogTail:
+    """Return the redacted tail of the log at ``path``, reading at most ``max_bytes`` from disk.
 
-    ``path`` names the current log. When it is None, tunnel_log_path(env, home) is used. The
-    backup, tunnel.log.1, is read only when the current log is shorter than the budget.
+    The backup, ``<path>.1``, is read only when the current log is shorter than the budget.
     Raise ValueError when ``max_bytes`` is not a positive integer.
     """
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
         raise ValueError("max_bytes must be a positive integer")
-    current = Path(path) if path is not None else tunnel_log_path(env, home)
+    current = Path(path)
     backup = current.with_name(current.name + BACKUP_SUFFIX)
     try:
         newest = _window(current, max_bytes)
@@ -169,6 +166,22 @@ def read_tunnel_log_tail(
     return LogTail(STATUS_OK, current, tuple(redact_line(line) for line in lines))
 
 
+def read_tunnel_log_tail(
+    path: Path | str | None = None,
+    *,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> LogTail:
+    """Return the redacted tail of the tunnel log, reading at most ``max_bytes`` from disk.
+
+    ``path`` names the current log. When it is None, tunnel_log_path(env, home) is used. Rules
+    are those of read_log_tail, including the ``.1`` backup and the ValueError for a bad budget.
+    """
+    current = Path(path) if path is not None else tunnel_log_path(env, home)
+    return read_log_tail(current, max_bytes=max_bytes)
+
+
 __all__ = [
     "BACKUP_SUFFIX",
     "DEFAULT_MAX_BYTES",
@@ -183,6 +196,7 @@ __all__ = [
     "TUNNEL_LOG_ENV",
     "UNREADABLE_TEXT",
     "LogTail",
+    "read_log_tail",
     "read_tunnel_log_tail",
     "redact_line",
     "tunnel_log_path",

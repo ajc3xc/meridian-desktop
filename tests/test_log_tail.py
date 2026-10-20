@@ -22,6 +22,7 @@ from meridian_desktop.log_tail import (
     STATUS_UNREADABLE,
     TUNNEL_LOG_ENV,
     UNREADABLE_TEXT,
+    read_log_tail,
     read_tunnel_log_tail,
     redact_line,
     tunnel_log_path,
@@ -171,6 +172,40 @@ def test_backup_is_not_read_when_current_log_fills_the_budget(tmp_path, counted_
     assert result.status == STATUS_OK
     assert result.lines and all(line.startswith("current-") for line in result.lines)
     assert sum(counted_reads) <= 100
+
+
+def test_read_log_tail_reads_any_log_path_with_its_backup(tmp_path, counted_reads):
+    # The same window as test_tail_reads_backup_when_current_log_is_short, under another file name.
+    log = tmp_path / "desktop.log"
+    backup = tmp_path / "desktop.log.1"
+    backup.write_bytes(b"".join(b"older-%03d\n" % i for i in range(100)))
+    log.write_bytes(b"fresh-a\nfresh-b\n")
+
+    result = read_log_tail(log, max_bytes=60)
+
+    assert result.status == STATUS_OK
+    assert result.path == log
+    assert result.lines == ("older-096", "older-097", "older-098", "older-099", "fresh-a", "fresh-b")
+    assert sum(counted_reads) <= 60
+
+
+def test_read_log_tail_missing_path_is_no_log_yet_and_checks_the_budget(tmp_path):
+    missing = tmp_path / "desktop.log"
+
+    result = read_log_tail(missing)
+
+    assert result.status == STATUS_NO_LOG_YET
+    assert result.message == NO_LOG_YET_TEXT
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(ValueError):
+        read_log_tail(missing, max_bytes=0)
+
+
+def test_tunnel_entry_point_gives_the_same_result_as_the_generic_reader(tmp_path):
+    log = tmp_path / "tunnel.log"
+    log.write_bytes(b"".join(b"row %03d token=%s\n" % (i, FAKE_QUERY_TOKEN.encode()) for i in range(50)))
+
+    assert read_tunnel_log_tail(log, max_bytes=300) == read_log_tail(log, max_bytes=300)
 
 
 def test_tail_never_shows_a_fragment_of_a_line(tmp_path):
