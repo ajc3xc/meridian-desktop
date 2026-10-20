@@ -10,6 +10,7 @@ from meridian_desktop.settings_store import (
     DEFAULT_LOCAL_URL,
     Settings,
     SettingsStore,
+    core_path_problem,
     default_settings_path,
 )
 
@@ -203,3 +204,118 @@ def test_token_like_keys_are_neither_kept_nor_written(settings_path):
     assert "fake-token-value-123" not in text
     assert "fake-key-value-456" not in text
     assert set(json.loads(text)) == SAVED_KEYS
+
+
+# ----------------------------------------------------------- core checkout and core Python
+
+
+def _core_checkout(tmp_path: Path) -> Path:
+    """A folder with the meridian package in it, as a Meridian core checkout has."""
+    checkout = tmp_path / "core"
+    (checkout / "meridian").mkdir(parents=True)
+    (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    return checkout
+
+
+def test_core_settings_default_to_not_set_without_a_warning(settings_path):
+    result = SettingsStore(settings_path).load()
+    assert result.settings.core_checkout == ""
+    assert result.settings.core_python == ""
+    assert result.warning is None
+
+
+def test_core_settings_round_trip(settings_path, tmp_path):
+    saved = Settings(core_checkout=str(tmp_path / "core"), core_python=str(tmp_path / "python.exe"))
+    SettingsStore(settings_path).save(saved)
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings == saved
+
+
+def test_unset_core_settings_are_not_written(settings_path):
+    SettingsStore(settings_path).save(Settings())
+    assert set(json.loads(settings_path.read_text(encoding="utf-8"))) == SAVED_KEYS
+
+
+def test_set_core_settings_are_written_and_only_the_set_one_when_one_is_set(settings_path, tmp_path):
+    SettingsStore(settings_path).save(Settings(core_python=str(tmp_path / "python.exe")))
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["core_python"] == str(tmp_path / "python.exe")
+    assert "core_checkout" not in saved
+
+
+def test_non_text_core_values_warn_and_are_not_set(settings_path):
+    _write(settings_path, json.dumps({"core_checkout": 5, "core_python": ["a"]}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.core_checkout == ""
+    assert result.settings.core_python == ""
+    assert result.warning is not None
+    assert "core_checkout" in result.warning and "core_python" in result.warning
+
+
+def test_blank_core_value_loads_as_not_set_without_a_warning(settings_path):
+    _write(settings_path, json.dumps({"core_checkout": "   "}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.core_checkout == ""
+    assert result.warning is None
+
+
+def test_core_path_problem_refuses_a_checkout_folder_that_does_not_exist(tmp_path):
+    message = core_path_problem("core_checkout", str(tmp_path / "gone"))
+    assert message is not None
+    assert message.startswith("Not saved. ")
+    assert "does not exist" in message
+
+
+def test_core_path_problem_refuses_a_folder_without_the_meridian_package(tmp_path):
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    message = core_path_problem("core_checkout", str(folder))
+    assert message is not None and "not a Meridian core checkout" in message
+
+
+def test_core_path_problem_accepts_a_real_checkout_and_an_empty_value(tmp_path):
+    assert core_path_problem("core_checkout", str(_core_checkout(tmp_path))) is None
+    assert core_path_problem("core_checkout", "") is None
+    assert core_path_problem("core_python", "") is None
+
+
+def test_core_path_problem_refuses_a_python_that_does_not_exist_or_is_a_folder(tmp_path):
+    missing = core_path_problem("core_python", str(tmp_path / "nope" / "python.exe"))
+    assert missing is not None and "does not exist" in missing
+    folder = core_path_problem("core_python", str(tmp_path))
+    assert folder is not None and "does not exist" in folder
+
+
+def test_core_path_problem_rejects_an_unknown_key(tmp_path):
+    with pytest.raises(ValueError):
+        core_path_problem("core_token", str(tmp_path))
+
+
+def test_set_core_path_saves_the_value_and_keeps_every_other_field(settings_path, tmp_path):
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    SettingsStore(settings_path).save(Settings(mode="hosted", local_url="http://127.0.0.1:9999"))
+
+    updated = SettingsStore(settings_path).set_core_path("core_python", str(python))
+
+    loaded = SettingsStore(settings_path).load().settings
+    assert loaded.core_python == str(python)
+    assert loaded.mode == "hosted" and loaded.local_url == "http://127.0.0.1:9999"
+    assert updated == loaded
+
+
+def test_a_refused_core_path_raises_plain_words_and_writes_nothing(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    with pytest.raises(ValueError) as refused:
+        store.set_core_path("core_checkout", str(tmp_path / "gone"))
+    assert str(refused.value).startswith("Not saved. ")
+    assert not settings_path.exists()
+
+
+def test_clearing_a_core_path_removes_its_key(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    store.set_core_path("core_checkout", str(_core_checkout(tmp_path)))
+    store.set_core_path("core_checkout", "")
+    assert store.load().settings.core_checkout == ""
+    assert "core_checkout" not in json.loads(settings_path.read_text(encoding="utf-8"))

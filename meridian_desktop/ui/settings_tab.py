@@ -14,6 +14,9 @@ file is picked with a file dialog, and only its path is saved.
 
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the
 main window calls refresh() after each save, so both always show the same saved mode.
+
+The client setup section (ui/client_setup_section.py) is the last block on this tab. It manages the
+Meridian core checkout and its Python, and one row per client. Nothing in it runs until a button is pressed.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
 from meridian_desktop.token_store import TokenStoreError
+from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -226,6 +230,10 @@ class SettingsTab(QWidget):
         self._db_message = _label(self, "settings-db-message")
         self._db_message.setVisible(False)
         layout.addWidget(self._db_message)
+
+        # Client setup: the Meridian core checkout, then one row per client with Check, Apply and Remove.
+        self._client_setup = ClientSetupSection(self._store, self)
+        layout.addWidget(self._client_setup)
 
         self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
         self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
