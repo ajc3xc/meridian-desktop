@@ -481,7 +481,7 @@ def test_hosted_reader_gets_the_stored_token_and_never_shows_it(qtbot, settings_
     window = _shown_window(qtbot, settings_path, _sources(token=FAKE_TOKEN, list_hosted=list_hosted))
     status = _page(window, "Projects").findChild(QLabel, "projects-status")
 
-    qtbot.waitUntil(lambda: calls, timeout=5000)
+    qtbot.waitUntil(lambda: len(calls) > 0, timeout=5000)
     assert calls == [FAKE_TOKEN]
     assert FAKE_TOKEN not in status.text()
     assert FAKE_TOKEN not in _all_text(window)
