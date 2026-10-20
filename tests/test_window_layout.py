@@ -5,12 +5,36 @@ tabs behind scroll arrows and cut off one label. The window also opened too smal
 Settings panel. These tests pin the fix.
 """
 
+from PySide6.QtWidgets import QPushButton
+
 from meridian_desktop.settings_store import SettingsStore
-from meridian_desktop.ui.main_window import MainWindow
+from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, MainWindow
+from meridian_desktop.ui.zotero_panel import ZoteroPanel
+from meridian_desktop.zotero_client import API_NOT_RUNNING, NOT_RUNNING_MESSAGE, ApiCheck, ZoteroStatus
 
 # The Settings panel's key row and pods table need at least this much room on first show.
 MIN_DEFAULT_WIDTH = 900
 MIN_DEFAULT_HEIGHT = 600
+
+
+class _OfflineZotero:
+    """A stand-in for the Zotero client: Zotero is not installed and not running. Counts status checks."""
+
+    def __init__(self):
+        self.status_calls = 0
+
+    def status(self):
+        self.status_calls += 1
+        return ZoteroStatus(exe=None, process_running=None, api=ApiCheck(API_NOT_RUNNING, NOT_RUNNING_MESSAGE))
+
+    def probe_api(self):
+        return ApiCheck(API_NOT_RUNNING, NOT_RUNNING_MESSAGE)
+
+    def search_items(self, query):
+        return []
+
+    def start_zotero(self, exe):
+        return ""
 
 
 def _shown_window(qtbot, settings_path):
@@ -50,6 +74,31 @@ def test_window_cannot_shrink_below_the_tab_bar(qtbot, settings_path):
     window = _shown_window(qtbot, settings_path)
     window.resize(200, 200)
     qtbot.wait(50)
+    bar = window.tabs.tabBar()
+    assert bar.sizeHint().width() <= bar.width()
+    assert _clipped_tabs(bar) == []
+
+
+def test_zotero_tab_is_the_panel_and_keeps_the_window_size(qtbot, settings_path):
+    fake = _OfflineZotero()
+    window = MainWindow(SettingsStore(settings_path), zotero=fake)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+    # Showing the window does not check Zotero. Only selecting the Zotero tab does.
+    assert fake.status_calls == 0
+
+    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    index = names.index("Zotero")
+    window.tabs.setCurrentIndex(index)
+    page = window.tabs.widget(index)
+    assert isinstance(page, ZoteroPanel)
+    assert page.objectName() == "zotero-panel"
+    refresh = page.findChild(QPushButton, "zotero-refresh")
+    qtbot.waitUntil(lambda: fake.status_calls == 1 and refresh.isEnabled())
+    assert fake.status_calls == 1
+
+    assert window.width() <= DEFAULT_WINDOW_SIZE[0]
     bar = window.tabs.tabBar()
     assert bar.sizeHint().width() <= bar.width()
     assert _clipped_tabs(bar) == []
