@@ -3,18 +3,22 @@
 The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
 (wave 2), with the connection settings (local URL, database file, saved mode) above
 its rows. The Writing tab holds the LaTeX engine probe under its section label (wave 2).
-The Tunnel, Services and Logs tabs are built in wave 3 and are read-only. The other tabs
-are still placeholders. Qt code lives in meridian_desktop/ui/ (and the listed exception
-tray.py). Settings go through settings_store and the RunPod key goes through secret_store,
-and neither imports Qt. The only network calls are loopback calls: to the local Meridian
-server at the local_url setting, to the local LaTeX engine at the engine_url setting, and
-to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
+The Tunnel, Services and Logs tabs are built in wave 3 and are read-only. The Zotero tab
+(wave 4) checks the local Zotero app and searches its library over 127.0.0.1:23119, and
+starts Zotero only after the owner confirms. The other tabs are still placeholders. Qt code
+lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
+settings_store and the RunPod key goes through secret_store, and neither imports Qt. The
+only network calls are loopback calls: to the local Meridian server at the local_url setting,
+to the local LaTeX engine at the engine_url setting, to the local Zotero API on 127.0.0.1:23119,
+and to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
 when a tab is first shown and when a button is pressed. The Services check and the Logs
 read run only when their button is pressed, and the Tunnel tab makes no request. No other
 host is contacted.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -26,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from meridian_desktop import zotero_client
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
@@ -37,6 +42,7 @@ from meridian_desktop.ui.services_page import ServicesPage
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tunnel_page import TunnelPage
+from meridian_desktop.ui.zotero_panel import ZoteroPanel
 
 # (tab name, wave that builds it). Display order is the tuple order.
 TAB_SPECS = (
@@ -94,12 +100,15 @@ class MainWindow(QMainWindow):
         settings_store: SettingsStore | None = None,
         secret_store: SecretStore | None = None,
         data_sources: DataSources | None = None,
+        zotero: Any | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
         # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
+        # The Zotero tab calls this object. Tests pass a fake. The app uses the zotero_client module.
+        self._zotero = zotero if zotero is not None else zotero_client
         self.setWindowTitle("Meridian")
 
         central = QWidget(self)
@@ -130,6 +139,10 @@ class MainWindow(QMainWindow):
             elif name == "Logs":
                 # The reads run only when Refresh is pressed. Nothing is read on build or show.
                 page = LogsPage(parent=self.tabs)
+            elif name == "Zotero":
+                # The status check runs when the tab is first shown and when Refresh is pressed.
+                # Zotero starts only after the owner confirms in the dialog.
+                page = ZoteroPanel(client=self._zotero, parent=self.tabs)
             else:
                 page = _placeholder_page(name, wave, self.tabs)
             self.tabs.addTab(page, name)
