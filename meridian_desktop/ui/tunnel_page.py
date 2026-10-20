@@ -3,8 +3,9 @@
 This is Qt code and sits in ui/, so the boundary check allows it. The page makes no request
 and starts no timer. It shows the snapshot it is given (see meridian_desktop/tunnel_view.py for
 the rows). Until a snapshot is given, it says the slot states are not available, because this
-build has no local source for them. Every cell is plain text (QTableWidgetItem and PlainText
-labels), so a slot name or note is never read as HTML.
+build has no local source for them. The text names the missing core item (MS-104), the local
+tunnel slot status file the core has not written yet. Every cell is plain text (QTableWidgetItem
+and PlainText labels), so a slot name or note is never read as HTML.
 """
 
 from __future__ import annotations
@@ -25,8 +26,9 @@ from meridian_desktop.tunnel_view import slot_details, slots_of
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 NOT_AVAILABLE_TEXT = (
-    "Tunnel slot states are not available. This build has no local source for them yet: "
-    "the core does not write a tunnel status file the desktop can read."
+    "Tunnel slot states are not available. The core does not write a local tunnel slot status "
+    "file that the desktop can read. What is missing: core item MS-104, which makes the core write "
+    "that file. Nothing to do in the desktop until it ships."
 )
 NO_SLOTS_TEXT = "The tunnel snapshot lists no slots."
 SHOWN_TEXT = "Slot states from the tunnel snapshot."
