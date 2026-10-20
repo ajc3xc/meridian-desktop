@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -31,11 +32,12 @@ HEALTH_PATH = "/health"
 EXTENSION_VERSION_PATH = "/extension-version"
 PROBE_TIMEOUT = 2.0
 NOT_REPORTED = "not reported"
+UNKNOWN_PORT = "unknown"
 
 CONNECTED_MESSAGE = "Both the health and extension-version checks answered."
 NOT_RUNNING_MESSAGE = "No LaTeX engine is running at this address on this computer."
 NOT_ANSWERING_MESSAGE = "The address did not answer both the health and extension-version checks."
-NOT_LOOPBACK_MESSAGE = "The engine address in Settings is not a loopback address, so no request was sent."
+NOT_LOOPBACK_MESSAGE = "The engine address is not a loopback address, so no request was sent."
 TIMEOUT_MESSAGE = "The LaTeX engine did not answer in time."
 UNREACHABLE_MESSAGE = "The LaTeX engine could not be reached."
 TOO_LARGE_MESSAGE = "The LaTeX engine sent a response that is too large to read."
@@ -95,6 +97,21 @@ def _version(payload: dict[str, Any]) -> str:
     return NOT_REPORTED
 
 
+def port_text(base_url: object) -> str:
+    """The port named in ``base_url`` as text, or UNKNOWN_PORT when no port can be read from it.
+
+    Only the port is returned, never the host or any user name, so the text is safe to show
+    whatever the address was set to.
+    """
+    if not isinstance(base_url, str):
+        return UNKNOWN_PORT
+    try:
+        port = urllib.parse.urlsplit(base_url).port
+    except ValueError:
+        return UNKNOWN_PORT
+    return str(port) if port is not None else UNKNOWN_PORT
+
+
 def _from_error(error: LocalClientError) -> EngineStatus:
     state, message = _ERROR_MESSAGES.get(error.code, (ENGINE_ERROR, UNCHECKED_ERROR_MESSAGE))
     return EngineStatus(state, message)
@@ -138,6 +155,8 @@ __all__ = [
     "HEALTH_PATH",
     "NOT_REPORTED",
     "PROBE_TIMEOUT",
+    "UNKNOWN_PORT",
     "EngineStatus",
+    "port_text",
     "probe_engine",
 ]
