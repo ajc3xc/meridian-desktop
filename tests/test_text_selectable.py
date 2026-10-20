@@ -47,7 +47,7 @@ def test_every_label_with_text_is_selectable(qtbot, settings_path):
 def test_read_only_plain_text_panes_are_selectable(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     panes = [pane for pane in window.findChildren(QPlainTextEdit) if pane.isReadOnly()]
-    assert len(panes) == 2  # the tunnel and runner log panes on the Logs tab
+    assert len(panes) == 3  # the desktop, tunnel and runner log panes on the Logs tab
     for pane in panes:
         assert _selectable(pane), pane.objectName()
 

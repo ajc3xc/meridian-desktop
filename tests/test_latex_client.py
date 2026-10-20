@@ -36,7 +36,7 @@ from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui.latex_panel import CONNECTED_TEXT, NOT_CONNECTED_TEXT, LatexPanel
-from meridian_desktop.ui.main_window import LATEX_SECTION, MainWindow
+from meridian_desktop.ui.main_window import LATEX_SECTION, PLACEHOLDER_REASONS, MainWindow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_URL = "http://127.0.0.1:8471"
@@ -378,6 +378,6 @@ def test_writing_tab_keeps_the_latex_label_and_places_the_panel_under_it(qtbot, 
     labels = [label for label in page.findChildren(QLabel) if label.text() == LATEX_SECTION]
     assert panel is not None
     assert len(labels) == 1
-    assert "Not built yet (wave 5)" in [label.text() for label in page.findChildren(QLabel)]
+    assert PLACEHOLDER_REASONS["Writing"] in [label.text() for label in page.findChildren(QLabel)]
     layout = page.layout()
     assert layout.indexOf(panel) == layout.indexOf(labels[0]) + 1

@@ -51,11 +51,10 @@ from meridian_desktop.ui.settings_tab import (
 from meridian_desktop.ui.tunnel_page import NOT_AVAILABLE_TEXT, TunnelPage
 
 EXPECTED_TABS = ("Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Logs", "Settings")
-# The tabs that are still placeholders after wave 3, with the wave that builds each.
-EXPECTED_WAVES = {
-    "Writing": 5,
-    "Zotero": 4,
-    "Code": 6,
+# The tabs that are still placeholders, with what each one says is missing. Zotero is a working tab.
+EXPECTED_PLACEHOLDERS = {
+    "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
+    "Code": "Code search is not in this build yet. It needs a search route on the local server (megasprint item MS-049).",
 }
 # The wave-3 tabs, each with its page's object name and class.
 WAVE3_PAGES = {
@@ -184,10 +183,11 @@ def test_tab_names_and_order(qtbot, settings_path):
     assert entry.TAB_NAMES == EXPECTED_TABS
 
 
-def test_placeholders_name_their_wave(qtbot, settings_path):
+def test_placeholders_say_what_is_missing(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    for name, wave in EXPECTED_WAVES.items():
-        assert f"Not built yet (wave {wave})" in _label_texts(_page(window, name)), name
+    for name, text in EXPECTED_PLACEHOLDERS.items():
+        assert text in _label_texts(_page(window, name)), name
+        assert not any("Not built yet" in label for label in _label_texts(_page(window, name))), name
 
 
 def test_wave3_tabs_replace_placeholders_and_keep_others(qtbot, settings_path, monkeypatch):
@@ -228,18 +228,18 @@ def test_wave3_tabs_replace_placeholders_and_keep_others(qtbot, settings_path, m
     assert logs.findChild(QPlainTextEdit, "logs-tunnel-text").toPlainText() == ""
     assert logs.findChild(QPlainTextEdit, "logs-runner-text").toPlainText() == ""
 
-    # The other tabs keep their state. Projects and Settings are built, Writing keeps its LaTeX section,
-    # and Zotero and Code are still placeholders.
+    # The other tabs keep their state. Projects and Settings are built, Zotero is a working panel,
+    # Writing keeps its LaTeX section, and Code is still a placeholder that says what is missing.
     assert _page(window, "Projects").objectName() == "projects-tab"
     assert _page(window, "Settings").objectName() == "runpod-panel"
     writing = _page(window, "Writing")
     assert writing.findChild(LatexPanel) is not None
     for section in WRITING_SECTIONS:
         assert section in _label_texts(writing)
-    for name, wave in EXPECTED_WAVES.items():
+    for name, text in EXPECTED_PLACEHOLDERS.items():
         page = _page(window, name)
         assert page.objectName() == f"placeholder-{name.lower()}", name
-        assert f"Not built yet (wave {wave})" in _label_texts(page), name
+        assert text in _label_texts(page), name
 
 
 def test_settings_tab_holds_runpod_panel_not_placeholder(qtbot, settings_path):
@@ -466,17 +466,23 @@ def test_unbuilt_server_reader_says_so(qtbot, settings_path):
     qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
 
 
-def test_unbuilt_hosted_reader_uses_the_stored_token_and_says_so(qtbot, settings_path):
-    """The hosted token comes from the injected keychain, and the hosted reader is not built yet."""
-    backend = MemoryKeyring()
-    backend.set_password(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
+def test_hosted_reader_gets_the_stored_token_and_never_shows_it(qtbot, settings_path):
+    """The hosted read takes the token from the store and passes it to the hosted reader. The token never appears on screen.
+    The reader is a fake here, so the test makes no network call."""
+    calls = []
+
+    def list_hosted(url, token):
+        calls.append(token)
+        return []
+
     SettingsStore(settings_path).save(Settings(mode="hosted"))
-    window = _shown_window(qtbot, settings_path, default_sources(KeyringSecretStore(backend=backend)))
+    window = _shown_window(qtbot, settings_path, _sources(token=FAKE_TOKEN, list_hosted=list_hosted))
     status = _page(window, "Projects").findChild(QLabel, "projects-status")
 
-    expected = "Hosted Meridian projects could not be loaded (SourceNotBuilt)."
-    qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
+    qtbot.waitUntil(lambda: calls, timeout=5000)
+    assert calls == [FAKE_TOKEN]
     assert FAKE_TOKEN not in status.text()
+    assert FAKE_TOKEN not in _all_text(window)
 
 
 # ----------------------------------------------------------- Settings tab (connection settings)
@@ -613,8 +619,10 @@ def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path
     qtbot.addWidget(window)
     tab = _settings_tab(window)
 
-    # The connection section has one text field, the local URL. It has no token field.
-    assert [field.objectName() for field in tab.findChildren(QLineEdit)] == ["settings-local-url"]
+    # The token field is for entering a new token. It never shows the stored one, and the tab reports only "set".
+    names = {field.objectName() for field in tab.findChildren(QLineEdit)}
+    assert {"settings-local-url", "settings-hosted-url", "settings-token-input"} <= names
+    assert tab.findChild(QLineEdit, "settings-token-input").text() == ""
     assert FAKE_TOKEN not in _all_text(window)
     assert FAKE_TOKEN not in tab.findChild(QLabel, "settings-mode").text()
 

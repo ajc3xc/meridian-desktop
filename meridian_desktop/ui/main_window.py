@@ -5,15 +5,16 @@ The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
 its rows. The Writing tab holds the LaTeX engine probe under its section label (wave 2).
 The Tunnel, Services and Logs tabs are built in wave 3 and are read-only. The Zotero tab
 (wave 4) checks the local Zotero app and searches its library over 127.0.0.1:23119, and
-starts Zotero only after the owner confirms. The other tabs are still placeholders. Qt code
+starts Zotero only after the owner confirms. Writing and Code are still placeholders. Qt code
 lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
 settings_store and the RunPod key goes through secret_store, and neither imports Qt. The
 only network calls are loopback calls: to the local Meridian server at the local_url setting,
 to the local LaTeX engine at the engine_url setting, to the local Zotero API on 127.0.0.1:23119,
 and to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
 when a tab is first shown and when a button is pressed. The Services check and the Logs
-read run only when their button is pressed, and the Tunnel tab makes no request. No other
-host is contacted.
+read run only when their button is pressed, and the Tunnel tab makes no request. Hosted
+mode calls only the hosted URL the owner sets: on the Projects tab, and on the Test connection
+button in Settings.
 """
 
 from __future__ import annotations
@@ -64,6 +65,12 @@ WRITING_SECTIONS = (
     "Google Docs (approach not decided)",
 )
 
+# What a placeholder tab says is missing, in plain words. Nothing here says "not built yet".
+PLACEHOLDER_REASONS = {
+    "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
+    "Code": "Code search is not in this build yet. It needs a search route on the local server (megasprint item MS-049).",
+}
+
 STATUS_MESSAGE = "No services checked yet. Press Check services on the Services tab."
 
 # The window opens at this size (width, height). It fits the full tab bar and gives the
@@ -73,16 +80,15 @@ DEFAULT_WINDOW_SIZE = (960, 640)
 
 def _placeholder_page(
     name: str,
-    wave: int,
     parent: QWidget,
     section_widgets: dict[str, QWidget] | None = None,
 ) -> QWidget:
-    """A tab that is not built yet. ``section_widgets`` maps a Writing section label to a widget
-    placed directly below that label, so a built section keeps its label."""
+    """A tab that is not built in this release. It says what is missing. ``section_widgets`` maps a
+    Writing section label to a widget placed directly below that label, so a built section keeps its label."""
     page = QWidget(parent)
     page.setObjectName(f"placeholder-{name.lower()}")
     layout = QVBoxLayout(page)
-    layout.addWidget(make_selectable(QLabel(f"Not built yet (wave {wave})", page)))
+    layout.addWidget(make_selectable(QLabel(PLACEHOLDER_REASONS[name], page)))
     if name == "Writing":
         for section in WRITING_SECTIONS:
             layout.addWidget(make_selectable(QLabel(section, page)))
@@ -124,12 +130,12 @@ class MainWindow(QMainWindow):
                 page = RunPodPanel(self._store, self._secrets, parent=self.tabs)
                 # The connection settings go above the RunPod rows, in the panel's own layout,
                 # so the Settings page is still the RunPod panel.
-                self._settings_tab = SettingsTab(self._store, parent=page)
+                self._settings_tab = SettingsTab(self._store, secrets=self._secrets, parent=page)
                 page.layout().insertWidget(0, self._settings_tab)
             elif name == "Writing":
                 # The LaTeX probe sits under its section label. Makes no request until shown.
                 latex = LatexPanel(self._store, parent=self.tabs)
-                page = _placeholder_page(name, wave, self.tabs, {LATEX_SECTION: latex})
+                page = _placeholder_page(name, self.tabs, {LATEX_SECTION: latex})
             elif name == "Tunnel":
                 # No slot-state source in this build, so the page says the states are not available.
                 page = TunnelPage(self.tabs)
@@ -144,7 +150,7 @@ class MainWindow(QMainWindow):
                 # Zotero starts only after the owner confirms in the dialog.
                 page = ZoteroPanel(client=self._zotero, parent=self.tabs)
             else:
-                page = _placeholder_page(name, wave, self.tabs)
+                page = _placeholder_page(name, self.tabs)
             self.tabs.addTab(page, name)
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
