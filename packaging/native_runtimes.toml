@@ -54,6 +54,7 @@ files = [
     "_socket.pyd",
     "_sqlite3.pyd",
     "_ssl.pyd",
+    "_uuid.pyd",
     "_wmi.pyd",
     "pyexpat.pyd",
     "select.pyd",
@@ -76,6 +77,7 @@ notice_url = "https://docs.python.org/3/license.html"
 "_internal/_socket.pyd" = "b4047c86ef5facc7a75052c3afc5d6cc766b02a16970ef33b7d5eb56cbec96b8"
 "_internal/_sqlite3.pyd" = "c7b8dfac4ffe7d6e603f1e13dba6b618bcb1bbf863bd4b22d8a347a30908e4e9"
 "_internal/_ssl.pyd" = "53ebf568c64758d71c579c6387ad3d349b0dbaf979ae763ca4971835ade8b609"
+"_internal/_uuid.pyd" = "831476eb7c9e3cbcf7264916268b835c3427b2a88f90e8dcc184fdc629382062"
 "_internal/_wmi.pyd" = "ab9774c4f96297d92e5867d8e0d6da145c336f4d9d415d4ad0408bbdd5f87376"
 "_internal/pyexpat.pyd" = "1beb87913332197d8869623261421f010d46cab789057f6382c91bb715dcfc53"
 "_internal/select.pyd" = "7aa823a1f7ad83c5b94fe86828b155ed7c05f7b521c860914a1be94979bca8ee"
