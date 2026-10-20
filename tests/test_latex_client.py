@@ -226,6 +226,22 @@ def test_only_plain_version_strings_are_shown(value, shown):
     assert status.extension_version == shown
 
 
+@pytest.mark.parametrize(
+    "address, port",
+    [
+        ("http://127.0.0.1:8471", "8471"),
+        ("http://localhost:9999", "9999"),
+        ("http://someone@127.0.0.1:8471", "8471"),  # a user name is never part of the text
+        ("http://127.0.0.1", latex_client.UNKNOWN_PORT),  # no port written in the address
+        ("http://127.0.0.1:99999", latex_client.UNKNOWN_PORT),  # out of range
+        ("not a url", latex_client.UNKNOWN_PORT),
+        (None, latex_client.UNKNOWN_PORT),
+    ],
+)
+def test_port_text_shows_only_the_port(address, port):
+    assert latex_client.port_text(address) == port
+
+
 def test_importing_the_probe_makes_no_request():
     code = (
         "import socket\n"
