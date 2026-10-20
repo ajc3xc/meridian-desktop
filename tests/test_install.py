@@ -1,23 +1,35 @@
 """Tests for the per-user install (meridian_desktop/install.py) and the icon wiring in packaging/build.py.
 
-Every call passes an explicit environment that points at pytest's temp dir, so no test
-can reach the real Start Menu, desktop or install folder. The conftest isolates only
-LOCALAPPDATA and USERPROFILE, so these tests never rely on it for APPDATA.
+Every call passes an explicit environment that points at pytest's temp dir, so no test can
+reach the real Start Menu, desktop or install folder. The conftest isolates only LOCALAPPDATA
+and USERPROFILE, so these tests never rely on it for APPDATA.
+
+The registry is never real here. Each test runs with NO_REGISTRY_ENV set, and the tests that
+check registry values pass a FakeRegistry (or a fake winreg module) in explicitly.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from meridian_desktop import __version__
 from meridian_desktop import install as inst
+from meridian_desktop.settings_store import Settings, SettingsStore, default_settings_path
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def no_registry_writes(monkeypatch):
+    """Switch the registry off for every test in this file. Tests that check it inject a fake."""
+    monkeypatch.setenv(inst.NO_REGISTRY_ENV, "1")
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -25,6 +37,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "LOCALAPPDATA": str(tmp_path / "local"),
         "APPDATA": str(tmp_path / "roaming"),
         "USERPROFILE": str(tmp_path / "profile"),
+        inst.NO_REGISTRY_ENV: "1",
     }
 
 
@@ -42,6 +55,81 @@ class _Recorder:
 
     def __call__(self, shortcut: Path, target: Path) -> None:
         self.calls.append((shortcut, target))
+
+
+class FakeRegistry:
+    """In-memory stand-in for HKEY_CURRENT_USER: key -> {value name: string}."""
+
+    def __init__(self) -> None:
+        self.keys: dict[str, dict[str, str]] = {}
+        self.fail_writes = False
+
+    def write_strings(self, key: str, values: dict[str, str]) -> None:
+        if self.fail_writes:
+            raise PermissionError(13, "Access is denied")
+        self.keys.setdefault(key, {}).update(values)
+
+    def delete_value(self, key: str, name: str) -> bool:
+        values = self.keys.get(key, {})
+        if name not in values:
+            return False
+        del values[name]
+        return True
+
+    def delete_key(self, key: str) -> bool:
+        return self.keys.pop(key, None) is not None
+
+    def run_value(self) -> str | None:
+        return self.keys.get(inst.RUN_KEY, {}).get(inst.RUN_VALUE)
+
+
+class _Handle:
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    def __enter__(self) -> _Handle:
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+
+class FakeWinreg:
+    """Just enough of the winreg module to check the calls WindowsRegistry makes."""
+
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_SET_VALUE = 2
+    REG_SZ = 1
+
+    def __init__(self) -> None:
+        self.values: dict[str, dict[str, object]] = {}
+        self.roots: list[object] = []
+
+    def CreateKeyEx(self, root, sub_key, reserved=0, access=0):
+        self.roots.append(root)
+        self.values.setdefault(sub_key, {})
+        return _Handle(sub_key)
+
+    def OpenKey(self, root, sub_key, reserved=0, access=0):
+        self.roots.append(root)
+        if sub_key not in self.values:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        return _Handle(sub_key)
+
+    def SetValueEx(self, handle, name, reserved, kind, value):
+        assert kind == self.REG_SZ
+        self.values[handle.key][name] = value
+
+    def DeleteValue(self, handle, name):
+        if name not in self.values[handle.key]:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        del self.values[handle.key][name]
+
+    def DeleteKey(self, root, sub_key):
+        self.roots.append(root)
+        if sub_key not in self.values:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        del self.values[sub_key]
 
 
 def test_paths_come_from_the_given_environment(tmp_path):
@@ -113,30 +201,247 @@ def test_install_from_the_installed_folder_keeps_it(tmp_path):
     assert (installed / inst.EXE_NAME).is_file()
 
 
-def test_uninstall_removes_the_folder_and_both_shortcuts(tmp_path):
+def test_install_writes_the_apps_and_features_entry(tmp_path):
     env = _env(tmp_path)
-    inst.install(_bundle(tmp_path), env, desktop=True, writer=_Recorder())
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+
+    exe = inst.install_dir(env) / inst.EXE_NAME
+    assert registry.keys[inst.UNINSTALL_KEY] == {
+        "DisplayName": "Meridian Desktop",
+        "DisplayVersion": __version__,
+        "Publisher": "Meridian",
+        "DisplayIcon": f"{exe},0",
+        "UninstallString": f'"{exe}" --uninstall',
+    }
+
+
+def test_uninstall_removes_the_folder_both_shortcuts_and_the_apps_entry(tmp_path):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, desktop=True, writer=_Recorder(), registry=registry)
     # The writer is a stub, so create the shortcut files the real writer would have made.
     inst.start_menu_shortcut(env).parent.mkdir(parents=True, exist_ok=True)
     inst.start_menu_shortcut(env).write_bytes(b"lnk")
     inst.desktop_shortcut(env).parent.mkdir(parents=True, exist_ok=True)
     inst.desktop_shortcut(env).write_bytes(b"lnk")
 
-    removed = inst.uninstall(env)
+    lines = inst.uninstall(env, registry=registry)
 
-    assert set(removed) == {inst.install_dir(env), inst.start_menu_shortcut(env), inst.desktop_shortcut(env)}
     assert not inst.install_dir(env).exists()
+    assert not [path for path in inst.install_dir(env).parent.iterdir() if ".removing-" in path.name]
     assert not inst.start_menu_shortcut(env).exists()
     assert not inst.desktop_shortcut(env).exists()
+    assert inst.UNINSTALL_KEY not in registry.keys
+    assert lines == [
+        f"removed {inst.start_menu_shortcut(env)}",
+        f"removed {inst.desktop_shortcut(env)}",
+        f"removed {inst.install_dir(env)}",
+        f"removed Apps and Features entry HKCU\\{inst.UNINSTALL_KEY}",
+    ]
 
 
 def test_uninstall_when_nothing_is_installed_removes_nothing(tmp_path):
-    assert inst.uninstall(_env(tmp_path)) == []
+    assert inst.uninstall(_env(tmp_path), registry=FakeRegistry()) == []
+
+
+def test_a_folder_in_use_is_left_whole_and_its_apps_entry_stays(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+    folder = inst.install_dir(env)
+
+    def refuse(src, dst, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(inst.os, "rename", refuse)
+    with pytest.raises(inst.InstallError, match="close Meridian Desktop first"):
+        inst.uninstall(env, registry=registry)
+    # Nothing was deleted, and the entry stays so the user can run the uninstall again.
+    assert (folder / inst.EXE_NAME).is_file()
+    assert (folder / "_internal" / "data.txt").is_file()
+    assert inst.UNINSTALL_KEY in registry.keys
+
+
+def test_a_failed_delete_after_the_rename_is_scheduled(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+    real_rmtree = shutil.rmtree
+
+    def fail_on_the_parked_copy(path, *args, **kwargs):
+        if ".removing-" in Path(path).name:
+            raise PermissionError(13, "in use")
+        return real_rmtree(path, *args, **kwargs)
+
+    scheduled: list[Path] = []
+    monkeypatch.setattr(inst.shutil, "rmtree", fail_on_the_parked_copy)
+
+    lines = inst.uninstall(env, registry=registry, scheduler=scheduled.append)
+
+    assert len(scheduled) == 1
+    assert ".removing-" in scheduled[0].name
+    assert scheduled[0].parent == inst.install_dir(env).parent
+    assert any(line.startswith("scheduled removal of") for line in lines)
+    assert not inst.install_dir(env).exists()
+    assert inst.UNINSTALL_KEY not in registry.keys
+
+
+def test_a_failed_delete_after_the_rename_without_a_scheduler_is_an_error(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+
+    def refuse(path, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(inst.shutil, "rmtree", refuse)
+    with pytest.raises(inst.InstallError, match="could not finish removing"):
+        inst.uninstall(env, registry=registry)
+    assert inst.UNINSTALL_KEY in registry.keys
+
+
+def test_running_from_inside_the_folder_detects_the_frozen_exe(tmp_path, monkeypatch):
+    folder = tmp_path / "Programs" / "Meridian Desktop"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(folder / inst.EXE_NAME))
+    assert inst._running_from(folder) is True
+    assert inst._running_from(tmp_path / "elsewhere") is False
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert inst._running_from(folder) is False
+
+
+def test_running_from_the_install_folder_hands_its_removal_to_the_scheduler(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+    folder = inst.install_dir(env)
+
+    def locked(src, dst, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    scheduled: list[Path] = []
+    monkeypatch.setattr(inst.os, "rename", locked)
+    monkeypatch.setattr(inst, "_running_from", lambda path: path == folder)
+
+    lines = inst.uninstall(env, registry=registry, scheduler=scheduled.append)
+
+    assert scheduled == [folder]
+    assert any(line.startswith("scheduled removal of") for line in lines)
+    assert (folder / inst.EXE_NAME).is_file()  # this process deletes nothing it cannot finish
+    assert inst.UNINSTALL_KEY not in registry.keys
+
+
+def test_schedule_folder_removal_passes_the_folder_through_the_environment(tmp_path, monkeypatch):
+    folder = tmp_path / "Programs" / "x'y z"
+    seen: dict = {}
+
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        seen["env"] = kwargs["env"]
+        return None
+
+    monkeypatch.setattr(inst.subprocess, "Popen", fake_popen)
+    inst.schedule_folder_removal(folder)
+
+    assert seen["env"]["MERIDIAN_REMOVE_DIR"] == str(folder)
+    assert str(folder) not in " ".join(seen["argv"])
+
+
+def test_autostart_is_off_by_default(tmp_path):
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), _env(tmp_path), writer=_Recorder(), registry=registry)
+    assert registry.run_value() is None
+    assert inst.RUN_KEY not in registry.keys
+
+
+def test_autostart_saved_as_on_writes_the_run_entry_for_the_installed_exe(tmp_path):
+    env = _env(tmp_path)
+    SettingsStore(default_settings_path(env)).save(Settings(autostart=True))
+    registry = FakeRegistry()
+
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+
+    exe = inst.install_dir(env) / inst.EXE_NAME
+    assert registry.run_value() == f'"{exe}"'
+
+
+def test_reinstall_with_autostart_off_removes_a_stale_run_entry(tmp_path):
+    registry = FakeRegistry()
+    registry.keys[inst.RUN_KEY] = {inst.RUN_VALUE: '"C:\\old\\MeridianDesktop.exe"'}
+    inst.install(_bundle(tmp_path), _env(tmp_path), writer=_Recorder(), registry=registry)
+    assert registry.run_value() is None
+
+
+def test_turning_autostart_on_without_an_install_says_what_to_do(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    with pytest.raises(inst.InstallError, match="install.cmd"):
+        inst.set_autostart(True, _env(tmp_path), registry=FakeRegistry())
+
+
+def test_turning_autostart_on_from_a_frozen_exe_points_at_that_exe(tmp_path, monkeypatch):
+    exe = tmp_path / "dist" / inst.EXE_NAME
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    registry = FakeRegistry()
+
+    assert inst.set_autostart(True, _env(tmp_path), registry=registry) == exe.resolve()
+    assert registry.run_value() == f'"{exe.resolve()}"'
+
+
+def test_turning_autostart_off_removes_the_run_entry(tmp_path):
+    registry = FakeRegistry()
+    registry.keys[inst.RUN_KEY] = {inst.RUN_VALUE: '"x"'}
+    assert inst.set_autostart(False, _env(tmp_path), registry=registry) is None
+    assert registry.run_value() is None
+
+
+def test_uninstall_removes_the_run_entry_first_and_the_apps_entry_last(tmp_path):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
+    inst.set_autostart(True, env, registry=registry, target=inst.install_dir(env) / inst.EXE_NAME)
+
+    lines = inst.uninstall(env, registry=registry)
+
+    assert registry.run_value() is None
+    assert inst.UNINSTALL_KEY not in registry.keys
+    assert lines[0].startswith("removed start-with-Windows entry")
+    assert lines[-1].startswith("removed Apps and Features entry")
+
+
+def test_a_registry_failure_during_install_is_an_install_error(tmp_path):
+    registry = FakeRegistry()
+    registry.fail_writes = True
+    with pytest.raises(inst.InstallError, match="could not update the Windows registry"):
+        inst.install(_bundle(tmp_path), _env(tmp_path), writer=_Recorder(), registry=registry)
+
+
+def test_default_registry_writes_nothing_when_switched_off_or_off_windows():
+    assert isinstance(inst.default_registry({inst.NO_REGISTRY_ENV: "1"}), inst.NullRegistry)
+    assert isinstance(inst.default_registry({}), inst.NullRegistry) == (os.name != "nt")
+
+
+def test_windows_registry_uses_hkcu_and_reports_missing_values_as_false():
+    fake = FakeWinreg()
+    registry = inst.WindowsRegistry(winreg_module=fake)
+
+    registry.write_strings(inst.RUN_KEY, {inst.RUN_VALUE: '"C:\\x\\MeridianDesktop.exe"'})
+    assert fake.values[inst.RUN_KEY] == {inst.RUN_VALUE: '"C:\\x\\MeridianDesktop.exe"'}
+    assert set(fake.roots) == {FakeWinreg.HKEY_CURRENT_USER}
+
+    assert registry.delete_value(inst.RUN_KEY, inst.RUN_VALUE) is True
+    assert registry.delete_value(inst.RUN_KEY, inst.RUN_VALUE) is False
+    assert registry.delete_key(inst.UNINSTALL_KEY) is False
+
+    registry.write_strings(inst.UNINSTALL_KEY, {"DisplayName": "Meridian Desktop"})
+    assert registry.delete_key(inst.UNINSTALL_KEY) is True
+    assert inst.UNINSTALL_KEY not in fake.values
 
 
 def test_create_shortcut_passes_paths_through_the_environment_not_the_command(tmp_path, monkeypatch):
     shortcut = tmp_path / "Start Menu" / "Meridian Desktop.lnk"
-    target = tmp_path / "Programs" / "x'y \"z\"" / inst.EXE_NAME
+    target = tmp_path / "Programs" / "x'y z" / inst.EXE_NAME
     seen = {}
 
     def fake_run(argv, **kwargs):
@@ -174,6 +479,23 @@ def test_main_install_succeeds_with_an_injected_environment(tmp_path, capsys):
     assert len(recorder.calls) == 1
 
 
+def test_main_install_and_uninstall_use_the_registry_they_are_given(tmp_path, capsys):
+    env = _env(tmp_path)
+    registry = FakeRegistry()
+    scheduled: list[Path] = []
+
+    code = inst.main(["--install", "--source", str(_bundle(tmp_path))], env=env, writer=_Recorder(), registry=registry)
+    assert code == 0
+    assert inst.UNINSTALL_KEY in registry.keys
+    capsys.readouterr()
+
+    code = inst.main(["--uninstall"], env=env, registry=registry, scheduler=scheduled.append)
+    assert code == 0
+    assert "removed Apps and Features entry" in capsys.readouterr().out
+    assert inst.UNINSTALL_KEY not in registry.keys
+    assert scheduled == []
+
+
 def test_main_install_reports_a_missing_bundle_and_returns_1(tmp_path, capsys):
     code = inst.main(["--install", "--source", str(tmp_path / "nowhere")], env=_env(tmp_path), writer=_Recorder())
 
@@ -181,8 +503,21 @@ def test_main_install_reports_a_missing_bundle_and_returns_1(tmp_path, capsys):
     assert "install failed" in capsys.readouterr().err
 
 
+def test_errors_reach_a_message_box_when_there_is_no_console(monkeypatch):
+    """The windowed bundle has no console: sys.stdout and sys.stderr are None."""
+    shown: list[str] = []
+    monkeypatch.setattr(inst, "_message_box", shown.append)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    inst._say("installed to somewhere")
+    inst._say("install failed: boom", error=True)
+
+    assert shown == ["install failed: boom"]
+
+
 def test_main_uninstall_with_nothing_installed_returns_0(tmp_path, capsys):
-    assert inst.main(["--uninstall"], env=_env(tmp_path)) == 0
+    assert inst.main(["--uninstall"], env=_env(tmp_path), registry=FakeRegistry()) == 0
     assert "nothing to remove" in capsys.readouterr().out
 
 

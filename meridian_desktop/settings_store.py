@@ -35,6 +35,10 @@ class Settings:
     # Path to the Meridian database file that the read-only reader opens. None means the
     # user has not picked one yet. Only a path is stored here, never a token or a secret.
     db_path: str | None = None
+    # Start Meridian Desktop when the user signs in to Windows. Off by default. install.py
+    # writes and removes the per-user Run entry. save() writes this key only when it is on,
+    # so a file that never opted in keeps the five keys it has always had.
+    autostart: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("db_path must be a non-empty string or null; using None")
 
+    # autostart: an absent key means off, with no warning. Only a real true or false is accepted.
+    if "autostart" in data:
+        value = data["autostart"]
+        if isinstance(value, bool):
+            values["autostart"] = value
+        else:
+            problems.append("autostart must be true or false; using false")
+
     return replace(Settings(), **values), problems
 
 
@@ -123,7 +135,11 @@ class SettingsStore:
     def save(self, settings: Settings) -> None:
         directory = self._path.parent
         directory.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(asdict(settings), indent=2, sort_keys=True) + "\n"
+        data = asdict(settings)
+        if not settings.autostart:
+            # Off is the default, so a file that never opted in is written exactly as before.
+            del data["autostart"]
+        payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
