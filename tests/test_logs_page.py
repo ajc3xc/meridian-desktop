@@ -1,15 +1,17 @@
 """Tests for the Logs tab (meridian_desktop/ui/logs_page.py), with pytest-qt.
 
-The tunnel log reads real temp files through log_tail.read_tunnel_log_tail, or a fake read. The
-runner read runs the real RunnerClient against a fake spawn, or a fake read. Nothing here starts a
-process, opens a socket, reads the real home directory or reads the keychain. Every log file is
-under pytest's temp directory, and its path is passed in, so the real MERIDIAN_TUNNEL_LOG is never
-read. Fake secrets carry a fake marker and match no live token. Offscreen Qt, from conftest.
+The desktop log reads real temp files through desktop_log.read_desktop_log_tail, with the environment
+passed in, so the real LOCALAPPDATA is never read. The tunnel log reads real temp files through
+log_tail.read_tunnel_log_tail, or a fake read. The runner read runs the real RunnerClient against a
+fake spawn, or a fake read. Nothing here starts a process, opens a socket, reads the real home
+directory or reads the keychain. Every log file is under pytest's temp directory. Fake secrets carry
+a fake marker and match no live token. Offscreen Qt, from conftest.
 """
 
 import json
 import subprocess
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 
+from meridian_desktop.desktop_log import desktop_log_path, read_desktop_log_tail
 from meridian_desktop.log_tail import (
     DEFAULT_MAX_BYTES,
     NO_LOG_YET_TEXT,
@@ -34,12 +37,31 @@ from meridian_desktop.log_tail import (
     LogTail,
     read_tunnel_log_tail,
 )
-from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, MODULE, RunnerClient, RunnerResult
+from meridian_desktop.runner_client import (
+    ERR_NOT_AVAILABLE,
+    ERR_TIMEOUT,
+    MODULE,
+    NOT_AVAILABLE_MESSAGE,
+    RunnerClient,
+    RunnerResult,
+)
 from meridian_desktop.ui.logs_page import (
+    DESKTOP_EMPTY_TEXT,
+    DESKTOP_MISSING_TEXT,
+    DESKTOP_UNREADABLE_TEXT,
     EMPTY_TUNNEL_TEXT,
+    INTRO_UNREAD_TEXT,
+    NO_LOG_TAIL_TEXT,
     REFRESH_BUTTON_TEXT,
+    RUNNER_BY_HAND_TEXT,
     RUNNER_EMPTY_TEXT,
     RUNNER_NOT_AVAILABLE_PREFIX,
+    RUNNER_NOT_CONNECTED_TEXT,
+    RUNNER_START_COMMAND,
+    RUNNER_TAIL_COMMAND,
+    TUNNEL_COMMAND,
+    TUNNEL_MISSING_TEXT,
+    TUNNEL_UNREADABLE_TEXT,
     LogsPage,
     runner_log_text,
     runner_tail_not_configured,
@@ -49,7 +71,9 @@ FAKE_QUERY_TOKEN = "fake-query-0001"
 FAKE_BEARER = "sk_meridian_fake-bearer-0002"
 FAKE_BARE = "sk_meridian_fake-bare-0003"
 FAKE_RUNNER = "sk_meridian_fake-runner-0004"
-SECRETS = (FAKE_QUERY_TOKEN, FAKE_BEARER, FAKE_BARE, FAKE_RUNNER)
+FAKE_PASSWORD = "fake-password-0005"
+FAKE_API_KEY = "fake-api-key-0006"
+SECRETS = (FAKE_QUERY_TOKEN, FAKE_BEARER, FAKE_BARE, FAKE_RUNNER, FAKE_PASSWORD, FAKE_API_KEY)
 # Every input control except the one Refresh button, which the button test checks by name.
 WRITE_CONTROLS = (
     QToolButton,
@@ -61,6 +85,8 @@ WRITE_CONTROLS = (
 )
 # Words a clear, delete, rotate or truncate control would carry, and the runner's mutating verbs.
 FORBIDDEN_BUTTON_WORDS = ("clear", "delete", "rotate", "truncate", "remove", "start", "stop", "restart")
+BY_MOUSE = Qt.TextInteractionFlag.TextSelectableByMouse
+BY_KEYBOARD = Qt.TextInteractionFlag.TextSelectableByKeyboard
 
 
 class Recorder:
@@ -91,7 +117,7 @@ class Recorder:
 
 
 def _tail_ok(lines, path="tunnel.log"):
-    return LogTail(STATUS_OK, path, tuple(lines), "")
+    return LogTail(STATUS_OK, Path(path), tuple(lines), "")
 
 
 def _runner_ok(log_tail):
@@ -100,14 +126,18 @@ def _runner_ok(log_tail):
     )
 
 
-def _page(qtbot, *, tunnel, runner=None):
-    page = LogsPage(tunnel_log=tunnel, runner=runner if runner is not None else Recorder(_runner_ok("")))
+def _page(qtbot, *, tunnel, runner=None, desktop=None):
+    page = LogsPage(
+        desktop_log=desktop if desktop is not None else Recorder(_tail_ok([], "desktop.log")),
+        tunnel_log=tunnel,
+        runner=runner if runner is not None else Recorder(_runner_ok("")),
+    )
     qtbot.addWidget(page)
     return page
 
 
 def _press(qtbot, page):
-    """Press Refresh and wait until both reads finish and the button is enabled again."""
+    """Press Refresh and wait until all the reads finish and the button is enabled again."""
     button = page.findChild(QPushButton, "logs-refresh")
     button.click()
     qtbot.waitUntil(lambda: not page.busy and button.isEnabled(), timeout=5000)
@@ -133,10 +163,24 @@ def _write_log(path, text):
     path.write_bytes(text.encode("utf-8"))
 
 
+def _tree(root):
+    """Every file under ``root``: its bytes and modification time, keyed by relative path."""
+    found = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            found[path.relative_to(root).as_posix()] = (path.read_bytes(), path.stat().st_mtime_ns)
+    return found
+
+
+def _desktop_env(tmp_path):
+    return {"LOCALAPPDATA": str(tmp_path / "local")}
+
+
 def test_logs_page_is_read_only_and_plain_text(qtbot):
     tunnel = Recorder(_tail_ok(["<b>bold</b> tunnel line"]))
     runner = Recorder(_runner_ok("<i>runner</i> line"))
-    page = _page(qtbot, tunnel=tunnel, runner=runner)
+    desktop = Recorder(_tail_ok(["<u>desktop</u> line"], "desktop.log"))
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop)
 
     buttons = page.findChildren(QPushButton)
     assert [button.objectName() for button in buttons] == ["logs-refresh"]
@@ -155,6 +199,7 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
     for pane in page.findChildren(QPlainTextEdit):
         assert pane.isReadOnly(), pane.objectName()
     # The markup stays as typed. Each pane holds plain text, and no label is read as HTML.
+    assert _text(page, "logs-desktop-text") == "<u>desktop</u> line"
     assert _text(page, "logs-tunnel-text") == "<b>bold</b> tunnel line"
     assert _text(page, "logs-runner-text") == "<i>runner</i> line"
     for label in page.findChildren(QLabel):
@@ -162,51 +207,125 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
 
 
 def test_nothing_is_read_until_refresh_is_pressed(qtbot):
+    desktop = Recorder(_tail_ok(["line"], "desktop.log"))
     tunnel = Recorder(_tail_ok(["line"]))
     runner = Recorder(_runner_ok("line"))
-    page = _page(qtbot, tunnel=tunnel, runner=runner)
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop)
 
     page.show()
     qtbot.waitExposed(page)
     qtbot.wait(200)
 
+    assert desktop.calls == 0
     assert tunnel.calls == 0
     assert runner.calls == 0
+    assert _label(page, "logs-desktop-heading") == "Desktop log: not read yet."
     assert _label(page, "logs-tunnel-heading") == "Tunnel log: not read yet."
     assert _label(page, "logs-runner-heading") == "Runner log (tail-log): not read yet."
+    assert _text(page, "logs-desktop-text") == ""
     assert _text(page, "logs-tunnel-text") == ""
     assert _text(page, "logs-runner-text") == ""
+    assert _label(page, "logs-intro") == INTRO_UNREAD_TEXT
 
 
-def test_both_panes_show_the_bounded_tunnel_tail_and_the_runner_tail(qtbot, tmp_path):
-    path = tmp_path / "tunnel.log"
-    # Far more than the default budget, so only the end of the file is read.
-    lines = [f"tunnel-line-{index:07d} " + "x" * 40 for index in range(4000)]
-    _write_log(path, "\n".join(lines) + "\n")
+def test_all_three_panes_show_their_bounded_tails_and_the_runner_tail(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)
+    desktop_path = desktop_log_path(env=env)
+    tunnel_path = tmp_path / "tunnel.log"
+    # Far more than the default budget, so only the end of each file is read.
+    _write_log(desktop_path, "\n".join(f"desk-line-{index:07d} " + "x" * 40 for index in range(4000)) + "\n")
+    _write_log(tunnel_path, "\n".join(f"tunnel-line-{index:07d} " + "x" * 40 for index in range(4000)) + "\n")
     page = _page(
         qtbot,
-        tunnel=lambda: read_tunnel_log_tail(path),
+        desktop=lambda: read_desktop_log_tail(env=env),
+        tunnel=lambda: read_tunnel_log_tail(tunnel_path),
         runner=Recorder(_runner_ok("runner-one\nrunner-two")),
     )
 
     _press(qtbot, page)
 
-    shown = _text(page, "logs-tunnel-text")
-    assert "tunnel-line-0003999" in shown
-    assert "tunnel-line-0000000" not in shown
-    assert len(shown.encode("utf-8")) <= DEFAULT_MAX_BYTES
+    desktop_shown = _text(page, "logs-desktop-text")
+    assert "desk-line-0003999" in desktop_shown
+    assert "desk-line-0000000" not in desktop_shown
+    assert len(desktop_shown.encode("utf-8")) <= DEFAULT_MAX_BYTES
+    tunnel_shown = _text(page, "logs-tunnel-text")
+    assert "tunnel-line-0003999" in tunnel_shown
+    assert "tunnel-line-0000000" not in tunnel_shown
+    assert len(tunnel_shown.encode("utf-8")) <= DEFAULT_MAX_BYTES
     assert _text(page, "logs-runner-text") == "runner-one\nrunner-two"
-    assert _label(page, "logs-tunnel-heading") == f"Tunnel log: {path}"
+    assert _label(page, "logs-desktop-heading") == f"Desktop log: {desktop_path}"
+    assert _label(page, "logs-tunnel-heading") == f"Tunnel log: {tunnel_path}"
 
 
-def test_missing_tunnel_log_shows_no_log_yet(qtbot, tmp_path):
+def test_desktop_pane_shows_its_redacted_tail(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)
+    path = desktop_log_path(env=env)
+    _write_log(
+        path,
+        f"2026-10-19T10:00:00 INFO meridian_desktop: Meridian Desktop started.\n"
+        f"2026-10-19T10:00:01 WARNING meridian_desktop: connect ?token={FAKE_QUERY_TOKEN}\n"
+        f"2026-10-19T10:00:02 ERROR meridian_desktop: Bearer {FAKE_BEARER}\n"
+        f"2026-10-19T10:00:03 INFO meridian_desktop: password={FAKE_PASSWORD} api_key: '{FAKE_API_KEY}'\n",
+    )
+    page = _page(qtbot, desktop=lambda: read_desktop_log_tail(env=env), tunnel=Recorder(_tail_ok([])))
+
+    _press(qtbot, page)
+
+    shown = _text(page, "logs-desktop-text")
+    assert "Meridian Desktop started." in shown
+    assert "token=[redacted]" in shown
+    assert "Bearer [redacted]" in shown
+    assert "password=[redacted]" in shown
+    assert "api_key: [redacted]" in shown
+    for secret in SECRETS:
+        assert secret not in _all_visible_text(page)
+    assert _label(page, "logs-desktop-heading") == f"Desktop log: {path}"
+
+
+def test_missing_desktop_log_says_which_app_writes_it_and_what_to_do(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)
+    page = _page(qtbot, desktop=lambda: read_desktop_log_tail(env=env), tunnel=Recorder(_tail_ok([])))
+
+    _press(qtbot, page)
+
+    assert _text(page, "logs-desktop-text") == DESKTOP_MISSING_TEXT
+    assert "The Meridian Desktop app writes this file each time it starts." in DESKTOP_MISSING_TEXT
+    assert "Close the app, open it again, then press Refresh." in DESKTOP_MISSING_TEXT
+    assert not (tmp_path / "local").exists()  # the read created no folder
+
+
+def test_empty_desktop_log_says_it_is_empty_and_what_to_do(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)
+    _write_log(desktop_log_path(env=env), "")
+    page = _page(qtbot, desktop=lambda: read_desktop_log_tail(env=env), tunnel=Recorder(_tail_ok([])))
+
+    _press(qtbot, page)
+
+    assert _text(page, "logs-desktop-text") == DESKTOP_EMPTY_TEXT
+
+
+def test_unreadable_desktop_log_shows_fixed_text_without_the_error(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)
+    desktop_log_path(env=env).mkdir(parents=True)  # a folder cannot be read as a log
+    page = _page(qtbot, desktop=lambda: read_desktop_log_tail(env=env), tunnel=Recorder(_tail_ok([])))
+
+    _press(qtbot, page)
+
+    assert _text(page, "logs-desktop-text") == DESKTOP_UNREADABLE_TEXT
+    assert str(tmp_path) not in _text(page, "logs-desktop-text")
+
+
+def test_missing_tunnel_log_names_the_tunnel_and_the_command(qtbot, tmp_path):
     missing = tmp_path / "never-written" / "tunnel.log"
     page = _page(qtbot, tunnel=lambda: read_tunnel_log_tail(missing))
 
     _press(qtbot, page)
 
-    assert _text(page, "logs-tunnel-text") == NO_LOG_YET_TEXT
+    assert _text(page, "logs-tunnel-text") == TUNNEL_MISSING_TEXT
+    assert "The Meridian core's tunnel writes this file while it runs." in TUNNEL_MISSING_TEXT
+    assert TUNNEL_COMMAND in _text(page, "logs-tunnel-text")
     assert "not available" not in _text(page, "logs-tunnel-text").lower()
+    assert _label(page, "logs-tunnel-heading") == f"Tunnel log: {missing}"
 
 
 def test_unreadable_tunnel_log_shows_fixed_text_without_the_error(qtbot, tmp_path):
@@ -215,11 +334,11 @@ def test_unreadable_tunnel_log_shows_fixed_text_without_the_error(qtbot, tmp_pat
 
     _press(qtbot, page)
 
-    assert _text(page, "logs-tunnel-text") == UNREADABLE_TEXT
+    assert _text(page, "logs-tunnel-text") == TUNNEL_UNREADABLE_TEXT
     assert str(tmp_path) not in _text(page, "logs-tunnel-text")
 
 
-def test_empty_tunnel_log_says_it_is_empty(qtbot, tmp_path):
+def test_empty_tunnel_log_says_it_is_empty_and_what_to_run(qtbot, tmp_path):
     path = tmp_path / "tunnel.log"
     _write_log(path, "")
     page = _page(qtbot, tunnel=lambda: read_tunnel_log_tail(path))
@@ -227,6 +346,7 @@ def test_empty_tunnel_log_says_it_is_empty(qtbot, tmp_path):
     _press(qtbot, page)
 
     assert _text(page, "logs-tunnel-text") == EMPTY_TUNNEL_TEXT
+    assert TUNNEL_COMMAND in EMPTY_TUNNEL_TEXT
 
 
 def test_tunnel_log_secrets_are_redacted_on_screen(qtbot, tmp_path):
@@ -271,14 +391,20 @@ def test_runner_output_gets_the_same_redaction_as_the_tunnel_log(qtbot):
     )
 
 
-def test_page_redacts_a_tunnel_source_that_skipped_the_reader(qtbot):
+def test_page_redacts_a_source_that_skipped_the_reader(qtbot):
     # A source that does not go through log_tail still reaches the screen redacted.
-    page = _page(qtbot, tunnel=Recorder(_tail_ok([f"raw {FAKE_BARE}"])))
+    page = _page(
+        qtbot,
+        tunnel=Recorder(_tail_ok([f"raw {FAKE_BARE}"])),
+        desktop=Recorder(_tail_ok([f"desk raw {FAKE_BARE}", f"password={FAKE_PASSWORD}"], "desktop.log")),
+    )
 
     _press(qtbot, page)
 
     assert FAKE_BARE not in _text(page, "logs-tunnel-text")
     assert "raw [redacted]" in _text(page, "logs-tunnel-text")
+    assert FAKE_BARE not in _text(page, "logs-desktop-text")
+    assert FAKE_PASSWORD not in _text(page, "logs-desktop-text")
 
 
 def test_runner_not_configured_reads_not_available_and_starts_nothing(qtbot):
@@ -289,19 +415,24 @@ def test_runner_not_configured_reads_not_available_and_starts_nothing(qtbot):
         raise AssertionError("no process should start")
 
     client = RunnerClient(spawn=spawn)  # no interpreter configured
-    page = LogsPage(tunnel_log=Recorder(_tail_ok([])), runner=lambda: client.tail_log("scope-a"))
+    page = LogsPage(
+        desktop_log=Recorder(_tail_ok([], "desktop.log")),
+        tunnel_log=Recorder(_tail_ok([])),
+        runner=lambda: client.tail_log("scope-a"),
+    )
     qtbot.addWidget(page)
 
     _press(qtbot, page)
 
     assert spawned == []
     assert _text(page, "logs-runner-text") == (
-        "Runner log not available. The Meridian runner command is not available on this computer."
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NOT_AVAILABLE_MESSAGE} {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_BY_HAND_TEXT}"
     )
+    assert RUNNER_TAIL_COMMAND in _text(page, "logs-runner-text")
 
 
 def test_default_runner_read_is_not_configured(qtbot):
-    page = LogsPage(tunnel_log=Recorder(_tail_ok([])))
+    page = LogsPage(desktop_log=Recorder(_tail_ok([], "desktop.log")), tunnel_log=Recorder(_tail_ok([])))
     qtbot.addWidget(page)
 
     _press(qtbot, page)
@@ -319,7 +450,11 @@ def test_runner_pane_passes_only_the_tail_log_verb(qtbot):
         return subprocess.CompletedProcess(argv, 0, stdout=body, stderr=b"")
 
     client = RunnerClient(python="core-python", spawn=spawn)
-    page = LogsPage(tunnel_log=Recorder(_tail_ok([])), runner=lambda: client.tail_log("scope-a"))
+    page = LogsPage(
+        desktop_log=Recorder(_tail_ok([], "desktop.log")),
+        tunnel_log=Recorder(_tail_ok([])),
+        runner=lambda: client.tail_log("scope-a"),
+    )
     qtbot.addWidget(page)
 
     _press(qtbot, page)
@@ -329,12 +464,30 @@ def test_runner_pane_passes_only_the_tail_log_verb(qtbot):
     assert _text(page, "logs-runner-text") == "runner line"
 
 
-def test_runner_empty_tail_reads_no_log_yet(qtbot):
+def test_runner_empty_tail_names_the_runner_and_the_start_command(qtbot):
     page = _page(qtbot, tunnel=Recorder(_tail_ok([])), runner=Recorder(_runner_ok("")))
 
     _press(qtbot, page)
 
     assert _text(page, "logs-runner-text") == RUNNER_EMPTY_TEXT
+    assert "The Meridian core's runner writes this log" in RUNNER_EMPTY_TEXT
+    assert RUNNER_START_COMMAND in _text(page, "logs-runner-text")
+
+
+def test_each_missing_or_empty_source_names_its_writer_and_its_command(qtbot, tmp_path):
+    env = _desktop_env(tmp_path)  # no desktop.log is written
+    page = _page(
+        qtbot,
+        desktop=lambda: read_desktop_log_tail(env=env),
+        tunnel=lambda: read_tunnel_log_tail(tmp_path / "none" / "tunnel.log"),
+        runner=Recorder(_runner_ok("")),
+    )
+
+    _press(qtbot, page)
+
+    assert "The Meridian Desktop app writes this file each time it starts." in _text(page, "logs-desktop-text")
+    assert TUNNEL_COMMAND in _text(page, "logs-tunnel-text")
+    assert RUNNER_START_COMMAND in _text(page, "logs-runner-text")
 
 
 def test_runner_reply_without_a_log_tail_reads_not_available(qtbot):
@@ -344,7 +497,7 @@ def test_runner_reply_without_a_log_tail_reads_not_available(qtbot):
     _press(qtbot, page)
 
     assert _text(page, "logs-runner-text") == (
-        "Runner log not available. The runner reply did not include a log tail."
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_BY_HAND_TEXT}"
     )
 
 
@@ -353,43 +506,61 @@ def test_runner_error_text_is_shown_as_the_runner_client_wrote_it(qtbot):
         return subprocess.CompletedProcess(argv, 3, stdout=b'{"scope": "scope-a"}', stderr=b"")
 
     client = RunnerClient(python="core-python", spawn=spawn)
-    page = LogsPage(tunnel_log=Recorder(_tail_ok([])), runner=lambda: client.tail_log("scope-a"))
+    page = LogsPage(
+        desktop_log=Recorder(_tail_ok([], "desktop.log")),
+        tunnel_log=Recorder(_tail_ok([])),
+        runner=lambda: client.tail_log("scope-a"),
+    )
     qtbot.addWidget(page)
 
     _press(qtbot, page)
 
-    assert _text(page, "logs-runner-text") == "Runner log not available. The runner command exited with code 3."
+    assert _text(page, "logs-runner-text") == (
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} The runner command exited with code 3. {RUNNER_BY_HAND_TEXT}"
+    )
 
 
 def test_runner_log_text_for_a_failed_result_uses_its_fixed_message():
-    result = RunnerResult(verb="tail-log", ok=False, error_code=ERR_NOT_AVAILABLE, error_message="fixed text")
+    not_available = RunnerResult(
+        verb="tail-log", ok=False, error_code=ERR_NOT_AVAILABLE, error_message="fixed text"
+    )
+    timed_out = RunnerResult(verb="tail-log", ok=False, error_code=ERR_TIMEOUT, error_message="timed out text")
 
-    assert runner_log_text(result) == "Runner log not available. fixed text"
+    assert runner_log_text(not_available) == (
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} fixed text {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_BY_HAND_TEXT}"
+    )
+    assert runner_log_text(timed_out) == f"{RUNNER_NOT_AVAILABLE_PREFIX} timed out text {RUNNER_BY_HAND_TEXT}"
+    assert RUNNER_NOT_CONNECTED_TEXT not in runner_log_text(timed_out)
 
 
 def test_refresh_reads_again_on_each_press(qtbot):
+    desktop = Recorder(values=[_tail_ok(["desk first"], "desktop.log"), _tail_ok(["desk second"], "desktop.log")])
     tunnel = Recorder(values=[_tail_ok(["first read"]), _tail_ok(["second read"])])
     runner = Recorder(values=[_runner_ok("one"), _runner_ok("two")])
-    page = _page(qtbot, tunnel=tunnel, runner=runner)
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop)
 
     _press(qtbot, page)
     assert _text(page, "logs-tunnel-text") == "first read"
+    assert _text(page, "logs-desktop-text") == "desk first"
 
     _press(qtbot, page)
     assert _text(page, "logs-tunnel-text") == "second read"
     assert _text(page, "logs-runner-text") == "two"
+    assert _text(page, "logs-desktop-text") == "desk second"
     assert tunnel.calls == 2
     assert runner.calls == 2
+    assert desktop.calls == 2
 
 
 def test_reads_run_off_the_ui_thread(qtbot):
     tunnel = Recorder(_tail_ok([]))
     runner = Recorder(_runner_ok(""))
-    page = _page(qtbot, tunnel=tunnel, runner=runner)
+    desktop = Recorder(_tail_ok([], "desktop.log"))
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop)
 
     _press(qtbot, page)
 
-    for read in (tunnel, runner):
+    for read in (desktop, tunnel, runner):
         assert read.threads and all(thread is not threading.main_thread() for thread in read.threads)
 
 
@@ -408,17 +579,36 @@ def test_refresh_button_is_disabled_while_reading(qtbot):
     assert tunnel.calls == 1
 
 
-def test_a_failed_read_shows_its_class_name_and_the_other_pane_still_shows(qtbot):
+def test_a_failed_read_shows_its_class_name_and_the_other_panes_still_show(qtbot):
     secret = "SECRET-IN-A-READ-ERROR"
     page = _page(
         qtbot,
         tunnel=Recorder(error=RuntimeError(secret)),
         runner=Recorder(_runner_ok("runner still shows")),
+        desktop=Recorder(_tail_ok(["desktop still shows"], "desktop.log")),
     )
 
     _press(qtbot, page)
 
     assert _text(page, "logs-tunnel-text") == "The tunnel log check failed unexpectedly (RuntimeError)."
+    assert _text(page, "logs-runner-text") == "runner still shows"
+    assert _text(page, "logs-desktop-text") == "desktop still shows"
+    assert secret not in _all_visible_text(page)
+
+
+def test_a_failed_desktop_read_does_not_hide_the_other_logs(qtbot):
+    secret = "SECRET-DESKTOP-READ-ERROR"
+    page = _page(
+        qtbot,
+        desktop=Recorder(error=OSError(secret)),
+        tunnel=Recorder(_tail_ok(["tunnel still shows"])),
+        runner=Recorder(_runner_ok("runner still shows")),
+    )
+
+    _press(qtbot, page)
+
+    assert _text(page, "logs-desktop-text") == "The desktop log check failed unexpectedly (OSError)."
+    assert _text(page, "logs-tunnel-text") == "tunnel still shows"
     assert _text(page, "logs-runner-text") == "runner still shows"
     assert secret not in _all_visible_text(page)
 
@@ -448,29 +638,73 @@ def test_an_unexpected_failure_of_the_whole_pass_is_reported_without_its_text(qt
 
 
 def test_refresh_never_changes_the_logs_on_disk(qtbot, tmp_path):
-    path = tmp_path / "tunnel.log"
-    backup = tmp_path / "tunnel.log.1"
-    _write_log(path, "alpha\nbeta\n")
-    _write_log(backup, "older\n")
-    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.iterdir()}
-    page = _page(qtbot, tunnel=lambda: read_tunnel_log_tail(path))
+    env = _desktop_env(tmp_path)
+    desktop_path = desktop_log_path(env=env)
+    _write_log(desktop_path, "desk-alpha\n")
+    _write_log(desktop_path.with_name("desktop.log.1"), "desk-older\n")
+    tunnel_path = tmp_path / "tunnel.log"
+    _write_log(tunnel_path, "alpha\nbeta\n")
+    _write_log(tmp_path / "tunnel.log.1", "older\n")
+    before = _tree(tmp_path)
+    page = _page(
+        qtbot,
+        desktop=lambda: read_desktop_log_tail(env=env),
+        tunnel=lambda: read_tunnel_log_tail(tunnel_path),
+    )
 
     _press(qtbot, page)
     _press(qtbot, page)
 
-    after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.iterdir()}
-    assert after == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["tunnel.log", "tunnel.log.1"]
+    assert _tree(tmp_path) == before
+    assert "desk-alpha" in _text(page, "logs-desktop-text")
     assert "alpha" in _text(page, "logs-tunnel-text")
 
 
 def test_status_values_map_to_their_fixed_text(qtbot):
-    """Each status the reader can return has its own visible text, and none shows an exception."""
+    """Each status the readers can return has its own visible text, and none shows an exception."""
     cases = [
-        (LogTail(STATUS_NO_LOG_YET, "x", (), NO_LOG_YET_TEXT), NO_LOG_YET_TEXT),
-        (LogTail(STATUS_UNREADABLE, "x", (), UNREADABLE_TEXT), UNREADABLE_TEXT),
+        (
+            LogTail(STATUS_NO_LOG_YET, Path("x"), (), NO_LOG_YET_TEXT),
+            "desktop",
+            DESKTOP_MISSING_TEXT,
+        ),
+        (LogTail(STATUS_UNREADABLE, Path("x"), (), UNREADABLE_TEXT), "desktop", DESKTOP_UNREADABLE_TEXT),
+        (LogTail(STATUS_OK, Path("x"), (), ""), "desktop", DESKTOP_EMPTY_TEXT),
+        (LogTail(STATUS_NO_LOG_YET, Path("x"), (), NO_LOG_YET_TEXT), "tunnel", TUNNEL_MISSING_TEXT),
+        (LogTail(STATUS_UNREADABLE, Path("x"), (), UNREADABLE_TEXT), "tunnel", TUNNEL_UNREADABLE_TEXT),
+        (LogTail(STATUS_OK, Path("x"), (), ""), "tunnel", EMPTY_TUNNEL_TEXT),
     ]
-    for tail, expected in cases:
-        page = _page(qtbot, tunnel=Recorder(tail))
-        _press(qtbot, page)
-        assert _text(page, "logs-tunnel-text") == expected
+    for tail, source, expected in cases:
+        if source == "desktop":
+            page = _page(qtbot, tunnel=Recorder(_tail_ok([])), desktop=Recorder(tail))
+            _press(qtbot, page)
+            shown = _text(page, "logs-desktop-text")
+        else:
+            page = _page(qtbot, tunnel=Recorder(tail))
+            _press(qtbot, page)
+            shown = _text(page, "logs-tunnel-text")
+        assert shown == expected
+        assert "Traceback" not in shown
+
+
+def test_every_label_and_pane_can_be_selected(qtbot):
+    page = _page(qtbot, tunnel=Recorder(_tail_ok(["x"])))
+
+    _press(qtbot, page)
+
+    assert page.findChildren(QLabel)
+    for label in page.findChildren(QLabel):
+        flags = label.textInteractionFlags()
+        assert flags & BY_MOUSE and flags & BY_KEYBOARD, label.objectName()
+    for pane in page.findChildren(QPlainTextEdit):
+        flags = pane.textInteractionFlags()
+        assert flags & BY_MOUSE and flags & BY_KEYBOARD, pane.objectName()
+
+
+def test_no_text_on_the_page_says_not_built_yet(qtbot, tmp_path):
+    page = _page(qtbot, tunnel=lambda: read_tunnel_log_tail(tmp_path / "none.log"))
+    assert "not built yet" not in _all_visible_text(page).lower()
+
+    _press(qtbot, page)
+
+    assert "not built yet" not in _all_visible_text(page).lower()
