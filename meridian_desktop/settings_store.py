@@ -25,6 +25,12 @@ DEFAULT_ENGINE_URL = "http://127.0.0.1:8471"
 
 _URL_KEYS = ("hosted_url", "local_url", "engine_url")
 
+# The Meridian core checkout (the folder that holds the meridian package) and a Python program that
+# can import it. The client setup runner uses both. Only paths are stored, never a secret.
+CORE_CHECKOUT_KEY = "core_checkout"
+CORE_PYTHON_KEY = "core_python"
+CORE_KEYS = (CORE_CHECKOUT_KEY, CORE_PYTHON_KEY)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -39,6 +45,10 @@ class Settings:
     # writes and removes the per-user Run entry. save() writes this key only when it is on,
     # so a file that never opted in keeps the five keys it has always had.
     autostart: bool = False
+    # The core checkout and its Python, both "" when not set. save() writes each one only when it
+    # is set, so a file that never set them keeps the keys it had before.
+    core_checkout: str = ""
+    core_python: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,38 @@ def default_settings_path(
         return Path(local_app_data) / "meridian-desktop" / "settings.json"
     base = home if home is not None else Path.home()
     return base / ".meridian-desktop" / "settings.json"
+
+
+def core_path_problem(key: str, value: str) -> str | None:
+    """Plain words for why a core setting cannot be saved, or None when it can.
+
+    An empty value means "not set" and is always allowed, so a setting can be cleared. A checkout
+    must be an existing folder that holds the meridian package. A Python must be an existing file.
+    """
+    if key not in CORE_KEYS:
+        raise ValueError(f"unknown core setting: {key}")
+    text = value.strip()
+    if not text:
+        return None
+    path = Path(text)
+    if key == CORE_CHECKOUT_KEY:
+        if not path.is_dir():
+            return (
+                f"Not saved. The Meridian core checkout folder does not exist: {text}. "
+                "Choose the folder that holds the meridian package."
+            )
+        if not (path / "meridian" / "__init__.py").is_file():
+            return (
+                f"Not saved. {text} is not a Meridian core checkout: it has no meridian package. "
+                "Choose the folder that holds meridian/."
+            )
+        return None
+    if not path.is_file():
+        return (
+            f"Not saved. The Python program does not exist: {text}. "
+            "Choose the python.exe that can import meridian."
+        )
+    return None
 
 
 def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
@@ -96,6 +138,17 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["autostart"] = value
         else:
             problems.append("autostart must be true or false; using false")
+
+    # core_checkout and core_python: an absent key means "not set", with no warning. Only text is
+    # accepted. Existence is not checked here, so a drive that is offline does not break loading.
+    for key in CORE_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, str):
+            values[key] = value.strip()
+        else:
+            problems.append(f"{key} must be a path as text or empty; using empty")
 
     return replace(Settings(), **values), problems
 
@@ -139,6 +192,10 @@ class SettingsStore:
         if not settings.autostart:
             # Off is the default, so a file that never opted in is written exactly as before.
             del data["autostart"]
+        for key in CORE_KEYS:
+            if not data[key]:
+                # "Not set" is the default, so a file that never set a core path has no such key.
+                del data[key]
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
         try:
@@ -158,5 +215,18 @@ class SettingsStore:
         if mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
         updated = replace(self.load().settings, mode=mode)
+        self.save(updated)
+        return updated
+
+    def set_core_path(self, key: str, value: str) -> Settings:
+        """Validate and save one core setting. Raises ValueError with plain words when it is refused.
+
+        A refused value writes nothing. Every other field in the saved file is kept.
+        """
+        text = value.strip()
+        problem = core_path_problem(key, text)
+        if problem is not None:
+            raise ValueError(problem)
+        updated = replace(self.load().settings, **{key: text})
         self.save(updated)
         return updated
