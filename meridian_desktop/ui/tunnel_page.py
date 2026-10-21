@@ -33,7 +33,10 @@ from PySide6.QtWidgets import (
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.tunnel_status import (
     CHECK_FAILED_REASON,
+    CHECKED_TEMPLATE,
     DEPENDENCY_TEXT,
+    NO_FAILURE_NAME,
+    NO_TIME_TEXT,
     NOT_RUNNING,
     RUNNING,
     START_TEXT,
@@ -63,9 +66,6 @@ HEADLINES = {
     NOT_RUNNING: "Tunnel: not running.",
     UNKNOWN: "Tunnel: unknown.",
 }
-CHECKED_TEMPLATE = "Checked at {}."
-NO_TIME_TEXT = "The check did not finish, so no time was recorded."
-NO_FAILURE_NAME = "unknown error"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -76,10 +76,11 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     return make_selectable(label)
 
 
-class _TunnelCheckJob(QRunnable):
+class TunnelCheckJob(QRunnable):
     """Run one tunnel check on the thread pool and deliver (status, failure_name).
 
     A check that raises is reduced to its class name here, so a raw exception never reaches the UI thread.
+    The top bar in Tunnel mode uses this job too (ui/main_window.py).
     """
 
     def __init__(self, work: Callable[[], TunnelStatus], deliver: Callable[[tuple], None]) -> None:
@@ -155,7 +156,7 @@ class TunnelPage(QWidget):
         self._run_state.setText(CHECKING_TEXT)
         check, clock = self._check_runner, self._clock
         QThreadPool.globalInstance().start(
-            _TunnelCheckJob(lambda: read_tunnel_status(check, clock=clock), self._checks_finished.emit)
+            TunnelCheckJob(lambda: read_tunnel_status(check, clock=clock), self._checks_finished.emit)
         )
 
     def showEvent(self, event: QShowEvent) -> None:
