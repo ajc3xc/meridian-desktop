@@ -39,7 +39,7 @@ from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
-MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"))
+MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"), ("tunnel", "Tunnel"))
 MODE_LABELS = dict(MODE_ITEMS)
 
 DB_DIALOG_TITLE = "Choose the Meridian database file"

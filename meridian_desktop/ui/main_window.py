@@ -15,12 +15,18 @@ when a tab is first shown and when a button is pressed. The Services check and t
 read run only when their button is pressed, and the Tunnel tab makes no request. Hosted
 mode calls only the hosted URL the owner sets: on the Projects tab, and on the Test connection
 button in Settings.
+
+Tunnel mode reads projects the same way Hosted does. Its top bar shows one line with the tunnel's
+state (from one read-only status call, made when the mode is switched to Tunnel and at start in
+Tunnel mode), the tools that need the tunnel, and how to start it by hand. The top bar has no
+control that starts, stops or restarts anything.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -33,8 +39,10 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import zotero_client
 from meridian_desktop.data_source import DataSources
+from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.code_panel import CodePanel
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
@@ -45,7 +53,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.services_page import ServicesPage
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
 from meridian_desktop.ui.text import make_selectable
-from meridian_desktop.ui.tunnel_page import TunnelPage
+from meridian_desktop.ui.tunnel_page import TunnelCheckJob, TunnelPage
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 
 # (tab name, wave that builds it). Display order is the tuple order.
@@ -77,6 +85,14 @@ PLACEHOLDER_REASONS = {
 
 STATUS_MESSAGE = "No services checked yet. Press Check services on the Services tab."
 
+TUNNEL_MODE = "tunnel"
+# One plain sentence per mode. The one for the chosen mode shows under the selector.
+MODE_DESCRIPTIONS = {
+    "hosted": "Hosted: projects load from your hosted Meridian account, with the hosted token saved in Settings.",
+    "local": "Local: projects load from the Meridian server or database file on this computer.",
+    TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
+}
+
 # The window opens at this size (width, height). It fits the full tab bar and gives the
 # Settings panel room for its key row and pods table.
 DEFAULT_WINDOW_SIZE = (960, 640)
@@ -102,8 +118,28 @@ def _placeholder_page(
     return page
 
 
+class _ConfiguredRunner:
+    """The runner's read-only status call, through the core Python and folder saved in Settings.
+
+    The client is built on each call, so a change in Settings is used at once. With no core Python
+    saved, the client reports not available and starts nothing. This class has no start, stop or
+    restart method, and the client never passes one of those verbs.
+    """
+
+    def __init__(self, settings_store: SettingsStore) -> None:
+        self._store = settings_store
+
+    def status(self, scope: str) -> RunnerResult:
+        settings = self._store.load().settings
+        client = RunnerClient(python=settings.core_python or None, cwd=settings.core_checkout or None)
+        return client.status(scope)
+
+
 class MainWindow(QMainWindow):
     """Mode selector above one tab per area. Projects is read-only. Settings holds the RunPod panel."""
+
+    # One finished tunnel check: (generation, (status, failure)). See _start_tunnel_check.
+    _tunnel_checked = Signal(object)
 
     def __init__(
         self,
@@ -111,6 +147,7 @@ class MainWindow(QMainWindow):
         secret_store: SecretStore | None = None,
         data_sources: DataSources | None = None,
         zotero: Any | None = None,
+        tunnel_runner: Any | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
@@ -119,6 +156,12 @@ class MainWindow(QMainWindow):
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
         # The Zotero tab calls this object. Tests pass a fake. The app uses the zotero_client module.
         self._zotero = zotero if zotero is not None else zotero_client
+        # The tunnel status call (a status(scope) method). Tests pass a fake. The app builds the client
+        # from the core Python and folder in Settings. Neither one can start or stop the tunnel.
+        self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
+        # Each tunnel check takes the next number. A result with an older number is dropped.
+        self._tunnel_generation = 0
+        self._tunnel_checked.connect(self._on_tunnel_checked)
         self.setWindowTitle("Meridian")
 
         central = QWidget(self)
@@ -141,8 +184,9 @@ class MainWindow(QMainWindow):
                 latex = LatexPanel(self._store, parent=self.tabs)
                 page = _placeholder_page(name, self.tabs, {LATEX_SECTION: latex})
             elif name == "Tunnel":
-                # No slot-state source in this build, so the page says the states are not available.
-                page = TunnelPage(self.tabs)
+                # The same read-only status call as the top bar. The page says whether the tunnel
+                # runs, and the slot states are not available in this build.
+                page = TunnelPage(self.tabs, status=self._tunnel_runner.status)
             elif name == "Services":
                 # The checks run only when Check services is pressed. Nothing is probed on build or show.
                 page = ServicesPage(self._store, parent=self.tabs)
@@ -171,12 +215,14 @@ class MainWindow(QMainWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
+        # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
+        self._apply_mode_view(self._saved_mode)
 
     def _current_local_url(self) -> str:
         """The local server URL as saved now. The Code, Outputs and Research panels call this when they search."""
         return self._store.load().settings.local_url
 
-    def _build_mode_bar(self, parent: QWidget) -> QHBoxLayout:
+    def _build_mode_bar(self, parent: QWidget) -> QVBoxLayout:
         result = self._store.load()
         # The mode the selector last saved, or loaded at start. A failed save reverts to it.
         self._saved_mode = result.settings.mode
@@ -191,6 +237,12 @@ class MainWindow(QMainWindow):
         self.mode_selector.currentIndexChanged.connect(self._on_mode_changed)
         bar.addWidget(self.mode_selector)
 
+        # The one-line tunnel status. It is shown only in Tunnel mode (see _apply_mode_view).
+        self.tunnel_status_label = make_selectable(QLabel(parent))
+        self.tunnel_status_label.setObjectName("tunnel-mode-status")
+        self.tunnel_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        bar.addWidget(self.tunnel_status_label)
+
         self.settings_warning = make_selectable(QLabel(parent))
         self.settings_warning.setObjectName("settings-warning")
         if result.warning:
@@ -198,7 +250,23 @@ class MainWindow(QMainWindow):
         else:
             self.settings_warning.hide()
         bar.addWidget(self.settings_warning, 1)
-        return bar
+
+        # The chosen mode's description. In Tunnel mode, the detail line names the tools that need the
+        # tunnel and, when the tunnel is not running, how to start it by hand.
+        self.mode_description = make_selectable(QLabel(parent))
+        self.mode_description.setObjectName("mode-description")
+        self.mode_description.setTextFormat(Qt.TextFormat.PlainText)
+        self.mode_description.setWordWrap(True)
+        self.tunnel_detail = make_selectable(QLabel(parent))
+        self.tunnel_detail.setObjectName("tunnel-mode-detail")
+        self.tunnel_detail.setTextFormat(Qt.TextFormat.PlainText)
+        self.tunnel_detail.setWordWrap(True)
+
+        column = QVBoxLayout()
+        column.addLayout(bar)
+        column.addWidget(self.mode_description)
+        column.addWidget(self.tunnel_detail)
+        return column
 
     def _on_mode_changed(self, index: int) -> None:
         mode = self.mode_selector.itemData(index)
@@ -215,6 +283,46 @@ class MainWindow(QMainWindow):
         self._settings_tab.refresh()
         # The Projects tab reads from the source the new mode names.
         self._projects.refresh()
+        self._apply_mode_view(mode)
+
+    def _apply_mode_view(self, mode: str) -> None:
+        """Show the description of ``mode``, and the tunnel lines only in Tunnel mode.
+
+        Switching to Tunnel mode starts one read-only status check. Nothing here starts, stops or
+        restarts the tunnel.
+        """
+        self.mode_description.setText(MODE_DESCRIPTIONS.get(mode, ""))
+        is_tunnel = mode == TUNNEL_MODE
+        self.tunnel_status_label.setVisible(is_tunnel)
+        self.tunnel_detail.setVisible(is_tunnel)
+        if is_tunnel:
+            self._start_tunnel_check()
+        else:
+            # A check still running for Tunnel mode is dropped when it finishes.
+            self._tunnel_generation += 1
+
+    def _start_tunnel_check(self) -> None:
+        """One read-only tunnel status call on the thread pool. The UI thread never waits on it."""
+        self._tunnel_generation += 1
+        generation = self._tunnel_generation
+        runner = self._tunnel_runner
+        self.tunnel_status_label.setText(BAR_CHECKING_TEXT)
+        self.tunnel_detail.setText(DEPENDENCY_TEXT)
+        QThreadPool.globalInstance().start(
+            TunnelCheckJob(
+                lambda: read_tunnel_status(runner.status),
+                lambda payload: self._tunnel_checked.emit((generation, payload)),
+            )
+        )
+
+    @Slot(object)
+    def _on_tunnel_checked(self, payload: tuple) -> None:
+        generation, (status, failure) = payload
+        if generation != self._tunnel_generation or self._saved_mode != TUNNEL_MODE:
+            return  # an older check, or the mode changed after this check started
+        line, detail = bar_texts(status, failure)
+        self.tunnel_status_label.setText(line)
+        self.tunnel_detail.setText(detail)
 
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""

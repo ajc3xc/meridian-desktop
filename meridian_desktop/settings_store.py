@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
-VALID_MODES = ("local", "hosted")
+# local: the Meridian server or database file on this computer. hosted: the hosted Meridian account.
+# tunnel: the hosted account, which reaches this computer through the tunnel. Its projects are read
+# the same way as hosted. A saved file with local or hosted reads exactly as it did before.
+VALID_MODES = ("local", "hosted", "tunnel")
 DEFAULT_MODE = "local"
 DEFAULT_HOSTED_URL = "https://usemeridian.us"
 DEFAULT_LOCAL_URL = "http://127.0.0.1:7878"

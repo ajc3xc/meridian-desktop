@@ -263,10 +263,11 @@ def test_writing_lists_three_named_sections(qtbot, settings_path):
         assert section in texts
 
 
-def test_mode_selector_offers_hosted_and_local(qtbot, settings_path):
+def test_mode_selector_offers_hosted_local_and_tunnel(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     combo = window.mode_selector
-    assert [combo.itemData(i) for i in range(combo.count())] == ["hosted", "local"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["hosted", "local", "tunnel"]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Hosted", "Local", "Tunnel"]
 
 
 def test_mode_selector_writes_to_temp_settings_path(qtbot, settings_path):

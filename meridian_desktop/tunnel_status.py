@@ -80,6 +80,23 @@ START_TEXT = (
     f"{STATUS_COMMAND}"
 )
 
+# The top bar's one line and its detail line in Tunnel mode. The Tunnel tab shows the same answers
+# with its own headlines (ui/tunnel_page.py). The check time and "no time" text are shared with it.
+BAR_HEADLINES = {
+    RUNNING: "Tunnel running",
+    NOT_RUNNING: "Tunnel not running",
+    UNKNOWN: "Tunnel status unknown",
+}
+BAR_CHECKING_TEXT = "Tunnel status: checking..."
+CHECKED_TEMPLATE = "Checked at {}."
+NO_TIME_TEXT = "The check did not finish, so no time was recorded."
+NO_FAILURE_NAME = "unknown error"
+BY_HAND_NOT_STARTED = (
+    "The desktop does not start or stop the tunnel. Open the Tunnel tab to check it again. To start it "
+    f"yourself, open a terminal in the Meridian core folder and run: {START_COMMAND}"
+)
+BY_HAND_CHECK = f"To check from a terminal, run this in the Meridian core folder: {STATUS_COMMAND}"
+
 
 @dataclass(frozen=True)
 class TunnelStatus:
@@ -134,14 +151,42 @@ def read_tunnel_status(
     return TunnelStatus(state=state, reason=reason, checked_at=clock())
 
 
+def bar_texts(status: TunnelStatus | None, failure: str | None = None) -> tuple[str, str]:
+    """The top bar's (line, detail) for one finished check. Pure: no call and no Qt.
+
+    ``status`` is None when the check raised. Then ``failure`` holds only the exception's class name,
+    and the line says no time was recorded. Otherwise the line names the state and the time checked.
+    The detail says why, which tools need the tunnel, and for a tunnel that is not running (or not
+    known) how to start it or check it by hand. Nothing here starts or stops anything.
+    """
+    if status is None:
+        line = f"{BAR_HEADLINES[UNKNOWN]}. {NO_TIME_TEXT}"
+        reason = CHECK_FAILED_REASON.format(failure or NO_FAILURE_NAME)
+        return line, " ".join((reason, DEPENDENCY_TEXT, BY_HAND_CHECK))
+    line = f"{BAR_HEADLINES[status.state]}. {CHECKED_TEMPLATE.format(status.checked_at.strftime(TIME_FORMAT))}"
+    parts = [status.reason, DEPENDENCY_TEXT]
+    if status.state == NOT_RUNNING:
+        parts.append(BY_HAND_NOT_STARTED)
+    elif status.state == UNKNOWN:
+        parts.append(BY_HAND_CHECK)
+    return line, " ".join(parts)
+
+
 __all__ = [
+    "BAR_CHECKING_TEXT",
+    "BAR_HEADLINES",
+    "BY_HAND_CHECK",
+    "BY_HAND_NOT_STARTED",
+    "CHECKED_TEMPLATE",
     "CHECK_FAILED_REASON",
     "DEPENDENCY_TEXT",
     "DEPENDENT_TOOLS",
     "NOT_AVAILABLE_REASON",
     "NOT_RUNNING",
     "NO_CHILD_REASON",
+    "NO_FAILURE_NAME",
     "NO_RESULT_REASON",
+    "NO_TIME_TEXT",
     "RUNNING",
     "START_COMMAND",
     "START_TEXT",
@@ -152,6 +197,7 @@ __all__ = [
     "UNKNOWN",
     "UNREAD_REASON",
     "WRONG_SCOPE_REASON",
+    "bar_texts",
     "read_tunnel_status",
     "tunnel_state_of",
 ]
