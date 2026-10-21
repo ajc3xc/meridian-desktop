@@ -1,18 +1,26 @@
-"""Tunnel tab: one row per tunnel slot, from a snapshot handed in by the caller.
+"""Tunnel tab: whether the local tunnel is running, then the slot table. Qt code, so it sits in ui/.
 
-This is Qt code and sits in ui/, so the boundary check allows it. The page makes no request
-and starts no timer. It shows the snapshot it is given (see meridian_desktop/tunnel_view.py for
-the rows). Until a snapshot is given, it says the slot states are not available, because this
-build has no local source for them. The text names the missing core item (MS-104), the local
-tunnel slot status file the core has not written yet. Every cell is plain text (QTableWidgetItem
-and PlainText labels), so a slot name or note is never read as HTML.
+The top of the tab says whether the tunnel is running. That line comes from one read-only runner
+status call for the tunnel scope (see meridian_desktop/tunnel_status.py). The call runs on the thread
+pool each time the tab is shown, so the UI thread never waits on it. The page starts no timer and
+makes no request until it is shown. It has no button and no control that starts, stops or restarts
+anything. The same top section names the tools that connect through the tunnel, and tells the owner
+how to start the tunnel by hand. The desktop does not start it.
+
+Below that is the slot table. It shows a snapshot the caller hands in (see meridian_desktop/tunnel_view.py
+for the rows). Until a snapshot is given, the slot line says the slot states are not available, because
+this build has no local source for them. That line names the missing core item (MS-104). Every cell is
+plain text (QTableWidgetItem and PlainText labels), so a slot name or note is never read as HTML.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QLabel,
@@ -22,6 +30,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from meridian_desktop.runner_client import RunnerClient, RunnerResult
+from meridian_desktop.tunnel_status import (
+    CHECK_FAILED_REASON,
+    DEPENDENCY_TEXT,
+    NOT_RUNNING,
+    RUNNING,
+    START_TEXT,
+    TIME_FORMAT,
+    UNKNOWN,
+    TunnelStatus,
+    read_tunnel_status,
+)
 from meridian_desktop.tunnel_view import slot_details, slots_of
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
@@ -35,6 +55,18 @@ SHOWN_TEXT = "Slot states from the tunnel snapshot."
 # The health columns come after Note, so the first three keep their positions.
 SLOT_COLUMNS = ("Slot", "State", "Note", "Health basis", "Health age (s)")
 
+# The running line. Until a check has finished, it never says running.
+NOT_CHECKED_TEXT = "Tunnel: not checked yet. The check runs when this tab is shown."
+CHECKING_TEXT = "Tunnel: checking..."
+HEADLINES = {
+    RUNNING: "Tunnel: running.",
+    NOT_RUNNING: "Tunnel: not running.",
+    UNKNOWN: "Tunnel: unknown.",
+}
+CHECKED_TEMPLATE = "Checked at {}."
+NO_TIME_TEXT = "The check did not finish, so no time was recorded."
+NO_FAILURE_NAME = "unknown error"
+
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label = QLabel(text, parent)
@@ -44,13 +76,63 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     return make_selectable(label)
 
 
-class TunnelPage(QWidget):
-    """The Tunnel tab's slot table. It shows a snapshot it is given and has no request of its own."""
+class _TunnelCheckJob(QRunnable):
+    """Run one tunnel check on the thread pool and deliver (status, failure_name).
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    A check that raises is reduced to its class name here, so a raw exception never reaches the UI thread.
+    """
+
+    def __init__(self, work: Callable[[], TunnelStatus], deliver: Callable[[tuple], None]) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._work = work
+        self._deliver = deliver
+
+    def run(self) -> None:
+        status: TunnelStatus | None = None
+        failure: str | None = None
+        try:
+            status = self._work()
+        except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+            failure = exc.__class__.__name__
+        try:
+            self._deliver((status, failure))
+        except RuntimeError:
+            pass  # the page was deleted while the check ran
+
+
+class TunnelPage(QWidget):
+    """The Tunnel tab: the tunnel's running state, then the slot table. It has no control of its own."""
+
+    _checks_finished = Signal(object)
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        status: Callable[[str], RunnerResult] | None = None,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("tunnel-page")
+        # With no argument the check uses a RunnerClient that has no interpreter. It reports unknown and
+        # starts nothing. The app can pass a configured client once the desktop has a setting for one.
+        self._check_runner = status if status is not None else RunnerClient().status
+        self._clock = clock
+        self._busy = False
+        self._checks_finished.connect(self._on_check_finished)
         layout = QVBoxLayout(self)
+
+        self._run_state = _label(self, "tunnel-run-state", NOT_CHECKED_TEXT)
+        layout.addWidget(self._run_state)
+        self._run_reason = _label(self, "tunnel-run-reason", "")
+        layout.addWidget(self._run_reason)
+        self._run_checked = _label(self, "tunnel-run-checked", "")
+        layout.addWidget(self._run_checked)
+        self._run_dependency = _label(self, "tunnel-run-dependency", DEPENDENCY_TEXT)
+        layout.addWidget(self._run_dependency)
+        self._run_start = _label(self, "tunnel-run-start", START_TEXT)
+        layout.addWidget(self._run_start)
 
         self._status = _label(self, "tunnel-status", NOT_AVAILABLE_TEXT)
         layout.addWidget(self._status)
@@ -64,6 +146,37 @@ class TunnelPage(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         enable_table_copy(self._table)
         layout.addWidget(self._table, 1)
+
+    def refresh(self) -> None:
+        """Run one read-only tunnel status check on the thread pool. A check already running is not doubled."""
+        if self._busy:
+            return
+        self._busy = True
+        self._run_state.setText(CHECKING_TEXT)
+        check, clock = self._check_runner, self._clock
+        QThreadPool.globalInstance().start(
+            _TunnelCheckJob(lambda: read_tunnel_status(check, clock=clock), self._checks_finished.emit)
+        )
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self.refresh()
+
+    def _on_check_finished(self, payload: tuple) -> None:
+        status, failure = payload
+        self._busy = False
+        if status is None:
+            # The check raised before it could give an answer, so it has no time to show.
+            self._run_state.setText(HEADLINES[UNKNOWN])
+            self._run_reason.setText(CHECK_FAILED_REASON.format(failure or NO_FAILURE_NAME))
+            self._run_checked.setText(NO_TIME_TEXT)
+            return
+        self._show_status(status)
+
+    def _show_status(self, status: TunnelStatus) -> None:
+        self._run_state.setText(HEADLINES.get(status.state, HEADLINES[UNKNOWN]))
+        self._run_reason.setText(status.reason)
+        self._run_checked.setText(CHECKED_TEMPLATE.format(status.checked_at.strftime(TIME_FORMAT)))
 
     def set_snapshot(self, snapshot: Any) -> None:
         """Show one row per slot in ``snapshot``. None, or a snapshot with no slots dict, says not available.
@@ -87,8 +200,13 @@ class TunnelPage(QWidget):
 
 
 __all__ = [
+    "CHECKED_TEMPLATE",
+    "CHECKING_TEXT",
+    "HEADLINES",
     "NOT_AVAILABLE_TEXT",
+    "NOT_CHECKED_TEXT",
     "NO_SLOTS_TEXT",
+    "NO_TIME_TEXT",
     "SHOWN_TEXT",
     "SLOT_COLUMNS",
     "TunnelPage",
