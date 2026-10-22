@@ -7,7 +7,8 @@ Pure Python, no Qt import. Nothing unverified is ever run:
 2. The zip is downloaded into a scratch folder. Its SHA-256 must match its line in SHA256SUMS, and it must be
    under MAX_DOWNLOAD_BYTES. A failure installs nothing.
 3. install_update extracts the zip into versions/<version>.partial. Entries that are absolute, carry a drive or
-   a stream name, contain "..", or are symbolic links are refused. MeridianDesktop.exe must be in the result.
+   a stream name, contain "..", are symbolic links, or are junctions and other Windows reparse points are
+   refused. A corrupt or encrypted member is refused too. MeridianDesktop.exe must be in the result.
    The folder is then renamed to versions/<version>, and the shortcuts are pointed at its exe.
 
 Every request goes through an injectable transport, and urllib never follows a redirect. Each hop is checked
@@ -17,6 +18,8 @@ Layout under install_root:
 
     versions/<version>/MeridianDesktop.exe   installed versions. The current and the previous one are kept.
     versions/<version>.partial               an extraction in progress. Removed on any failure.
+    versions/rolled_back.json                the version rolled back from. Releases at or below it are held
+                                             until a newer release is published. Cleared by that update.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import re
 import shutil
 import stat
@@ -34,6 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,9 +61,15 @@ TIMEOUT_SECONDS = 30.0
 DEV_RUN_REASON = "dev run: updates are not applied"
 USER_AGENT = f"MeridianDesktop/{APP_VERSION} (updater)"
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+SKIP_MARKER = "rolled_back.json"
+HELD_REASON = (
+    "Update {version} is held after rollback. It will not be installed again until a newer release is published."
+)
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400  # Windows: a junction, a symbolic link or another reparse point
 _CHUNK = 64 * 1024
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _SUM_LINE = re.compile(r"([0-9a-fA-F]{64})[ \t]+\*?(\S.*)")
+_VERSION_REFUSED = "A version must be plain dotted numbers such as 0.2.0."
 
 
 class UpdateError(Exception):
@@ -125,8 +136,11 @@ class _RepointFailed(Exception):
 def parse_version(text: object) -> tuple[int, ...]:
     """Return the integer parts of a plain dotted version such as 0.2.0. Anything else is refused."""
     if not isinstance(text, str) or not _VERSION.fullmatch(text):
-        raise Refused("A version must be plain dotted numbers such as 0.2.0.")
-    return tuple(int(part) for part in text.split("."))
+        raise Refused(_VERSION_REFUSED)
+    try:
+        return tuple(int(part) for part in text.split("."))
+    except ValueError:  # a part over Python's int digit limit
+        raise Refused(_VERSION_REFUSED) from None
 
 
 def is_newer(candidate: str, current: str) -> bool:
@@ -306,32 +320,44 @@ def _remove_tree(path: Path, *, strict: bool = False) -> None:
             raise Refused("An old copy of the update could not be removed. Close the app and try again.") from None
 
 
+_EXTRACT_FAILED = "The release zip could not be extracted. Nothing was installed."
+
+
 def _extract_verified(zip_path: Path, staging: Path) -> None:
-    """Extract the zip into staging after checking every entry. The result must hold MeridianDesktop.exe."""
+    """Extract the zip into staging after checking every entry. The result must hold MeridianDesktop.exe.
+
+    A corrupt member (bad CRC or deflate data), an encrypted member, or any other unreadable member is refused.
+    """
     try:
         archive = zipfile.ZipFile(zip_path)
     except zipfile.BadZipFile:
         raise Refused("The release zip is not a valid zip file.") from None
-    with archive:
-        plan = []
-        for info in archive.infolist():
-            parts = _member_parts(info.filename)
-            if stat.S_ISLNK(info.external_attr >> 16):
-                raise Refused(_UNSAFE_ENTRY)
-            if parts:
-                plan.append((info, parts))
-        staging.mkdir(parents=True)
-        staging_root = staging.resolve()
-        for info, parts in plan:
-            target = staging.joinpath(*parts)
-            if not target.resolve().is_relative_to(staging_root):
-                raise Refused(_UNSAFE_ENTRY)
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(info) as source, target.open("wb") as sink:
-                shutil.copyfileobj(source, sink)
+    try:
+        with archive:
+            plan = []
+            for info in archive.infolist():
+                parts = _member_parts(info.filename)
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    raise Refused(_UNSAFE_ENTRY)
+                if (info.external_attr & 0xFFFF) & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise Refused(_UNSAFE_ENTRY)
+                if parts:
+                    plan.append((info, parts))
+            staging.mkdir(parents=True)
+            staging_root = staging.resolve()
+            for info, parts in plan:
+                target = staging.joinpath(*parts)
+                if not target.resolve().is_relative_to(staging_root):
+                    raise Refused(_UNSAFE_ENTRY)
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as sink:
+                    shutil.copyfileobj(source, sink)
+    except (zipfile.BadZipFile, RuntimeError, zlib.error, ValueError):
+        # RuntimeError is an encrypted member; the others are a bad CRC or a corrupt compressed stream.
+        raise Refused(_EXTRACT_FAILED) from None
     if not (staging / EXE_NAME).is_file():
         raise Refused(f"The release zip does not contain {EXE_NAME}. Nothing was installed.")
 
@@ -407,10 +433,49 @@ def install_update(
     return final
 
 
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass  # best effort: a marker that cannot be removed is only ever a hold, never a risk
+
+
+def _read_skip_marker(versions: Path) -> str | None:
+    """The version rolled back from, or None when there is no usable marker. A marker that does not parse is ignored."""
+    try:
+        data = json.loads((versions / SKIP_MARKER).read_text(encoding="utf-8"))
+        version = data.get("rolled_back_from") if isinstance(data, dict) else None
+        parse_version(version)
+    except (OSError, ValueError, Refused):
+        return None
+    return version
+
+
+def _write_skip_marker(versions: Path, rolled_back_from: str) -> None:
+    """Record the version rolled back from. Keeps the higher of the new and any existing marker version."""
+    held = rolled_back_from
+    previous = _read_skip_marker(versions)
+    if previous is not None and is_newer(previous, held):
+        held = previous
+    temp = versions / f"{SKIP_MARKER}.tmp"
+    try:
+        temp.write_text(json.dumps({"rolled_back_from": held}), encoding="utf-8")
+        os.replace(temp, versions / SKIP_MARKER)
+    except OSError:
+        _remove_file(temp)
+        raise Refused("The rollback could not be recorded. Nothing was changed.") from None
+
+
+def _clear_skip_marker(versions: Path) -> None:
+    _remove_file(versions / SKIP_MARKER)
+
+
 def rollback(current_version: str, install_root: Path, shortcut_writers: Sequence[ShortcutWriter]) -> str:
     """Point the shortcuts at the newest installed version below current_version, and return that version.
 
-    Refuses when no earlier version folder with an exe is left.
+    Records current_version in the skip marker first, so check_and_stage does not stage it again. The marker is
+    removed again if the shortcuts could not be changed at all. Refuses when no earlier version folder with an exe
+    is left, or when the marker cannot be written.
     """
     install_root = Path(install_root)
     versions = install_root / VERSIONS_DIR
@@ -428,9 +493,12 @@ def rollback(current_version: str, install_root: Path, shortcut_writers: Sequenc
                 best = (parsed, entry)
     if best is None:
         raise Refused("There is no earlier version to roll back to.")
+    _write_skip_marker(versions, current_version)
     try:
         _point_shortcuts(shortcut_writers, best[1] / EXE_NAME, versions / current_version / EXE_NAME)
-    except _RepointFailed:
+    except _RepointFailed as failed:
+        if failed.undone:
+            _clear_skip_marker(versions)  # every shortcut is back on current_version, so nothing was rolled back
         raise Refused("The shortcuts could not be pointed back at the earlier version.") from None
     return best[1].name
 
@@ -452,15 +520,22 @@ def check_and_stage(
 
     A source run (not frozen) returns refused at once and makes no request. Otherwise the result is up_to_date,
     update_staged (the new version is installed and the shortcuts point at it), refused (with the plain reason),
-    or offline.
+    or offline. After a rollback, a release that is not newer than the rolled-back version is held: it is refused
+    before anything is downloaded, and it stays held until a newer release is staged, which clears the marker.
     """
     if not _is_frozen():
         return UpdateResult("refused", reason=DEV_RUN_REASON)
+    versions = Path(install_root) / VERSIONS_DIR
     try:
         release = fetch_latest(transport)
         if not is_newer(release.version, current_version):
             return UpdateResult("up_to_date", version=release.version)
+        held = _read_skip_marker(versions)
+        if held is not None and not is_newer(release.version, held):
+            reason = HELD_REASON.format(version=release.version)
+            return UpdateResult("refused", version=release.version, reason=reason)
         install_update(release, current_version, transport, Path(install_root), shortcut_writers)
+        _clear_skip_marker(versions)
     except Offline as exc:
         return UpdateResult("offline", reason=str(exc))
     except Refused as exc:

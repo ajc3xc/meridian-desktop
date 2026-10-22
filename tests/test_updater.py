@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import meridian_desktop
 from meridian_desktop import updater as u
 from meridian_desktop.version import APP_VERSION
 
@@ -156,7 +157,9 @@ def test_is_newer_compares_integer_parts(latest, current, expected):
     assert u.is_newer(latest, current) is expected
 
 
-@pytest.mark.parametrize("text", ["v0.2.0", "0.2.0-beta", "0.2.0 ", "", "1.x", "1..2", ".1", "0.2.0.rc1", None])
+@pytest.mark.parametrize(
+    "text", ["v0.2.0", "0.2.0-beta", "0.2.0 ", "", "1.x", "1..2", ".1", "0.2.0.rc1", None, "9" * 4301]
+)
 def test_versions_that_are_not_plain_dotted_integers_are_refused(text):
     with pytest.raises(u.Refused):
         u.parse_version(text)
@@ -164,6 +167,10 @@ def test_versions_that_are_not_plain_dotted_integers_are_refused(text):
 
 def test_app_version_is_a_plain_version():
     assert u.parse_version(APP_VERSION) == (0, 1, 0)
+
+
+def test_the_package_version_is_the_app_version():
+    assert meridian_desktop.__version__ == APP_VERSION
 
 
 @pytest.mark.parametrize(
@@ -327,6 +334,67 @@ def test_a_symbolic_link_entry_is_refused(root, frozen):
     assert version_names(root) == ["0.1.0"]
 
 
+@pytest.mark.parametrize(("name", "attributes"), [("linked.txt", 0x0400), ("junction/", 0x0410)])
+def test_a_windows_reparse_point_entry_is_refused_and_writes_nothing(root, frozen, name, attributes):
+    # The Windows attributes sit in the low 16 bits of external_attr. No Unix mode is set, so only the
+    # reparse-point bit can refuse this entry.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ")
+        info = zipfile.ZipInfo(name)
+        info.external_attr = attributes
+        archive.writestr(info, b"C:/Windows")
+    result = u.check_and_stage("0.1.0", github(zip_bytes=buffer.getvalue()), root, [])
+    assert result.status == "refused"
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_a_member_with_a_bad_crc_is_refused_and_installs_nothing(root, frozen):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ-0.2.0-payload")
+    raw = bytearray(buffer.getvalue())
+    raw[raw.index(b"MZ-0.2.0-payload")] ^= 0xFF  # the stored bytes no longer match the CRC in the archive
+    result = u.check_and_stage("0.1.0", github(zip_bytes=bytes(raw)), root, [])
+    assert result.status == "refused"
+    assert "could not be extracted" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert (root / "versions" / "0.1.0" / u.EXE_NAME).read_bytes() == b"MZ-0.1.0"
+    assert not list(root.glob("update-*"))
+
+
+def _with_every_member_marked_encrypted(data: bytes) -> bytes:
+    """Set general purpose bit 0 (encrypted) on each local and central header, as a password-protected zip has."""
+    raw = bytearray(data)
+    for signature, flags_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        position = raw.find(signature)
+        while position != -1:
+            raw[position + flags_offset] |= 0x01
+            position = raw.find(signature, position + 4)
+    return bytes(raw)
+
+
+def test_an_encrypted_member_is_refused_and_installs_nothing(root, frozen):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ-0.2.0")
+    zip_bytes = _with_every_member_marked_encrypted(buffer.getvalue())
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
+    assert result.status == "refused"
+    assert "could not be extracted" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_an_oversized_version_tag_is_refused_and_never_raises(root, frozen):
+    gh = github(tag="v" + "9" * 4301)
+    result = u.check_and_stage("0.1.0", gh, root, [])
+    assert result.status == "refused"
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+    assert version_names(root) == ["0.1.0"]
+
+
 def test_a_failing_shortcut_undoes_the_ones_already_done(root, frozen):
     rec = Recorder()
     result = u.check_and_stage("0.1.0", github(), root, [rec, Failing()])
@@ -445,6 +513,62 @@ def test_rollback_refuses_when_no_earlier_version_is_left(root):
     with pytest.raises(u.Refused, match="no earlier version"):
         u.rollback("0.1.0", root, [rec])
     assert rec.targets == []
+
+
+def test_a_rollback_holds_the_rolled_back_release_on_every_later_check(root, frozen):
+    shortcut = Recorder()
+    assert u.check_and_stage("0.1.0", github(), root, [shortcut]).status == "update_staged"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
+    targets_after_rollback = list(shortcut.targets)
+    assert (root / "versions" / u.SKIP_MARKER).is_file()
+    for _ in range(2):
+        gh = github()
+        result = u.check_and_stage("0.1.0", gh, root, [shortcut])
+        assert result.status == "refused"
+        assert result.version == "0.2.0"
+        assert "held after rollback" in result.reason
+        assert gh.calls == [u.LATEST_RELEASE_URL]  # the release is held before any download
+        assert shortcut.targets == targets_after_rollback  # the shortcut stays on 0.1.0
+    assert shortcut.targets[-1] == root / "versions" / "0.1.0" / u.EXE_NAME
+
+
+@pytest.mark.parametrize("latest", ["0.2.0", "0.3.0"])
+def test_a_release_not_newer_than_the_rolled_back_version_is_held(root, frozen, latest):
+    shortcut = Recorder()
+    for version in ("0.2.0", "0.3.0"):
+        exe = root / "versions" / version / u.EXE_NAME
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ")
+    assert u.rollback("0.3.0", root, [shortcut]) == "0.2.0"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"  # the marker keeps 0.3.0, not 0.2.0
+    gh = github(latest)
+    result = u.check_and_stage("0.1.0", gh, root, [shortcut])
+    assert result.status == "refused"
+    assert "held after rollback" in result.reason
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_a_newer_release_after_a_rollback_stages_and_clears_the_marker(root, frozen):
+    shortcut = Recorder()
+    assert u.check_and_stage("0.1.0", github(), root, [shortcut]).status == "update_staged"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
+    result = u.check_and_stage("0.1.0", github("0.3.0"), root, [shortcut])
+    assert result == u.UpdateResult("update_staged", version="0.3.0")
+    assert not (root / "versions" / u.SKIP_MARKER).exists()
+    assert shortcut.targets[-1] == root / "versions" / "0.3.0" / u.EXE_NAME
+    assert version_names(root) == ["0.1.0", "0.3.0"]
+
+
+def test_an_unreadable_marker_is_ignored_and_holds_nothing(root, frozen):
+    (root / "versions" / u.SKIP_MARKER).write_text("{not json", encoding="utf-8")
+    result = u.check_and_stage("0.1.0", github(), root, [])
+    assert result == u.UpdateResult("update_staged", version="0.2.0")
+
+
+def test_a_rollback_whose_shortcuts_all_fail_leaves_no_marker(root):
+    with pytest.raises(u.Refused, match="could not be pointed back"):
+        u.rollback("0.2.0", root, [Failing()])
+    assert not (root / "versions" / u.SKIP_MARKER).exists()
 
 
 # --- the copy cap and the urllib transport ---------------------------------------------------------
