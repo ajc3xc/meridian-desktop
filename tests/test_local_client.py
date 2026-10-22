@@ -24,6 +24,7 @@ from meridian_desktop.local_client import (
     runpod_check,
     runpod_list_pods,
 )
+from meridian_desktop.projects_reader import PROJECT_COLUMNS
 
 FAKE_KEY = "test-key-not-real"
 HEALTH_OK = {"status": "ok", "service": "meridian", "git_sha": "abc123", "version": "0.0.0-test"}
@@ -422,6 +423,111 @@ def test_runpod_not_running_is_reported():
     assert info.value.code == "not_running"
 
 
+# ----------------------------------------------------------------- GET /projects
+
+PROJECT_ROW = {
+    "id": "p-1",
+    "name": "One",
+    "creator_human_id": "human-1",
+    "icon": "book",
+    "status": "active",
+    "priority": "P1",
+    "parent_project_id": None,
+    "created_at": "2026-05-01 10:00:00",
+    "executor_config": "EXEC-SECRET-LOCAL",
+    "agent_instructions": "AGENT-NOTE-LOCAL",
+}
+
+
+def test_projects_rows_are_keyed_by_the_listed_columns(stub):
+    stub.routes["/projects"] = as_json(200, [PROJECT_ROW, {"id": "p-2", "name": "Two"}])
+    rows = local_client.list_projects(stub.url)
+    assert [list(row) for row in rows] == [list(PROJECT_COLUMNS), list(PROJECT_COLUMNS)]
+    assert rows[0] == {key: PROJECT_ROW[key] for key in PROJECT_COLUMNS}
+    # A column the server did not send reads as None, the same as the file reader.
+    assert rows[1]["name"] == "Two"
+    assert rows[1]["status"] is None
+    assert "EXEC-SECRET" not in repr(rows)
+    assert stub.paths() == ["/projects"]
+
+
+def test_projects_empty_list_is_no_rows(stub):
+    stub.routes["/projects"] = as_json(200, [])
+    assert local_client.list_projects(stub.url) == []
+
+
+@pytest.mark.parametrize("body", [b'{"projects": []}', b"[1, 2]", b'"just text"', b"not json at all"])
+def test_projects_non_list_reply_is_refused(stub, body):
+    stub.routes["/projects"] = raw(200, body)
+    with pytest.raises(LocalClientError) as info:
+        local_client.list_projects(stub.url)
+    assert info.value.code == "bad_json"
+    assert str(info.value) == local_client.BAD_JSON_MESSAGE
+
+
+def test_projects_redirect_is_refused_and_not_followed(stub):
+    stub.routes["/projects"] = raw(302, b"", {"Location": f"{stub.url}/elsewhere", "Content-Type": "text/plain"})
+    stub.routes["/elsewhere"] = as_json(200, [PROJECT_ROW])
+    with pytest.raises(LocalClientError) as info:
+        local_client.list_projects(stub.url)
+    assert info.value.code == "redirect_refused"
+    assert "/elsewhere" not in stub.paths()
+
+
+def test_projects_error_status_is_reported_by_its_server_code(stub):
+    stub.routes["/projects"] = as_json(500, {"error": {"code": "db_locked", "message": "SENTINEL-BODY-TEXT"}})
+    with pytest.raises(LocalClientError) as info:
+        local_client.list_projects(stub.url)
+    assert info.value.code == "db_locked"
+    assert "SENTINEL-BODY-TEXT" not in str(info.value)
+
+
+def test_projects_timeout_when_the_body_trickles(stub):
+    # 30 bytes over about 3 seconds, against a 0.5 second deadline. The call must stop at the deadline.
+    stub.routes["/projects"] = trickle(total_bytes=30, gap=0.1)
+    started = time.monotonic()
+    with pytest.raises(LocalClientError) as info:
+        local_client.list_projects(stub.url, timeout=0.5)
+    assert info.value.code == "timeout"
+    assert time.monotonic() - started < 2.0
+
+
+def test_projects_request_is_a_plain_get_with_a_ten_second_timeout():
+    seen = []
+
+    def transport(request, timeout):
+        seen.append((request.get_method(), request.full_url, timeout))
+        assert request.get_header("Authorization") is None
+        assert request.get_header("User-agent") == USER_AGENT
+        return local_client._Reply(200, b"[]")
+
+    assert local_client.list_projects("http://127.0.0.1:7878", transport=transport) == []
+    assert seen == [("GET", "http://127.0.0.1:7878/projects", 10.0)]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.invalid",
+        "http://evil.example:7878",
+        "http://user:test-key-not-real@127.0.0.1:7878",
+        "http://127.0.0.1:7878?x=1",
+    ],
+)
+def test_projects_refuses_a_non_loopback_url_before_any_request(url):
+    calls = []
+
+    def transport(request, timeout):
+        calls.append(request)
+        return local_client._Reply(200, b"[]")
+
+    with pytest.raises(LocalClientError) as info:
+        local_client.list_projects(url, transport=transport)
+    assert info.value.code == "not_loopback"
+    assert calls == []
+    assert "test-key-not-real" not in str(info.value)
+
+
 # ----------------------------------------------------------------- size cap
 
 
@@ -505,5 +611,5 @@ def test_loopback_requests_bypass_a_proxy(stub, monkeypatch):
 
 
 def test_module_exposes_the_documented_surface():
-    for name in ("assert_loopback", "probe_health", "runpod_check", "runpod_list_pods", "LocalClientError"):
+    for name in ("assert_loopback", "probe_health", "list_projects", "runpod_check", "runpod_list_pods", "LocalClientError"):
         assert hasattr(local_client, name)

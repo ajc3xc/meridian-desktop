@@ -72,24 +72,18 @@ SOURCE_TEXT = {
 }
 
 
-class SourceNotBuilt(Exception):
-    """The desktop does not read projects from this source yet. Raised instead of returning rows."""
+def default_sources(secrets: SecretStore, *, server_transport: local_client.Transport | None = None) -> DataSources:
+    """The data sources the app uses. Every one is real.
 
-
-def _server_rows_not_built(url: str) -> list[dict[str, Any]]:
-    raise SourceNotBuilt("reading projects from the running server is not built yet")
-
-
-def default_sources(secrets: SecretStore) -> DataSources:
-    """The data sources the app uses. Probe, file, token and hosted reader are real. Only the running-server reader is not built.
-
-    The probe is loopback only (local_client.probe_health). The file reader opens the database
-    read-only. The token comes from the keychain through token_store, and only in hosted mode.
-    The hosted reader is hosted_client.list_projects: one GET /projects with the bearer token.
+    The probe is loopback only (local_client.probe_health). The running-server reader is
+    local_client.list_projects: one loopback GET /projects, with no token. The file reader opens
+    the database read-only. The token comes from the keychain through token_store, and only in
+    hosted mode. The hosted reader is hosted_client.list_projects: one GET /projects with the bearer
+    token. ``server_transport`` is for tests: when given, the server read sends through it, not urllib.
     """
     return DataSources(
         probe=lambda url: local_client.probe_health(url, PROBE_TIMEOUT),
-        read_server=_server_rows_not_built,
+        read_server=lambda url: local_client.list_projects(url, transport=server_transport),
         read_file=projects_reader.list_projects,
         get_token=lambda: token_store.get_token(store=secrets),
         list_hosted=hosted_client.list_projects,
@@ -267,7 +261,6 @@ __all__ = [
     "FIELD_LABELS",
     "TABLE_FIELDS",
     "ProjectsTab",
-    "SourceNotBuilt",
     "default_sources",
     "detail_text",
     "visible_row",
