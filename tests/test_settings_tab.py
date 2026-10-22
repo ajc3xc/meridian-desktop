@@ -9,13 +9,16 @@ for it. Offscreen Qt, from conftest.
 from __future__ import annotations
 
 import functools
+import gc
 import json
 import threading
+import weakref
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
 
 from _fakes import FailingKeyring, MemoryKeyring
 from meridian_desktop import hosted_client, local_client
@@ -399,6 +402,54 @@ def test_test_button_is_disabled_while_the_test_runs(qtbot, settings_path, secre
     result = _label(tab, "settings-test-result")
     qtbot.waitUntil(lambda: button.isEnabled(), timeout=5000)
     assert result.text() == TEST_CONNECTED_TEXT.format(url=DEFAULT_HOSTED_URL, count=0)
+
+
+def test_a_test_still_running_when_the_tab_is_deleted_does_not_keep_the_tab(qtbot, settings_path, secrets, monkeypatch):
+    """A tab deleted while its connection test still runs is freed on the GUI thread, because the test holds no tab.
+
+    The test used to hold the tab through its bound run method and its signal emit. When the pool ended the test on a
+    worker, the worker dropped the last reference, so the tab could be freed off the GUI thread. The collector is off
+    here, so only reference counting can free the tab. Nothing reaches the tab after it is gone.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def held_list(url, token):
+        entered.set()
+        gate.wait(5)
+        return VALID_ROWS
+
+    delivered = []
+
+    def spy(self, item):
+        if getattr(item, "owner", None) is self._owner:  # only this tab's results count
+            delivered.append(item)
+
+    monkeypatch.setattr(SettingsTab, "_on_delivered", spy, raising=False)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        tab = SettingsTab(
+            SettingsStore(settings_path),
+            parent=container,
+            choose_database=_no_dialog,
+            secrets=secrets,
+            list_hosted=held_list,
+        )
+        tab.findChild(QPushButton, "settings-test-connection").click()  # the test starts and is held at the gate
+        assert entered.wait(5)
+        ref = weakref.ref(tab)
+        shiboken6.delete(container)  # the tab's widgets are deleted on the GUI thread while the test still runs
+        del tab
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert delivered == []
+    finally:
+        gate.set()
+        gc.enable()
 
 
 # ----------------------------------------------------------- local URL and database file (kept)

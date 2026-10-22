@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -47,6 +47,7 @@ from meridian_desktop.latex_client import PROBE_TIMEOUT, EngineStatus
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import PROBE_HOST, SlotPortResult, probe_slot_ports
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 HEALTH_TIMEOUT = 2.0
@@ -329,18 +330,79 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     return make_selectable(label)
 
 
-class _ChecksJob(QRunnable):
-    """Run the checks on the thread pool and deliver (outcome, failure_name).
+@dataclass(frozen=True)
+class _Finished:
+    """One finished pass, as its job hands it back. ``failure`` is the class name of an exception that got past the guards."""
 
-    Any exception that gets past the per-check guards is reduced to its class name here, so a
-    raw exception never reaches the UI thread.
+    generation: int
+    outcome: ServicesOutcome | None
+    failure: str | None
+
+
+class _Checks:
+    """The checks the Services page runs on the worker thread, through the settings store and the injected checks.
+
+    It holds no widget. A pass still running when the page is deleted therefore never keeps the page alive, and never
+    touches it. The page holds one of these and hands its ``collect`` method to the thread pool.
     """
 
-    def __init__(self, work: Callable[[], ServicesOutcome], deliver: Callable[[tuple], None]) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore,
+        health: Callable[[str, float], HealthFacts],
+        engine: Callable[[str, float], EngineStatus],
+        runner: Callable[[], RunnerResult],
+        ports: Callable[[], Sequence[SlotPortResult]],
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._settings = settings_store
+        self._health = health
+        self._engine = engine
+        self._runner = runner
+        self._ports = ports
+        self._clock = clock
+
+    def collect(self) -> ServicesOutcome:
+        """Run the checks in order. Runs on a worker thread, and never raises for one failed check."""
+        settings = self._settings.load().settings
+        local_url, engine_url = settings.local_url, settings.engine_url
+        failures: dict[str, str] = {}
+        stamps: dict[str, str] = {}
+
+        def run(name: str, work: Callable[[], Any]) -> Any:
+            return _guarded(name, failures, stamps, self._clock, work)
+
+        health = run("health", lambda: self._health(local_url, HEALTH_TIMEOUT))
+        engine = run("engine", lambda: self._engine(engine_url, PROBE_TIMEOUT))
+        runner = run("runner", self._runner)
+        ports_list = run("ports", lambda: tuple(self._ports()))
+        return ServicesOutcome(
+            local_url=local_url,
+            engine_url=engine_url,
+            health=health,
+            engine=engine,
+            runner=runner,
+            ports=ports_list,
+            failures=failures,
+            checked_at=stamps,
+        )
+
+
+class _ChecksJob(QRunnable):
+    """Run one pass of the checks on the thread pool and deliver a _Finished to the shared delivery object.
+
+    The job holds only the work, the owner token, the generation and the shared delivery object. It never holds the
+    page. Any exception that gets past the per-check guards is reduced to its class name here, so a raw exception
+    never reaches the UI thread.
+    """
+
+    def __init__(self, generation: int, work: Callable[[], ServicesOutcome], owner: object, delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._owner = owner
+        self._delivery = delivery
 
     def run(self) -> None:
         outcome: ServicesOutcome | None = None
@@ -349,10 +411,7 @@ class _ChecksJob(QRunnable):
             outcome = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failure = exc.__class__.__name__
-        try:
-            self._deliver((outcome, failure))
-        except RuntimeError:
-            pass  # the page was deleted while the checks ran
+        self._delivery.delivered.emit(Delivered(self._owner, _Finished(self._generation, outcome, failure)))
 
 
 @dataclass(frozen=True)
@@ -375,8 +434,6 @@ class ServicesPage(QWidget):
     The checks are injected. The app passes the defaults above. Tests pass fakes, and a clock.
     """
 
-    _checks_finished = Signal(object)
-
     def __init__(
         self,
         settings_store: SettingsStore,
@@ -390,14 +447,12 @@ class ServicesPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("services-page")
-        self._settings = settings_store
-        self._health = health
-        self._engine = engine
-        self._runner = runner
-        self._ports = ports
-        self._clock = clock
+        self._checks = _Checks(settings_store, health, engine, runner, ports, clock)
         self._busy = False
-        self._checks_finished.connect(self._on_checks_finished)
+        # Identifies this page's passes. A plain object, so a job can hold it without holding the page.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     @property
@@ -465,44 +520,27 @@ class ServicesPage(QWidget):
         if self._busy:
             return
         self._busy = True
+        self._generation += 1
+        generation = self._generation
         self._check_button.setEnabled(False)
         self._show_checking()
-        QThreadPool.globalInstance().start(_ChecksJob(self._collect, self._checks_finished.emit))
-
-    def _collect(self) -> ServicesOutcome:
-        """Run the checks in order. Runs on a worker thread, and never raises for one failed check."""
-        settings = self._settings.load().settings
-        local_url, engine_url = settings.local_url, settings.engine_url
-        failures: dict[str, str] = {}
-        stamps: dict[str, str] = {}
-
-        def run(name: str, work: Callable[[], Any]) -> Any:
-            return _guarded(name, failures, stamps, self._clock, work)
-
-        health = run("health", lambda: self._health(local_url, HEALTH_TIMEOUT))
-        engine = run("engine", lambda: self._engine(engine_url, PROBE_TIMEOUT))
-        runner = run("runner", self._runner)
-        ports_list = run("ports", lambda: tuple(self._ports()))
-        return ServicesOutcome(
-            local_url=local_url,
-            engine_url=engine_url,
-            health=health,
-            engine=engine,
-            runner=runner,
-            ports=ports_list,
-            failures=failures,
-            checked_at=stamps,
-        )
+        # The job holds the checks, the owner token, the generation and the shared delivery object. It never holds the page.
+        QThreadPool.globalInstance().start(_ChecksJob(generation, self._checks.collect, self._owner, shared_delivery()))
 
     @Slot(object)
-    def _on_checks_finished(self, payload: tuple) -> None:
-        outcome, failure = payload
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another page is dropped here, and so is one from an earlier pass.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        finished = item.value
+        if not isinstance(finished, _Finished) or finished.generation != self._generation:
+            return
         self._busy = False
         self._check_button.setEnabled(True)
-        if failure is not None or not isinstance(outcome, ServicesOutcome):
-            self._show_all_failed(failure or "NoResult")
+        if finished.failure is not None or not isinstance(finished.outcome, ServicesOutcome):
+            self._show_all_failed(finished.failure or "NoResult")
             return
-        self._show(outcome)
+        self._show(finished.outcome)
 
     # ----------------------------------------------------------- display
 

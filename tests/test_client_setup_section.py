@@ -7,14 +7,17 @@ outside pytest's temp directory. Offscreen Qt, from conftest.
 
 from __future__ import annotations
 
+import gc
 import json
 import subprocess
 import threading
+import weakref
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop.client_setup_runner import (
@@ -650,3 +653,49 @@ def test_a_plain_status_and_a_refusal_never_show_the_token(qtbot, settings_path,
     qtbot.waitUntil(lambda: _text(section, "client-setup-status") == CHECKED_TEXT, timeout=5000)
 
     assert FAKE_TOKEN not in _all_text(section)
+
+
+def test_a_dry_run_still_running_when_the_section_is_deleted_does_not_keep_the_section(
+    qtbot, settings_path, tmp_path, monkeypatch
+):
+    """A section deleted while an Apply dry run still runs is freed on the GUI thread, because the dry run holds no section.
+
+    The dry run used to hold the section through its runner lambda. When the pool ended the dry run on a worker, the
+    worker dropped the last reference, so the section could be freed off the GUI thread. The collector is off here,
+    so only reference counting can free the section. Nothing reaches the section after it is gone.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    desktop_file = _existing(tmp_path, "desktop.json")
+
+    def respond(argv):
+        if is_plan_all(argv):
+            return out(results(entry("claude-desktop", desktop_file, "would_write", added=["meridian-docs"])))
+        entered.set()  # the Apply dry run is held at the gate
+        gate.wait(5)
+        return out(results())
+
+    store = configured_store(tmp_path, settings_path)
+    shown = []
+    monkeypatch.setattr(ClientSetupSection, "_after_preview", lambda self, pending, result: shown.append(result))
+
+    gc.disable()
+    try:
+        container = QWidget()
+        runner = ClientSetupRunner(store, run=FakeRun(respond))
+        section = ClientSetupSection(store, parent=container, runner=runner)
+        _button(section, "client-setup-check").click()
+        _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
+        _button(section, "client-setup-claude-desktop-apply").click()  # the dry run starts and is held at the gate
+        assert entered.wait(5)
+        ref = weakref.ref(section)
+        shiboken6.delete(container)  # the section's widgets are deleted on the GUI thread while the dry run still runs
+        del section
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert shown == []
+    finally:
+        gate.set()
+        gc.enable()

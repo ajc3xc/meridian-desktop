@@ -5,10 +5,13 @@ The settings file is a temp file. Offscreen Qt, from conftest.
 """
 
 import copy
+import gc
 import threading
+import weakref
 
 import pytest
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QTableWidget, QWidget
 
 from meridian_desktop.local_client import HEALTH_ERROR, HEALTH_NOT_MERIDIAN, HEALTH_NOT_RUNNING, HEALTH_RUNNING, LocalClientError
@@ -485,3 +488,37 @@ def test_showing_the_panel_probes_the_server_once(qtbot, make_panel, store, clie
     panel.show()
     wait_idle(qtbot, panel)
     assert [call[0] for call in client.calls].count("probe_health") == 1
+
+
+def test_a_job_still_running_when_the_panel_is_deleted_does_not_keep_the_panel(qtbot, settings_path, monkeypatch):
+    """A panel deleted while one of its jobs still runs is freed on the GUI thread, because the job holds no panel.
+
+    The job used to hold the panel through its bound methods and its signal emit. When the pool ended the job on a
+    worker, the worker dropped the last reference, so the panel could be freed off the GUI thread. The collector is
+    off here, so only reference counting can free the panel. Nothing reaches the panel after it is gone.
+    """
+    gate = threading.Event()
+    client = FakeClient()
+    client.gate = gate
+    delivered = []
+    monkeypatch.setattr(RunPodPanel, "_on_test_done", lambda self, result, error: delivered.append(error))
+    SettingsStore(settings_path).save(Settings(local_url=LOCAL_URL))
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = RunPodPanel(SettingsStore(settings_path), FakeStore(FAKE_KEY), client, parent=container)
+        wait_idle(qtbot, panel)  # the key-storage read made at build time has finished
+        panel.findChild(QPushButton, "runpod-test-key").click()
+        qtbot.waitUntil(lambda: any(call[0] == "probe_health" for call in client.calls), timeout=5000)  # held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the job still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert delivered == []
+    finally:
+        gate.set()
+        gc.enable()

@@ -8,12 +8,15 @@ directory or reads the keychain. Every log file is under pytest's temp directory
 a fake marker and match no live token. Offscreen Qt, from conftest.
 """
 
+import gc
 import json
 import subprocess
 import threading
+import weakref
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -24,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QToolButton,
+    QWidget,
 )
 
 from meridian_desktop.desktop_log import desktop_log_path, read_desktop_log_tail
@@ -630,7 +634,7 @@ def test_an_unexpected_failure_of_the_whole_pass_is_reported_without_its_text(qt
     def broken_pass():
         raise KeyError("SECRET-KEY-TEXT")
 
-    page._collect = broken_pass
+    page._reads.collect = broken_pass
     _press(qtbot, page)
 
     assert _text(page, "logs-tunnel-text") == "The logs check failed unexpectedly (KeyError)."
@@ -708,3 +712,40 @@ def test_no_text_on_the_page_says_not_built_yet(qtbot, tmp_path):
     _press(qtbot, page)
 
     assert "not built yet" not in _all_visible_text(page).lower()
+
+
+def test_a_pass_still_running_when_the_page_is_deleted_does_not_keep_the_page(qtbot, monkeypatch):
+    """A page deleted while its reads still run is freed on the GUI thread, because the pass holds no page.
+
+    The pass used to hold the page through its bound collect method and its signal emit. When the pool ended the
+    pass on a worker, the worker dropped the last reference, so the page could be freed off the GUI thread. The
+    collector is off here, so only reference counting can free the page. Nothing reaches the page after it is gone.
+    """
+    gate = threading.Event()
+    shown = []
+    monkeypatch.setattr(LogsPage, "_show", lambda self, outcome: shown.append(outcome))
+    monkeypatch.setattr(LogsPage, "_show_all_failed", lambda self, failure: shown.append(failure))
+    tunnel = Recorder(_tail_ok(["held"]), gate=gate)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        page = LogsPage(
+            desktop_log=Recorder(_tail_ok([], "desktop.log")),
+            tunnel_log=tunnel,
+            runner=Recorder(_runner_ok("")),
+            parent=container,
+        )
+        page.findChild(QPushButton, "logs-refresh").click()
+        qtbot.waitUntil(lambda: tunnel.calls == 1, timeout=5000)  # the pass has started and is held at the gate
+        ref = weakref.ref(page)
+        shiboken6.delete(container)  # the page's widgets are deleted on the GUI thread while the pass still runs
+        del page
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert shown == []
+    finally:
+        gate.set()
+        gc.enable()
