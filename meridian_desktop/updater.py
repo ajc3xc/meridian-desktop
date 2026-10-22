@@ -12,8 +12,9 @@ only the latest release JSON from GitHub and returns one of four results:
 check_for_update never requests a zip or SHA256SUMS asset, never downloads a file and never extracts anything. It
 returns its result rather than raising it. Nothing on its path reaches check_and_stage or install_update.
 
-check_and_stage and install_update are kept as code for when signing exists. When they run, nothing unverified is
-ever run:
+check_and_stage and install_update are kept as code for when signing exists. INSTALL_ENABLED is False until then.
+While it is False, check_and_stage refuses before any request, and install_update raises InstallDisabled before it
+writes anything. When they run, nothing unverified is ever run:
 
 1. fetch_latest reads the latest release from GitHub. It needs two assets, MeridianDesktop-<version>.zip and
    SHA256SUMS, and the version must be plain dotted integers.
@@ -84,6 +85,10 @@ _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _SUM_LINE = re.compile(r"([0-9a-fA-F]{64})[ \t]+\*?(\S.*)")
 _VERSION_REFUSED = "A version must be plain dotted numbers such as 0.2.0."
 _TAG_REFUSED = "The latest release tag must be v followed by a plain version, such as v0.2.0."
+# Turns on only after release signing exists. While False, check_and_stage refuses before any request is made, and
+# install_update raises InstallDisabled before it writes anything.
+INSTALL_ENABLED = False
+INSTALL_OFF_REASON = "Installing is off until release signing exists."
 
 
 class UpdateError(Exception):
@@ -105,6 +110,10 @@ class TooLarge(Refused):
 
 class Offline(UpdateError):
     """GitHub could not be reached, or it is failing for now. Try again later."""
+
+
+class InstallDisabled(Refused):
+    """Installing is off in this build, until release signing exists. Nothing was downloaded or written."""
 
 
 Status = Literal["up_to_date", "update_staged", "refused", "offline"]
@@ -374,8 +383,9 @@ def _extract_verified(zip_path: Path, staging: Path) -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as source, target.open("wb") as sink:
                     shutil.copyfileobj(source, sink)
-    except (zipfile.BadZipFile, RuntimeError, zlib.error, ValueError):
-        # RuntimeError is an encrypted member; the others are a bad CRC or a corrupt compressed stream.
+    except (zipfile.BadZipFile, RuntimeError, zlib.error, ValueError, EOFError):
+        # RuntimeError is an encrypted member. EOFError is a member whose data runs past the end of the file. The
+        # others are a bad CRC or a corrupt compressed stream.
         raise Refused(_EXTRACT_FAILED) from None
     if not (staging / EXE_NAME).is_file():
         raise Refused(f"The release zip does not contain {EXE_NAME}. Nothing was installed.")
@@ -421,9 +431,12 @@ def install_update(
 ) -> Path:
     """Download, verify, extract and install a release, then point the shortcuts at it. Return the version folder.
 
-    Keeps the current and the new version folders and deletes the rest. Raises Refused, Offline or OSError.
-    Does not check whether the app is frozen; check_and_stage does that.
+    Keeps the current and the new version folders and deletes the rest. Raises InstallDisabled while INSTALL_ENABLED
+    is False, before anything is created or requested. Otherwise raises Refused, Offline or OSError. Does not check
+    whether the app is frozen; check_and_stage does that.
     """
+    if not INSTALL_ENABLED:
+        raise InstallDisabled(INSTALL_OFF_REASON)
     install_root = Path(install_root)
     versions = install_root / VERSIONS_DIR
     final = versions / release.version
@@ -537,11 +550,14 @@ def check_and_stage(
 ) -> UpdateResult:
     """Check GitHub for a newer release and stage it. Never raises for a network or download fault.
 
-    A source run (not frozen) returns refused at once and makes no request. Otherwise the result is up_to_date,
+    While INSTALL_ENABLED is False, it returns refused at once with INSTALL_OFF_REASON and makes no request. A source
+    run (not frozen) returns refused at once and makes no request. Otherwise the result is up_to_date,
     update_staged (the new version is installed and the shortcuts point at it), refused (with the plain reason),
     or offline. After a rollback, a release that is not newer than the rolled-back version is held: it is refused
     before anything is downloaded, and it stays held until a newer release is staged, which clears the marker.
     """
+    if not INSTALL_ENABLED:
+        return UpdateResult("refused", reason=INSTALL_OFF_REASON)
     if not _is_frozen():
         return UpdateResult("refused", reason=DEV_RUN_REASON)
     versions = Path(install_root) / VERSIONS_DIR
@@ -599,10 +615,14 @@ def _latest_version(transport: Transport) -> str:
     The tag must be v followed by a plain dotted version, so the release page built from it is the real one.
     """
     reply = _fetch(transport, LATEST_RELEASE_URL, MAX_SMALL_BYTES)
+    if reply.status in (403, 429):
+        # GitHub answers 403 for an unauthenticated rate limit as well as for a refusal, so the check treats both as
+        # Offline and the user is told to try again later.
+        raise Offline("GitHub is limiting requests right now. Try again later.")
     _require_ok(reply, "the latest release")
     try:
         data = json.loads(reply.body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):  # RecursionError: a body nested too deeply to parse
         raise Refused("The latest release could not be read.") from None
     if not isinstance(data, dict) or data.get("draft") is True:
         raise Refused("The latest release is not a published release.")
@@ -622,7 +642,7 @@ def check_for_update(current_version: str, transport: Transport) -> UpdateCheck:
 
     - UpdateNotice(version, release_page_url) when the latest release is newer than current_version,
     - UpToDate() when it is not,
-    - Offline(reason) when GitHub cannot be reached or is failing for now,
+    - Offline(reason) when GitHub cannot be reached, is failing for now, or is rate-limiting (403 or 429),
     - Refused(reason) when current_version or the reply is not acceptable.
 
     Each failure is returned, not raised. Nothing on this path reaches check_and_stage, install_update, or any other
