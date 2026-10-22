@@ -479,6 +479,26 @@ def test_main_install_succeeds_with_an_injected_environment(tmp_path, capsys):
     assert len(recorder.calls) == 1
 
 
+def test_main_install_says_which_mode_it_wrote(tmp_path, capsys):
+    code = inst.main(["--install", "--source", str(_bundle(tmp_path))], env=_env(tmp_path), writer=_Recorder())
+
+    assert code == 0
+    assert "(mode: bundle)" in capsys.readouterr().out
+
+
+def test_install_without_dev_never_uses_the_dev_writer(tmp_path):
+    env = _env(tmp_path)
+    recorder = _Recorder()
+
+    def refuse(spec):
+        raise AssertionError("--install without --dev must not write a dev shortcut")
+
+    code = inst.main(["--install", "--source", str(_bundle(tmp_path))], env=env, writer=recorder, dev_writer=refuse)
+
+    assert code == 0
+    assert recorder.calls == [(inst.start_menu_shortcut(env), inst.install_dir(env) / inst.EXE_NAME)]
+
+
 def test_main_install_and_uninstall_use_the_registry_they_are_given(tmp_path, capsys):
     env = _env(tmp_path)
     registry = FakeRegistry()
