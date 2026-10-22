@@ -51,7 +51,8 @@ from meridian_desktop.ui.settings_tab import (
 from meridian_desktop.ui.tunnel_page import NOT_AVAILABLE_TEXT, TunnelPage
 
 EXPECTED_TABS = (
-    "Projects", "Writing", "Zotero", "Tunnel", "Services", "Code", "Outputs", "Research", "Logs", "Settings",
+    "Projects", "Sessions", "Tools", "Writing", "Zotero", "Tunnel", "Services", "Code", "Outputs", "Research", "Logs",
+    "Settings",
 )
 # The tabs that are still placeholders, with what each one says is missing. Only Writing is left:
 # its DOCX and Google Docs sections are not built. Zotero, Code, Outputs and Research are working tabs.

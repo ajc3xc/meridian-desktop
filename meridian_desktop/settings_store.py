@@ -52,6 +52,10 @@ class Settings:
     # is set, so a file that never set them keeps the keys it had before.
     core_checkout: str = ""
     core_python: str = ""
+    # Check GitHub once at a real start for a newer release. The check makes one request for the release
+    # JSON and downloads nothing. On by default. save() writes this key only when it is off, so a file that
+    # never turned the check off is written exactly as before.
+    check_updates: bool = True
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append(f"{key} must be a path as text or empty; using empty")
 
+    # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
+    if "check_updates" in data:
+        value = data["check_updates"]
+        if isinstance(value, bool):
+            values["check_updates"] = value
+        else:
+            problems.append("check_updates must be true or false; using true")
+
     return replace(Settings(), **values), problems
 
 
@@ -199,6 +211,9 @@ class SettingsStore:
             if not data[key]:
                 # "Not set" is the default, so a file that never set a core path has no such key.
                 del data[key]
+        if settings.check_updates:
+            # On is the default, so a file that never turned the update check off has no such key.
+            del data["check_updates"]
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
         try:

@@ -319,3 +319,36 @@ def test_clearing_a_core_path_removes_its_key(settings_path, tmp_path):
     store.set_core_path("core_checkout", "")
     assert store.load().settings.core_checkout == ""
     assert "core_checkout" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+
+# ----------------------------------------------------------- update check
+
+
+def test_check_updates_defaults_to_on_without_a_warning(settings_path):
+    assert Settings().check_updates is True
+    result = SettingsStore(settings_path).load()
+    assert result.settings.check_updates is True
+    assert result.warning is None
+
+
+def test_check_updates_round_trips_off_and_back_on(settings_path):
+    store = SettingsStore(settings_path)
+    store.save(Settings(check_updates=False))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["check_updates"] is False
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings == Settings(check_updates=False)
+    # A later mode change keeps the setting as it was.
+    store.set_mode("hosted")
+    assert SettingsStore(settings_path).load().settings.check_updates is False
+    # On is the default, so turning it back on removes the key again.
+    store.save(Settings(check_updates=True))
+    assert "check_updates" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings == Settings(check_updates=True)
+
+
+def test_check_updates_that_is_not_true_or_false_warns_and_stays_on(settings_path):
+    _write(settings_path, json.dumps({"check_updates": "no"}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.check_updates is True
+    assert result.warning is not None and "check_updates" in result.warning

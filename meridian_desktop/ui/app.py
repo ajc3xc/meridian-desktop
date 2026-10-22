@@ -5,6 +5,7 @@ prints "smoke ok" and returns 0 without starting the event loop.
 
 On a real start with no settings file yet, the first-run dialog runs before the window.
 ``--smoke`` never shows it, and ``first_run=False`` turns it off for callers that must not see it.
+A real start asks GitHub once for a newer release, unless check_updates is off. ``--smoke`` does not ask.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from meridian_desktop import updater
 from meridian_desktop.desktop_log import start_desktop_log
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tray import MeridianTray
@@ -42,7 +44,9 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         if outcome.notice:
             QMessageBox.information(None, "Meridian Desktop", outcome.notice)
 
-    window = MainWindow(store)
+    # The update check runs once at a real start, through the urllib transport. A --smoke run passes no transport,
+    # so it makes no request. The window still honours the check_updates setting.
+    window = MainWindow(store, update_transport=None if smoke else updater.urllib_transport)
     tray = MeridianTray(window, app)
     window.show()
     tray.show()
