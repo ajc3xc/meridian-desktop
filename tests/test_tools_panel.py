@@ -35,7 +35,7 @@ def _rows() -> tuple[ToolRow, ...]:
     )
 
 
-def _ready(message: str = "Checked. Nothing was written.") -> ToolsStatus:
+def _ready(message: str = "Checked. No tool is started or stopped.") -> ToolsStatus:
     return ToolsStatus(rows=_rows(), message=message, checked_at=CLOCK)
 
 
@@ -77,7 +77,7 @@ def test_rows_fill_the_table_and_the_status_line_gives_the_time(qtbot):
     assert [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())] == list(COLUMNS)
     assert _cells(table, 0) == list(_rows()[0].cells())
     assert _cells(table, 1) == list(_rows()[1].cells())
-    assert _status_text(panel) == "Checked. Nothing was written. Time checked: 2026-10-22 09:30:00."
+    assert _status_text(panel) == "Checked. No tool is started or stopped. Time checked: 2026-10-22 09:30:00."
     assert "Not built yet" not in _all_text(panel)
 
 
@@ -185,7 +185,7 @@ def test_a_provider_that_gives_no_status_says_so(qtbot):
 
 def test_before_any_read_the_panel_says_to_press_refresh(qtbot):
     panel = _panel(qtbot, lambda: _ready())
-    assert _status_text(panel) == "Press Refresh to read the tools. No tool is started or stopped, and nothing is written."
+    assert _status_text(panel) == "Press Refresh to read the tools. No tool is started or stopped."
     assert _table(panel).rowCount() == 0
 
 
@@ -196,7 +196,7 @@ def test_the_headline_says_what_is_set_up_and_what_is_live_without_calling_clien
     assert "the local Meridian server and the tunnel are live" in intro
     assert "live right now" not in intro
     assert "starts, stops and installs" not in intro
-    assert "No tool is started or stopped, and nothing is written." in intro
+    assert "No tool is started or stopped." in intro
 
 
 def test_every_label_is_selectable(qtbot):

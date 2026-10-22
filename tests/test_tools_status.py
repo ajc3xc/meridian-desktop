@@ -17,6 +17,7 @@ from meridian_desktop.client_setup_runner import CORE_MODULE, CommandOutput
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.settings_store import DEFAULT_LOCAL_URL, Settings, SettingsStore
 from meridian_desktop.tools_status import (
+    CHECK_FAILED_TEXT,
     CHECKOUT_INVALID_TEXT,
     CHECKOUT_NOT_SET_TEXT,
     ENTRIES_TOOL,
@@ -690,6 +691,32 @@ def test_a_deeply_nested_plan_reply_never_escapes_the_read(tmp_path, core):
     assert status.checked_at == CLOCK
 
 
+def test_a_deeply_nested_settings_file_still_gives_a_normal_status(tmp_path):
+    path = tmp_path / "settings" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    run = FakeRun(responder({}))
+    probe = FakeProbe()
+    status = read_tools_status(SettingsStore(path), run=run, probe=probe, clock=clock)
+    assert isinstance(status, tools_status.ToolsStatus)
+    assert status.message == CHECK_FAILED_TEXT.format(name="RecursionError")
+    assert status.checked_at == CLOCK
+    assert status.rows
+    assert run.argvs == [] and probe.calls == []
+    assert server_row(status).live == UNCHECKED
+    assert tunnel_row(status).live == UNCHECKED
+    assert all(YES not in (row.configured, row.live) for row in status.rows)
+    assert str(tmp_path) not in visible_text(status)
+
+
+def test_a_checked_read_says_no_tool_is_started_or_stopped(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    status = read_tools_status(store, run=FakeRun(responder({})), probe=FakeProbe(), clock=clock)
+    assert status.message == "Checked. No tool is started or stopped."
+    assert "Nothing was written" not in visible_text(status)
+
+
 # ----------------------------------------------------------- source
 
 
@@ -703,11 +730,15 @@ def test_the_copy_names_only_what_the_refresh_does():
         "starts, stops, installs",
         "Nothing is started",
         "Nothing here starts",
+        "nothing is written",
+        "nothing was written",
+        "changes nothing",
     )
     for path, text in texts.items():
+        lowered = text.lower()
         for phrase in banned:
-            assert phrase not in text, (path.name, phrase)
-    assert "No tool is started or stopped, and nothing is written." in texts[panel]
+            assert phrase.lower() not in lowered, (path.name, phrase)
+    assert "No tool is started or stopped." in texts[panel]
 
 
 def test_the_module_imports_no_qt():

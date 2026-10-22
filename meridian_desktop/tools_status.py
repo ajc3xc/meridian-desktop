@@ -2,13 +2,16 @@
 Pure Python: no Qt import.
 
 The desktop runs no MCP server itself: the AI clients start them. So this module reads only what the
-desktop can check, and changes nothing:
+desktop can check, and starts or stops no tool:
 
 - each client's Meridian entries, from the Meridian core's client setup plan (ClientSetupRunner.check).
   The plan is the only process this module runs. A wrapper around the injected runner refuses every
   argument list except the plan commands the core setup builds, so this read cannot apply or remove an entry.
 - the local Meridian server: GET /health through local_client.probe_health, on a loopback address only.
-- the tunnel: one read-only status call through tunnel_status.read_tunnel_status.
+- the tunnel: one status call through tunnel_status.read_tunnel_status.
+
+The tunnel read goes through the core status command, which may record a recovered exit code in its own
+state file, so this module never claims the read leaves no trace.
 
 An AI client starts its own tools, so the desktop cannot see whether one of its entries is running. Those
 rows say "Not checked" for live. Every row carries one plain sentence on what to do. No secret or token is
@@ -26,6 +29,7 @@ from pathlib import Path
 
 from meridian_desktop import client_setup_runner, local_client, tunnel_status
 from meridian_desktop.client_setup_runner import (
+    CHECKED_TEXT,
     CORE_MODULE,
     IN_PLACE,
     MISSING,
@@ -90,7 +94,10 @@ NOT_COVERED_TEXT = (
 )
 NO_RESULT_TEXT = "The Meridian core did not report on {label}. Press Refresh to check again."
 NO_PLAN_TEXT = "The core check did not return a plan. See the Logs tab."
-CHECK_FAILED_TEXT = "The Meridian setup check failed ({name}). Nothing was written."
+CHECK_FAILED_TEXT = "The Meridian setup check failed ({name}). No tool is started or stopped."
+# The plan's own success line describes only the plan. The panel's line covers the whole read, including the
+# tunnel status call, so the panel shows this line in its place.
+PANEL_CHECKED_TEXT = "Checked. No tool is started or stopped."
 
 # The one sentence shown when the core checkout or Python cannot be used. Each names the part at fault and
 # never the path: the runner's own message holds the machine-local path, and that never reaches the panel.
@@ -335,9 +342,21 @@ def _not_ready_text(settings: Settings) -> str:
     return CHECKOUT_INVALID_TEXT
 
 
-def _local_server_row(settings_store: SettingsStore, probe: Callable[[str], str]) -> ToolRow:
+def _load_settings(settings_store: SettingsStore) -> Settings | None:
+    """The settings the store holds, or None when the file is nested too deeply to parse.
+
+    SettingsStore.load catches only OSError and ValueError. json.loads raises RecursionError on a deeply nested
+    file, so that error reaches the caller unless it is caught here.
+    """
+    try:
+        return settings_store.load().settings
+    except RecursionError:
+        return None
+
+
+def _local_server_row(settings: Settings, probe: Callable[[str], str]) -> ToolRow:
     """The local server's health, checked only at a loopback address. The probe is never called otherwise."""
-    url = settings_store.load().settings.local_url
+    url = settings.local_url
     try:
         local_client.assert_loopback(url)
     except local_client.LocalClientError as exc:
@@ -391,6 +410,28 @@ def _tunnel_row(status_call: Callable[[str], RunnerResult] | None, clock: Callab
     return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, UNCHECKED, UNCHECKED, detail)
 
 
+def _settings_unreadable(clock: Callable[[], datetime]) -> ToolsStatus:
+    """The read when the settings file is nested too deeply to parse.
+
+    No core location or server address is known, so the core is not run, the server is not probed and the
+    tunnel is not read. Every row says so with the module's plain failure text, and none is shown as set up or live.
+    """
+    failure = CHECK_FAILED_TEXT.format(name=RecursionError.__name__)
+    check = CheckResult(rows=unchecked_rows(), message=failure, configured=False)
+    rows = _client_rows(check, {}, failure)
+    rows.append(
+        ToolRow(
+            THIS_COMPUTER,
+            SERVER_TOOL,
+            UNCHECKED,
+            UNCHECKED,
+            SERVER_CHECK_FAILED_TEXT.format(name=RecursionError.__name__),
+        )
+    )
+    rows.append(_tunnel_row(None, clock))
+    return ToolsStatus(rows=tuple(rows), message=failure, checked_at=clock())
+
+
 def read_tools_status(
     settings_store: SettingsStore,
     *,
@@ -403,9 +444,11 @@ def read_tools_status(
 
     ``run`` is the injected process runner (run_process by default). ``probe`` takes a base address and
     returns a health word (local_client.probe_health by default). ``tunnel_status_call`` is
-    RunnerClient.status, or a fake. No tool is started or stopped, and nothing is written.
+    RunnerClient.status, or a fake. No tool is started or stopped.
     """
-    settings = settings_store.load().settings
+    settings = _load_settings(settings_store)
+    if settings is None:
+        return _settings_unreadable(clock)
     plan = PlanOnlyRunner(
         run if run is not None else client_setup_runner.run_process,
         python=settings.core_python.strip(),
@@ -416,7 +459,7 @@ def read_tools_status(
         check = ClientSetupRunner(settings_store, run=plan).check()
     except Exception as exc:  # noqa: BLE001 - the other rows must still be shown
         check = CheckResult(rows=unchecked_rows(), message=CHECK_FAILED_TEXT.format(name=exc.__class__.__name__))
-    message = check.message
+    message = PANEL_CHECKED_TEXT if check.message == CHECKED_TEXT else check.message
     not_ready = ""
     if not check.configured:
         try:
@@ -425,7 +468,7 @@ def read_tools_status(
             not_ready = CHECKOUT_INVALID_TEXT
         message = not_ready
     rows = _client_rows(check, _plan_entries(plan.outputs), not_ready)
-    rows.append(_local_server_row(settings_store, probe))
+    rows.append(_local_server_row(settings, probe))
     rows.append(_tunnel_row(tunnel_status_call, clock))
     return ToolsStatus(rows=tuple(rows), message=message, checked_at=clock())
 

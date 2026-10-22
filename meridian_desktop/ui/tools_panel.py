@@ -33,11 +33,11 @@ HEADING_TEXT = "Tools"
 INTRO_TEXT = (
     "Which Meridian tools are set up for each AI client, and whether the local Meridian server and the tunnel "
     "are live. The AI clients start their own tools, so this panel cannot see whether those are running. "
-    "No tool is started or stopped, and nothing is written."
+    "No tool is started or stopped."
 )
 REFRESH_TEXT = "Refresh"
-WAITING_TEXT = "Press Refresh to read the tools. No tool is started or stopped, and nothing is written."
-CHECKING_TEXT = "Checking the tools. No tool is started or stopped, and nothing is written."
+WAITING_TEXT = "Press Refresh to read the tools. No tool is started or stopped."
+CHECKING_TEXT = "Checking the tools. No tool is started or stopped."
 NO_RESULT_TEXT = "The tools check gave no result."
 COLUMNS = ("Client", "Tool", "Status", "Configured", "Live", "What to do")
 
