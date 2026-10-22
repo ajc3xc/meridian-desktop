@@ -5,10 +5,16 @@ tabs behind scroll arrows and cut off one label. The window also opened too smal
 Settings panel. These tests pin the fix.
 """
 
+import dataclasses
+
 from PySide6.QtWidgets import QPushButton
 
+from _fakes import MemoryKeyring
+from meridian_desktop import local_client
+from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, MainWindow
+from meridian_desktop.ui.projects_tab import default_sources
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.zotero_client import API_NOT_RUNNING, NOT_RUNNING_MESSAGE, ApiCheck, ZoteroStatus
 
@@ -37,8 +43,22 @@ class _OfflineZotero:
         return ""
 
 
+def _offline_sources():
+    """The default sources, with a fake probe and a fake server transport, so no test opens a socket.
+
+    The probe says no server is running, so the server read is never called. If it were called,
+    the transport answers an empty list, so nothing reaches the network either way.
+    """
+
+    def transport(request, timeout):
+        return local_client._Reply(200, b"[]")
+
+    real = default_sources(KeyringSecretStore(backend=MemoryKeyring()), server_transport=transport)
+    return dataclasses.replace(real, probe=lambda url: local_client.HEALTH_NOT_RUNNING)
+
+
 def _shown_window(qtbot, settings_path):
-    window = MainWindow(SettingsStore(settings_path))
+    window = MainWindow(SettingsStore(settings_path), data_sources=_offline_sources())
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
@@ -81,7 +101,7 @@ def test_window_cannot_shrink_below_the_tab_bar(qtbot, settings_path):
 
 def test_zotero_tab_is_the_panel_and_keeps_the_window_size(qtbot, settings_path):
     fake = _OfflineZotero()
-    window = MainWindow(SettingsStore(settings_path), zotero=fake)
+    window = MainWindow(SettingsStore(settings_path), zotero=fake, data_sources=_offline_sources())
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)

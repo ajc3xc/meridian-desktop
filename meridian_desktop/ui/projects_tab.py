@@ -7,6 +7,10 @@ and every outside read is an injected callable in DataSources.
 The resolve runs on the thread pool, so a slow probe never blocks the window. Each load has a
 generation number, and a result from an older load is dropped once a newer load has started.
 
+A pool worker never touches a Qt object. It emits its result to one shared delivery object, which
+lives on the GUI thread and is never deleted. Each tab receives on the GUI thread and keeps only
+its own results, so a tab deleted while its load runs is never touched by the worker.
+
 Only the fields in projects_reader.PROJECT_COLUMNS reach the table or the detail pane. The
 detail pane is built from those fields alone, so executor_config and agent_instructions never
 appear, even if a source returned them. Every label and cell is plain text.
@@ -14,11 +18,12 @@ appear, even if a source returned them. Every label and cell is plain text.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -72,24 +77,18 @@ SOURCE_TEXT = {
 }
 
 
-class SourceNotBuilt(Exception):
-    """The desktop does not read projects from this source yet. Raised instead of returning rows."""
+def default_sources(secrets: SecretStore, *, server_transport: local_client.Transport | None = None) -> DataSources:
+    """The data sources the app uses. Every one is real.
 
-
-def _server_rows_not_built(url: str) -> list[dict[str, Any]]:
-    raise SourceNotBuilt("reading projects from the running server is not built yet")
-
-
-def default_sources(secrets: SecretStore) -> DataSources:
-    """The data sources the app uses. Probe, file, token and hosted reader are real. Only the running-server reader is not built.
-
-    The probe is loopback only (local_client.probe_health). The file reader opens the database
-    read-only. The token comes from the keychain through token_store, and only in hosted mode.
-    The hosted reader is hosted_client.list_projects: one GET /projects with the bearer token.
+    The probe is loopback only (local_client.probe_health). The running-server reader is
+    local_client.list_projects: one loopback GET /projects, with no token. The file reader opens
+    the database read-only. The token comes from the keychain through token_store, and only in
+    hosted mode. The hosted reader is hosted_client.list_projects: one GET /projects with the bearer
+    token. ``server_transport`` is for tests: when given, the server read sends through it, not urllib.
     """
     return DataSources(
         probe=lambda url: local_client.probe_health(url, PROBE_TIMEOUT),
-        read_server=_server_rows_not_built,
+        read_server=lambda url: local_client.list_projects(url, transport=server_transport),
         read_file=projects_reader.list_projects,
         get_token=lambda: token_store.get_token(store=secrets),
         list_hosted=hosted_client.list_projects,
@@ -117,22 +116,57 @@ def detail_text(row: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class _Loaded:
-    """One finished load: the generation it belongs to, and what the resolver returned."""
+    """One finished load: the tab that started it, its generation, and what the resolver returned.
 
+    ``owner`` is a plain token object, not the tab, so a _Loaded holds no Qt object.
+    """
+
+    owner: object
     generation: int
     outcome: Resolution
 
 
-class _LoadJob(QRunnable):
-    """Run one resolve on the thread pool and deliver a _Loaded.
+def _settings_resolution(store: SettingsStore, sources: DataSources) -> Resolution:
+    """Runs on a worker: reads the saved settings, then resolves the one source the mode uses."""
+    return resolve(store.load().settings, sources)
 
-    A failure becomes a read_failed Resolution that names the exception class only, so a raw
-    exception, and any value inside it, never reaches the UI thread.
+
+class _Delivery(QObject):
+    """The one object a pool job emits to. It is never deleted, so an emit always has a live target."""
+
+    delivered = Signal(object)
+
+
+_DELIVERY: _Delivery | None = None
+
+
+def _delivery() -> _Delivery:
+    """The shared delivery object. The first tab creates it on the GUI thread, and it lives until the process ends."""
+    global _DELIVERY
+    if _DELIVERY is None:
+        _DELIVERY = _Delivery()
+    return _DELIVERY
+
+
+class _LoadJob(QRunnable):
+    """Run one resolve on the thread pool and emit its _Loaded to the shared delivery object.
+
+    The job holds plain data only: an owner token, a generation number, the work, and the emit of
+    the delivery object. It never holds the tab, so the worker never touches a tab, even one that
+    was deleted while the load ran. A failure becomes a read_failed Resolution that names the
+    exception class only, so a raw exception, and any value inside it, never reaches the UI thread.
     """
 
-    def __init__(self, generation: int, work: Callable[[], Resolution], deliver: Callable[[_Loaded], None]) -> None:
+    def __init__(
+        self,
+        owner: object,
+        generation: int,
+        work: Callable[[], Resolution],
+        deliver: Callable[[_Loaded], None],
+    ) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._owner = owner
         self._generation = generation
         self._work = work
         self._deliver = deliver
@@ -142,16 +176,11 @@ class _LoadJob(QRunnable):
             outcome = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             outcome = Resolution(STATE_READ_FAILED, None, message=f"Projects could not be loaded ({exc.__class__.__name__}).")
-        try:
-            self._deliver(_Loaded(self._generation, outcome))
-        except RuntimeError:
-            pass  # the tab was deleted while the load ran
+        self._deliver(_Loaded(self._owner, self._generation, outcome))
 
 
 class ProjectsTab(QWidget):
     """Projects from the resolver, and the detail of the selected row. Read-only."""
-
-    _loaded = Signal(object)
 
     def __init__(self, settings_store: SettingsStore, sources: DataSources, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -159,8 +188,10 @@ class ProjectsTab(QWidget):
         self._settings = settings_store
         self._sources = sources
         self._generation = 0
+        # Identifies this tab's loads. A plain object, so a job can hold it without holding the tab.
+        self._owner = object()
         self._rows: list[dict[str, Any]] = []
-        self._loaded.connect(self._on_loaded)
+        _delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -209,16 +240,15 @@ class ProjectsTab(QWidget):
         """Start a load of the rows. A load still running is superseded, and its result is dropped."""
         self._generation += 1
         self._status.setText(LOADING_TEXT)
-        QThreadPool.globalInstance().start(_LoadJob(self._generation, self._load, self._loaded.emit))
-
-    def _load(self) -> Resolution:
-        """Runs on a worker. Reads the settings, then resolves the one source the mode uses."""
-        return resolve(self._settings.load().settings, self._sources)
+        # The job gets the store and the sources, not self: a worker never holds the tab.
+        work = functools.partial(_settings_resolution, self._settings, self._sources)
+        QThreadPool.globalInstance().start(_LoadJob(self._owner, self._generation, work, _delivery().delivered.emit))
 
     @Slot(object)
-    def _on_loaded(self, loaded: _Loaded) -> None:
-        if loaded.generation != self._generation:
-            return  # a newer load started after this one
+    def _on_delivered(self, loaded: _Loaded) -> None:
+        # Runs on the GUI thread. Another tab's load, or a load a newer one has superseded, is dropped.
+        if loaded.owner is not self._owner or loaded.generation != self._generation:
+            return
         self._show(loaded.outcome)
 
     def _show(self, outcome: Resolution) -> None:
@@ -267,7 +297,6 @@ __all__ = [
     "FIELD_LABELS",
     "TABLE_FIELDS",
     "ProjectsTab",
-    "SourceNotBuilt",
     "default_sources",
     "detail_text",
     "visible_row",

@@ -1,8 +1,8 @@
 """Loopback client for the local Meridian server. Pure Python: stdlib urllib only, no Qt import.
 
 Every request goes to an http URL whose host is 127.0.0.1, localhost or ::1
-(assert_loopback). Each request has a deadline, set by its timeout over the whole
-call, a fixed User-Agent and no credentials. Redirects are refused and not followed.
+(assert_loopback). Each request has a timeout, which bounds each read and sets a deadline
+for the body (see _get), a fixed User-Agent and no credentials. Redirects are refused and not followed.
 A response is capped at MAX_RESPONSE_BYTES, enforced before anything is parsed. A proxy
 is never used, so loopback traffic stays on this machine.
 
@@ -21,10 +21,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from meridian_desktop import __version__
+from meridian_desktop.projects_reader import PROJECT_COLUMNS
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 ALLOWED_SCHEME = "http"
@@ -39,6 +41,7 @@ HEALTH_NOT_MERIDIAN = "not_meridian"
 HEALTH_ERROR = "error"
 
 HEALTH_PATH = "/health"
+PROJECTS_PATH = "/projects"
 RUNPOD_CHECK_PATH = "/compute/runpod/check"
 RUNPOD_PODS_PATH = "/compute/runpod/pods"
 
@@ -115,13 +118,18 @@ class _Reply:
     body: bytes
 
 
+# A transport takes the request and a timeout in seconds, and returns the reply. Tests pass a fake,
+# so they need no socket. The default is urllib, with the bounded read and the refused redirect.
+Transport = Callable[[urllib.request.Request, float], _Reply]
+
+
 def _bounded_read(response: Any, deadline: float) -> bytes:
     """Read at most MAX_RESPONSE_BYTES, and stop once ``deadline`` (a time.monotonic value) passes.
 
     A larger body is refused before any parsing. The deadline is checked before each read,
     and read1 returns as soon as some bytes arrive, so a server that trickles bytes is cut
     off at the first read after the deadline. A read already waiting for data is still
-    limited by the socket timeout, so the call ends at most one timeout after the deadline.
+    limited by the socket timeout, so the body read ends at most one timeout after the deadline.
     """
     declared = response.headers.get("Content-Length") if response.headers is not None else None
     if declared is not None and declared.strip().isdigit() and int(declared) > MAX_RESPONSE_BYTES:
@@ -151,11 +159,16 @@ def _transport_error(reason: object) -> LocalClientError:
     return LocalClientError("unreachable", UNREACHABLE_MESSAGE)
 
 
-def _get(base_url: str, path: str, timeout: float) -> _Reply:
+def _get(base_url: str, path: str, timeout: float, transport: Transport | None = None) -> _Reply:
     """GET one path under base_url. A non-2xx status is returned as a reply, not raised.
 
-    ``timeout`` also sets a deadline for the body read, counted from this call. The header
-    lines are read under the socket timeout alone.
+    ``timeout`` is the socket timeout for each blocking read: the connect, each header line and
+    each body read. The body deadline is ``timeout`` seconds from the start of this call, and it is
+    checked before each body read. The header lines have no deadline of their own, and a body read
+    already waiting for data can run one more timeout past the deadline. So a call is not bounded
+    to ``timeout`` seconds in total. ``transport``, when given, sends the request in place of urllib,
+    and the timeout is passed to it unchanged. The loopback check still runs first, so a refused URL
+    reaches no transport.
     """
     assert_loopback(base_url)
     deadline = time.monotonic() + timeout
@@ -164,6 +177,8 @@ def _get(base_url: str, path: str, timeout: float) -> _Reply:
         method="GET",
         headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
     )
+    if transport is not None:
+        return transport(request, timeout)
     try:
         with _opener().open(request, timeout=timeout) as response:
             return _Reply(response.status, _bounded_read(response, deadline))
@@ -188,6 +203,17 @@ def _json_object(body: bytes) -> dict[str, Any] | None:
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _json_list(body: bytes) -> list[dict[str, Any]] | None:
+    """Parse a JSON array whose items are all objects. Return None for anything else."""
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        return None
+    return value
 
 
 def _server_code(status: int, body: bytes) -> str:
@@ -218,6 +244,33 @@ def probe_health(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
     if reply.status == 200 and body is not None and body.get("service") == "meridian" and body.get("status") == "ok":
         return HEALTH_RUNNING
     return HEALTH_NOT_MERIDIAN
+
+
+def list_projects(
+    base_url: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    *,
+    transport: Transport | None = None,
+) -> list[dict[str, Any]]:
+    """GET {base_url}/projects and return the rows, each keyed by projects_reader.PROJECT_COLUMNS.
+
+    The URL is checked first, so a refused URL sends no request. A redirect is refused and not
+    followed. Any other non-200 status raises LocalClientError, with the server's error code when
+    it is a safe slug. The body must be a JSON array of objects. Anything else raises "bad_json",
+    and the body is never echoed. A row keeps only the listed columns, and a column it lacks reads
+    as None, as it does for the file reader. ``timeout`` is 10 seconds by default. It is the socket
+    timeout for each read and the body deadline, not a limit on the whole call (see _get).
+    """
+    reply = _get(base_url, PROJECTS_PATH, timeout, transport=transport)
+    if 300 <= reply.status < 400:
+        raise LocalClientError("redirect_refused", REDIRECT_MESSAGE)
+    if reply.status != 200:
+        code = _server_code(reply.status, reply.body)
+        raise LocalClientError(code, f"The local Meridian server returned HTTP {reply.status}.")
+    rows = _json_list(reply.body)
+    if rows is None:
+        raise LocalClientError("bad_json", BAD_JSON_MESSAGE)
+    return [{key: row.get(key) for key in PROJECT_COLUMNS} for row in rows]
 
 
 def _runpod_json(path: str, base_url: str, timeout: float) -> dict[str, Any]:
@@ -263,7 +316,9 @@ __all__ = [
     "MAX_RESPONSE_BYTES",
     "USER_AGENT",
     "LocalClientError",
+    "Transport",
     "assert_loopback",
+    "list_projects",
     "probe_health",
     "runpod_check",
     "runpod_list_pods",

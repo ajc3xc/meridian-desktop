@@ -141,6 +141,74 @@ class ProjectsUnavailable(Exception):
     """The Projects resolver found no source to read. The Sessions tab shows only this class name, never a path."""
 
 
+def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
+    """The provider the Code, Outputs and Research panels call: the local URL as saved now.
+
+    It holds the store, not the window. A bound method of the window kept the window in a reference
+    cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
+    thread allocates, and the panels call this provider on the pool, so a window could be freed on a
+    pool worker and its widgets deleted off the GUI thread.
+    """
+
+    def read() -> str:
+        return store.load().settings.local_url
+
+    return read
+
+
+def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tuple[str, str | None]]:
+    """The hosted URL in Settings and the saved hosted token, for the Sessions tab. Runs on the worker thread.
+
+    The token goes to the Sessions client for one request. The tab never shows it. Like _saved_local_url, this
+    holds the store and the secret store, never the window, so no reference cycle keeps a closed window alive.
+    """
+
+    def read() -> tuple[str, str | None]:
+        return store.load().settings.hosted_url, token_store.get_token(store=secrets)
+
+    return read
+
+
+def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str]]]:
+    """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
+
+    When the resolver found no source to read, the provider raises ProjectsUnavailable. The Sessions tab then
+    says the projects could not be read, rather than that no projects exist.
+    """
+
+    def read() -> list[tuple[str, str]]:
+        outcome = resolve(store.load().settings, sources)
+        if outcome.state != STATE_OK:
+            raise ProjectsUnavailable(outcome.message)
+        pairs: list[tuple[str, str]] = []
+        for row in outcome.rows:
+            pid = row.get("id")
+            if isinstance(pid, str) and pid.strip():
+                name = row.get("name")
+                pairs.append((pid, name if isinstance(name, str) else ""))
+        return pairs
+
+    return read
+
+
+def _saved_tools_status(store: SettingsStore) -> Callable[[], ToolsStatus]:
+    """One tools read, through the core Python and checkout saved in Settings. Runs on the worker thread.
+
+    The tunnel row uses only the status call of a RunnerClient built from those two settings. With either one
+    unset, that call is None and the tunnel row says Not checked. No tool is started or stopped.
+    """
+
+    def read() -> ToolsStatus:
+        settings = store.load().settings
+        tunnel_call = None
+        if settings.core_python.strip() and settings.core_checkout.strip():
+            client = RunnerClient(python=settings.core_python, cwd=settings.core_checkout)
+            tunnel_call = client.status
+        return read_tools_status(store, tunnel_status_call=tunnel_call)
+
+    return read
+
+
 class _ConfiguredRunner:
     """The runner's read-only status call, through the core Python and folder saved in Settings.
 
@@ -186,7 +254,7 @@ class MainWindow(QMainWindow):
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
         # The Tools tab's read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
-        self._tools_status_read = tools_status if tools_status is not None else self._read_tools_status
+        self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
         # Each tunnel check takes the next number. A result with an older number is dropped.
         self._tunnel_generation = 0
         self._tunnel_checked.connect(self._on_tunnel_checked)
@@ -211,9 +279,9 @@ class MainWindow(QMainWindow):
                 # Nothing is read on build. The list reads when the tab is shown, and again every 5 seconds while
                 # it stays visible. The three providers run on the worker thread, never on the UI thread.
                 page = SessionsPanel(
-                    self._current_local_url,
-                    self._sessions_hosted,
-                    self._sessions_projects,
+                    _saved_local_url(self._store),
+                    _saved_hosted(self._store, self._secrets),
+                    _saved_projects(self._store, self._sources),
                     parent=self.tabs,
                 )
             elif name == "Tools":
@@ -239,11 +307,11 @@ class MainWindow(QMainWindow):
                 page = ZoteroPanel(client=self._zotero, parent=self.tabs)
             elif name == "Code":
                 # Search runs only when the owner presses Search. The local URL is read at that moment.
-                page = CodePanel(self._current_local_url, parent=self.tabs)
+                page = CodePanel(_saved_local_url(self._store), parent=self.tabs)
             elif name == "Outputs":
-                page = OutputsPanel(self._current_local_url, parent=self.tabs)
+                page = OutputsPanel(_saved_local_url(self._store), parent=self.tabs)
             elif name == "Research":
-                page = ResearchPanel(self._current_local_url, parent=self.tabs)
+                page = ResearchPanel(_saved_local_url(self._store), parent=self.tabs)
             else:
                 page = _placeholder_page(name, self.tabs)
             self.tabs.addTab(page, name)
@@ -262,47 +330,6 @@ class MainWindow(QMainWindow):
         self._update_notice.start(enabled=self._store.load().settings.check_updates)
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
-
-    def _current_local_url(self) -> str:
-        """The local server URL as saved now. The Code, Outputs and Research panels call this when they search."""
-        return self._store.load().settings.local_url
-
-    def _sessions_hosted(self) -> tuple[str, str | None]:
-        """The hosted URL in Settings and the saved hosted token, for the Sessions tab. Runs on the worker thread.
-
-        The token goes to the Sessions client for one request. The tab never shows it.
-        """
-        return self._store.load().settings.hosted_url, token_store.get_token(store=self._secrets)
-
-    def _sessions_projects(self) -> list[tuple[str, str]]:
-        """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
-
-        When the resolver found no source to read, this raises. The Sessions tab then says the projects could not
-        be read, rather than that no projects exist.
-        """
-        outcome = resolve(self._store.load().settings, self._sources)
-        if outcome.state != STATE_OK:
-            raise ProjectsUnavailable(outcome.message)
-        pairs: list[tuple[str, str]] = []
-        for row in outcome.rows:
-            pid = row.get("id")
-            if isinstance(pid, str) and pid.strip():
-                name = row.get("name")
-                pairs.append((pid, name if isinstance(name, str) else ""))
-        return pairs
-
-    def _read_tools_status(self) -> ToolsStatus:
-        """One tools read, through the core Python and checkout saved in Settings. Runs on the worker thread.
-
-        The tunnel row uses only the status call of a RunnerClient built from those two settings. With either one
-        unset, that call is None and the tunnel row says Not checked. No tool is started or stopped.
-        """
-        settings = self._store.load().settings
-        tunnel_call = None
-        if settings.core_python.strip() and settings.core_checkout.strip():
-            client = RunnerClient(python=settings.core_python, cwd=settings.core_checkout)
-            tunnel_call = client.status
-        return read_tools_status(self._store, tunnel_status_call=tunnel_call)
 
     def _build_mode_bar(self, parent: QWidget) -> QVBoxLayout:
         result = self._store.load()
