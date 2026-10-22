@@ -311,7 +311,7 @@ class _FakeQApp:
 class _FakeWindow:
     events: list[str] = []
 
-    def __init__(self, store):
+    def __init__(self, store, update_transport=None):
         _FakeWindow.events.append("window")
 
     def show(self):
