@@ -24,6 +24,12 @@ the folder removal is handed to a helper that starts after this process exits.
 
 Pure Python, no Qt import. Run it from the bundle as ``MeridianDesktop.exe --install``, or
 from source as ``python -m meridian_desktop.install --install``.
+
+Dev mode is ``--install --dev``, for a source checkout. Its shortcuts run
+``pythonw -m meridian_desktop`` from the repository root, with the repository's icon, so a code
+change shows the next time the app starts. Dev mode copies nothing, and it does not touch the
+installed bundle, the Apps and Features entry or the start-at-sign-in entry. Uninstall removes
+the shortcuts it wrote and never deletes the source tree.
 """
 
 from __future__ import annotations
@@ -53,6 +59,9 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "MeridianDesktop"
 # Set to 1 to keep the installer away from the registry (locked-down machines, CI, tests).
 NO_REGISTRY_ENV = "MERIDIAN_DESKTOP_NO_REGISTRY"
+# A dev shortcut runs this module's package from the source tree, with the tree's icon.
+DEV_ARGUMENTS = "-m meridian_desktop"
+ICON_RELATIVE = Path("packaging") / "assets" / "meridian-desktop.ico"
 
 # The script reads its three values from the environment. It never has a path written into it.
 _POWERSHELL_SCRIPT = (
@@ -61,6 +70,17 @@ _POWERSHELL_SCRIPT = (
     "$s.WorkingDirectory = $env:MERIDIAN_WORKDIR;"
     "$s.IconLocation = $env:MERIDIAN_TARGET + ',0';"
     "$s.Description = 'Meridian Desktop';"
+    "$s.Save()"
+)
+
+# A dev shortcut also sets its arguments, working folder and icon. Still only env vars, never text.
+_DEV_POWERSHELL_SCRIPT = (
+    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:MERIDIAN_LNK);"
+    "$s.TargetPath = $env:MERIDIAN_TARGET;"
+    "$s.Arguments = $env:MERIDIAN_ARGS;"
+    "$s.WorkingDirectory = $env:MERIDIAN_WORKDIR;"
+    "$s.IconLocation = $env:MERIDIAN_ICON + ',0';"
+    "$s.Description = 'Meridian Desktop (dev: runs from source)';"
     "$s.Save()"
 )
 
@@ -86,6 +106,27 @@ class InstallError(RuntimeError):
 class InstallResult:
     install_dir: Path
     shortcuts: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class DevShortcut:
+    """One dev shortcut to write: the .lnk, and what it starts, with which arguments, folder and icon."""
+
+    shortcut: Path
+    target: Path
+    arguments: str
+    working_dir: Path
+    icon: Path
+
+
+@dataclass(frozen=True)
+class DevInstallResult:
+    interpreter: Path
+    repo: Path
+    shortcuts: tuple[Path, ...]
+
+
+DevShortcutWriter = Callable[[DevShortcut], None]
 
 
 class RegistryBackend(Protocol):
@@ -175,17 +216,12 @@ def desktop_shortcut(env: Mapping[str, str]) -> Path:
     return _base(env, "USERPROFILE", ()) / "Desktop" / SHORTCUT_NAME
 
 
-def create_shortcut(shortcut: Path, target: Path) -> None:
-    """Write a .lnk that starts ``target``, using the exe's embedded icon. Windows only."""
+def _write_lnk(shortcut: Path, script: str, values: Mapping[str, str]) -> None:
+    """Run ``script`` in PowerShell to write ``shortcut``. ``values`` reach it only as environment variables."""
     shortcut.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(
-        os.environ,
-        MERIDIAN_LNK=str(shortcut),
-        MERIDIAN_TARGET=str(target),
-        MERIDIAN_WORKDIR=str(target.parent),
-    )
+    env = dict(os.environ, MERIDIAN_LNK=str(shortcut), **values)
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _POWERSHELL_SCRIPT],
+        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
         env=env,
         capture_output=True,
         text=True,
@@ -194,6 +230,29 @@ def create_shortcut(shortcut: Path, target: Path) -> None:
     )
     if completed.returncode != 0 or not shortcut.is_file():
         raise InstallError(f"could not write the shortcut {shortcut.name} (PowerShell exit {completed.returncode})")
+
+
+def create_shortcut(shortcut: Path, target: Path) -> None:
+    """Write a .lnk that starts ``target``, using the exe's embedded icon. Windows only."""
+    _write_lnk(
+        shortcut,
+        _POWERSHELL_SCRIPT,
+        {"MERIDIAN_TARGET": str(target), "MERIDIAN_WORKDIR": str(target.parent)},
+    )
+
+
+def create_dev_shortcut(spec: DevShortcut) -> None:
+    """Write a .lnk that runs ``spec.target`` with its arguments, working folder and icon. Windows only."""
+    _write_lnk(
+        spec.shortcut,
+        _DEV_POWERSHELL_SCRIPT,
+        {
+            "MERIDIAN_TARGET": str(spec.target),
+            "MERIDIAN_ARGS": spec.arguments,
+            "MERIDIAN_WORKDIR": str(spec.working_dir),
+            "MERIDIAN_ICON": str(spec.icon),
+        },
+    )
 
 
 def schedule_folder_removal(folder: Path) -> None:
@@ -312,6 +371,54 @@ def install(
     return InstallResult(install_dir=target, shortcuts=tuple(links))
 
 
+def dev_interpreter(interpreter: Path) -> Path:
+    """The program a dev shortcut starts: pythonw.exe beside ``interpreter``, else python.exe beside it.
+
+    pythonw.exe is the windowed build, so the app opens without a console. Raises InstallError when
+    neither is there, which is the case when ``interpreter`` is the frozen exe.
+    """
+    for name in ("pythonw.exe", "python.exe"):
+        candidate = interpreter.with_name(name)
+        if candidate.is_file():
+            return candidate
+    raise InstallError(f"no pythonw.exe or python.exe beside {interpreter}; run --dev from a Python install")
+
+
+def install_dev(
+    env: Mapping[str, str],
+    *,
+    desktop: bool = False,
+    writer: DevShortcutWriter = create_dev_shortcut,
+    interpreter: Path | None = None,
+    repo: Path | None = None,
+) -> DevInstallResult:
+    """Point the Start Menu shortcut (and the desktop one, with ``desktop``) at the source tree.
+
+    The shortcut runs ``pythonw -m meridian_desktop`` from the repository root, so the next start shows the
+    code as it is now. ``interpreter`` defaults to the Python running this install, and ``repo`` to this
+    checkout. Nothing is copied, and the installed bundle, the Apps and Features entry and the
+    start-at-sign-in entry are left as they are.
+    """
+    program = dev_interpreter(Path(sys.executable) if interpreter is None else Path(interpreter))
+    tree = REPO if repo is None else Path(repo)
+    if not (tree / "meridian_desktop" / "__main__.py").is_file():
+        raise InstallError(f"{tree} is not a Meridian Desktop source tree; run --dev from the repository")
+    links = [start_menu_shortcut(env)]
+    if desktop:
+        links.append(desktop_shortcut(env))
+    for link in links:
+        writer(
+            DevShortcut(
+                shortcut=link,
+                target=program,
+                arguments=DEV_ARGUMENTS,
+                working_dir=tree,
+                icon=tree / ICON_RELATIVE,
+            )
+        )
+    return DevInstallResult(interpreter=program, repo=tree, shortcuts=tuple(links))
+
+
 def _running_from(folder: Path) -> bool:
     """True when this process is the frozen exe inside ``folder``, which Windows will not let us delete."""
     if not getattr(sys, "frozen", False):
@@ -385,7 +492,12 @@ def _parser() -> argparse.ArgumentParser:
     action.add_argument("--install", action="store_true", help="copy the bundle and add the shortcuts")
     action.add_argument("--uninstall", action="store_true", help="remove the install folder and shortcuts")
     parser.add_argument("--desktop", action="store_true", help="also add a desktop shortcut (install only)")
-    parser.add_argument("--source", type=Path, default=None, help="bundle folder to copy (install only)")
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="run the shortcuts from this source tree, not the frozen copy (install only)",
+    )
+    parser.add_argument("--source", type=Path, default=None, help="bundle folder to copy (install without --dev only)")
     return parser
 
 
@@ -417,16 +529,30 @@ def main(
     *,
     env: Mapping[str, str] | None = None,
     writer: ShortcutWriter = create_shortcut,
+    dev_writer: DevShortcutWriter = create_dev_shortcut,
     registry: RegistryBackend | None = None,
     scheduler: Scheduler | None = schedule_folder_removal,
+    interpreter: Path | None = None,
+    repo: Path | None = None,
 ) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.dev and not args.install:
+        parser.error("--dev goes with --install")
+    if args.dev and args.source is not None:
+        parser.error("--source copies the frozen bundle, so it cannot be used with --dev")
     environment = os.environ if env is None else env
     try:
+        if args.install and args.dev:
+            dev = install_dev(environment, desktop=args.desktop, writer=dev_writer, interpreter=interpreter, repo=repo)
+            _say(f"installed (mode: dev): shortcuts run {dev.interpreter} {DEV_ARGUMENTS} from {dev.repo}")
+            for link in dev.shortcuts:
+                _say(f"shortcut: {link}")
+            return 0
         if args.install:
             source = args.source or _default_source()
             result = install(source, environment, desktop=args.desktop, writer=writer, registry=registry)
-            _say(f"installed to {result.install_dir}")
+            _say(f"installed to {result.install_dir} (mode: bundle)")
             for link in result.shortcuts:
                 _say(f"shortcut: {link}")
             return 0
