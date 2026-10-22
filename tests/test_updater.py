@@ -68,9 +68,11 @@ class FakeGitHub:
     def __init__(self, routes):
         self.routes = dict(routes)
         self.calls: list[str] = []
+        self.requests: list[tuple[str, int, Path | None]] = []  # each URL with the size cap and file it was given
 
     def __call__(self, url, max_bytes, dest):
         self.calls.append(url)
+        self.requests.append((url, max_bytes, dest))
         if url not in self.routes:
             raise AssertionError(f"unexpected request to {url}")
         route = self.routes[url]
@@ -644,3 +646,129 @@ def test_urllib_transport_returns_a_redirect_without_following_it(monkeypatch, t
     assert reply.status == 302
     assert reply.headers["location"] == location
     assert not dest.exists()
+
+
+# --- check_for_update: a notice only, never a download ----------------------------------------------
+
+
+def page(version: str) -> str:
+    return f"https://github.com/ajc3xc/meridian-desktop/releases/tag/v{version}"
+
+
+def test_a_newer_release_gives_a_notice_and_only_the_api_is_requested():
+    gh = github("0.2.0")
+    result = u.check_for_update("0.1.0", gh)
+    assert result == u.UpdateNotice(
+        version="0.2.0", release_page_url="https://github.com/ajc3xc/meridian-desktop/releases/tag/v0.2.0"
+    )
+    assert gh.requests == [(u.LATEST_RELEASE_URL, u.MAX_SMALL_BYTES, None)]
+
+
+@pytest.mark.parametrize(("latest", "current"), [("0.1.0", "0.1.0"), ("0.0.9", "0.1.0"), ("0.9.0", "0.10.0")])
+def test_the_same_or_an_older_release_is_up_to_date(latest, current):
+    gh = github(latest)
+    assert u.check_for_update(current, gh) == u.UpToDate()
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_a_newer_release_compares_its_parts_as_integers():
+    assert u.check_for_update("0.9.0", github("0.10.0")) == u.UpdateNotice("0.10.0", page("0.10.0"))
+
+
+@pytest.mark.parametrize("failure", [OSError("no route"), TimeoutError("slow"), http.client.HTTPException("reset")])
+def test_an_offline_transport_gives_offline(failure):
+    def offline(url, max_bytes, dest):
+        raise failure
+
+    result = u.check_for_update("0.1.0", offline)
+    assert isinstance(result, u.Offline)
+    assert result.reason
+
+
+@pytest.mark.parametrize(("status", "kind"), [(429, u.Offline), (503, u.Offline), (404, u.Refused), (403, u.Refused)])
+def test_github_error_statuses_on_the_check_are_offline_or_refused(status, kind):
+    gh = github()
+    gh.routes[u.LATEST_RELEASE_URL] = (status, {}, b"")
+    assert isinstance(u.check_for_update("0.1.0", gh), kind)
+
+
+@pytest.mark.parametrize("tag", ["v0.2.0-beta", "0.2.0", "V0.2.0", "vv0.2.0", "v", "v" + "9" * 4301, "latest"])
+def test_a_bad_tag_gives_refused(tag):
+    gh = github(tag=tag)
+    result = u.check_for_update("0.1.0", gh)
+    assert isinstance(result, u.Refused)
+    assert result.reason
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_a_release_with_no_tag_gives_refused():
+    gh = FakeGitHub({u.LATEST_RELEASE_URL: (200, {}, json.dumps({"draft": False, "assets": []}).encode())})
+    assert isinstance(u.check_for_update("0.1.0", gh), u.Refused)
+
+
+def test_a_reply_that_is_not_json_gives_refused():
+    gh = FakeGitHub({u.LATEST_RELEASE_URL: (200, {}, b"<html>not json</html>")})
+    assert isinstance(u.check_for_update("0.1.0", gh), u.Refused)
+
+
+def test_a_draft_release_gives_refused():
+    assert isinstance(u.check_for_update("0.1.0", github("0.2.0", draft=True)), u.Refused)
+
+
+def test_a_reply_over_the_small_cap_gives_refused():
+    def too_large(url, max_bytes, dest):
+        raise u.TooLarge("The download is over the size limit.")
+
+    assert isinstance(u.check_for_update("0.1.0", too_large), u.Refused)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/releases/latest",
+        "http://api.github.com/repos/ajc3xc/meridian-desktop/releases/latest",
+        "https://api.github.com.evil.example/releases/latest",
+    ],
+)
+def test_a_redirect_to_an_off_list_host_gives_refused(location):
+    gh = github()
+    gh.routes[u.LATEST_RELEASE_URL] = (302, {"location": location}, b"")
+    result = u.check_for_update("0.1.0", gh)
+    assert isinstance(result, u.Refused)
+    assert gh.calls == [u.LATEST_RELEASE_URL]  # the off-list address is never requested
+
+
+@pytest.mark.parametrize("current", ["0.1.0-beta", "v0.1.0", "", "1..2"])
+def test_a_current_version_that_is_not_plain_is_refused_before_any_request(current):
+    gh = github("0.2.0")
+    assert isinstance(u.check_for_update(current, gh), u.Refused)
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize("version", ["0.2.0", "10.0.1", "1.2"])
+def test_the_release_page_is_built_from_the_validated_version(version):
+    assert u.release_page_url_for(version) == page(version)
+
+
+@pytest.mark.parametrize("version", ["v0.2.0", "0.2.0/../x", "0.2.0?x=1", "0.2.0-beta"])
+def test_a_release_page_is_never_built_from_an_unvalidated_version(version):
+    with pytest.raises(u.Refused):
+        u.release_page_url_for(version)
+
+
+def test_check_for_update_cannot_reach_the_install_path(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the install path was reached from check_for_update")
+
+    for name in (
+        "check_and_stage",
+        "install_update",
+        "rollback",
+        "_download_verified",
+        "_extract_verified",
+        "_point_shortcuts",
+    ):
+        monkeypatch.setattr(u, name, forbidden)
+    assert isinstance(u.check_for_update("0.1.0", github("0.2.0")), u.UpdateNotice)
+    assert isinstance(u.check_for_update("0.2.0", github("0.2.0")), u.UpToDate)
+    assert isinstance(u.check_for_update("0.1.0", github("0.1.0")), u.UpToDate)

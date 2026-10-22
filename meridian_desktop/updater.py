@@ -1,6 +1,19 @@
-"""Launch-version auto update: find the newest published desktop release, verify it, and stage it beside the app.
+"""Desktop update: a notice when a newer release is published, and the verified install kept for later.
 
-Pure Python, no Qt import. Nothing unverified is ever run:
+Pure Python, no Qt import. Installing is off until release signing exists. There is no signing key and no signing
+policy yet, so nothing the app downloads could be checked as genuine. check_for_update is the update check. It reads
+only the latest release JSON from GitHub and returns one of four results:
+
+    UpdateNotice(version, release_page_url)   a newer release is published. The user opens the release page.
+    UpToDate                                  the latest release is not newer than the running app.
+    Offline                                   GitHub could not be reached, or it is failing for now.
+    Refused(reason)                           the reply could not be read, or it is not allowed.
+
+check_for_update never requests a zip or SHA256SUMS asset, never downloads a file and never extracts anything. It
+returns its result rather than raising it. Nothing on its path reaches check_and_stage or install_update.
+
+check_and_stage and install_update are kept as code for when signing exists. When they run, nothing unverified is
+ever run:
 
 1. fetch_latest reads the latest release from GitHub. It needs two assets, MeridianDesktop-<version>.zip and
    SHA256SUMS, and the version must be plain dotted integers.
@@ -70,10 +83,16 @@ _CHUNK = 64 * 1024
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _SUM_LINE = re.compile(r"([0-9a-fA-F]{64})[ \t]+\*?(\S.*)")
 _VERSION_REFUSED = "A version must be plain dotted numbers such as 0.2.0."
+_TAG_REFUSED = "The latest release tag must be v followed by a plain version, such as v0.2.0."
 
 
 class UpdateError(Exception):
     """An update step failed. The message is plain text that can be shown to the user."""
+
+    @property
+    def reason(self) -> str:
+        """The plain text message. check_for_update returns it as the reason in a Refused or an Offline."""
+        return str(self)
 
 
 class Refused(UpdateError):
@@ -544,6 +563,81 @@ def check_and_stage(
         # A disk fault while staging. The message says nothing about the path, and the installed app is untouched.
         return UpdateResult("refused", reason="The update could not be written. The installed app was not changed.")
     return UpdateResult("update_staged", version=release.version)
+
+
+# --- the notify-only check ------------------------------------------------------------------------------
+
+# check_for_update is the update check. Its four results are below. Offline and Refused are the exception classes
+# above, returned rather than raised, so a caller can match them by the same names.
+
+
+@dataclass(frozen=True)
+class UpdateNotice:
+    """A newer release is published. The user opens release_page_url. Nothing has been downloaded."""
+
+    version: str
+    release_page_url: str
+
+
+@dataclass(frozen=True)
+class UpToDate:
+    """The latest published release is not newer than the running app."""
+
+
+UpdateCheck = UpdateNotice | UpToDate | Offline | Refused
+
+
+def release_page_url_for(version: str) -> str:
+    """The GitHub release page for a version. It is built only from a version that parse_version accepts."""
+    parse_version(version)
+    return f"https://github.com/{REPO}/releases/tag/v{version}"
+
+
+def _latest_version(transport: Transport) -> str:
+    """Read the version of the latest published release from its JSON. The assets are never read.
+
+    The tag must be v followed by a plain dotted version, so the release page built from it is the real one.
+    """
+    reply = _fetch(transport, LATEST_RELEASE_URL, MAX_SMALL_BYTES)
+    _require_ok(reply, "the latest release")
+    try:
+        data = json.loads(reply.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise Refused("The latest release could not be read.") from None
+    if not isinstance(data, dict) or data.get("draft") is True:
+        raise Refused("The latest release is not a published release.")
+    tag = data.get("tag_name")
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        raise Refused(_TAG_REFUSED)
+    version = tag[1:]
+    parse_version(version)
+    return version
+
+
+def check_for_update(current_version: str, transport: Transport) -> UpdateCheck:
+    """Say whether GitHub publishes a release newer than current_version. Downloads nothing and installs nothing.
+
+    The one request is LATEST_RELEASE_URL, the release JSON, with no file and at most MAX_SMALL_BYTES. A redirect is
+    followed only to an allowed host. The result is one of:
+
+    - UpdateNotice(version, release_page_url) when the latest release is newer than current_version,
+    - UpToDate() when it is not,
+    - Offline(reason) when GitHub cannot be reached or is failing for now,
+    - Refused(reason) when current_version or the reply is not acceptable.
+
+    Each failure is returned, not raised. Nothing on this path reaches check_and_stage, install_update, or any other
+    code that downloads or extracts a zip.
+    """
+    try:
+        parse_version(current_version)
+        version = _latest_version(transport)
+    except Offline as exc:
+        return Offline(exc.reason)
+    except Refused as exc:
+        return Refused(exc.reason)
+    if not is_newer(version, current_version):
+        return UpToDate()
+    return UpdateNotice(version=version, release_page_url=release_page_url_for(version))
 
 
 # --- the real transport ---------------------------------------------------------------------------------
