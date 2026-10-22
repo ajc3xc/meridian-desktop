@@ -1,4 +1,4 @@
-"""The Tools panel: which Meridian tools each AI client has set up, and which are live right now.
+"""The Tools panel: which Meridian tools each AI client has set up, and whether the local server and tunnel are live.
 
 It shows the rows that tools_status.read_tools_status returns: each Meridian entry in each client's
 settings, the local Meridian server and the tunnel. Each row says whether the tool is configured and
@@ -6,7 +6,7 @@ whether it is live, with one plain sentence on what to do.
 
 Every read runs on the thread pool, through the injected status provider, so the window stays responsive.
 The panel reads once when it is first shown, and again each time Refresh is pressed. A second press while
-a read is running does nothing. There is no start, stop or install control: this panel starts no process.
+a read is running does nothing. There is no start, stop or install control, and no tool is started or stopped.
 """
 
 from __future__ import annotations
@@ -31,13 +31,13 @@ from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 HEADING_TEXT = "Tools"
 INTRO_TEXT = (
-    "Which Meridian tools each AI client has set up, and which are live right now. The AI clients start "
-    "their own tools. This panel only reads their settings and checks the local server and the tunnel. "
-    "It starts, stops and installs nothing."
+    "Which Meridian tools are set up for each AI client, and whether the local Meridian server and the tunnel "
+    "are live. The AI clients start their own tools, so this panel cannot see whether those are running. "
+    "No tool is started or stopped, and nothing is written."
 )
 REFRESH_TEXT = "Refresh"
-WAITING_TEXT = "Press Refresh to read the tools. Nothing is started or written."
-CHECKING_TEXT = "Checking the tools. Nothing is started or written."
+WAITING_TEXT = "Press Refresh to read the tools. No tool is started or stopped, and nothing is written."
+CHECKING_TEXT = "Checking the tools. No tool is started or stopped, and nothing is written."
 NO_RESULT_TEXT = "The tools check gave no result."
 COLUMNS = ("Client", "Tool", "Status", "Configured", "Live", "What to do")
 

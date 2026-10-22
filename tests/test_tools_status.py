@@ -12,17 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from meridian_desktop import client_setup_runner as csr
 from meridian_desktop import local_client, tools_status, tunnel_status
 from meridian_desktop.client_setup_runner import CORE_MODULE, CommandOutput
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.settings_store import DEFAULT_LOCAL_URL, Settings, SettingsStore
 from meridian_desktop.tools_status import (
+    CHECKOUT_INVALID_TEXT,
+    CHECKOUT_NOT_SET_TEXT,
     ENTRIES_TOOL,
     ENTRY_CHANGED_TEXT,
     ENTRY_IN_PLACE_TEXT,
     ENTRY_MISSING_TEXT,
+    NO_PLAN_TEXT,
     NOT_COVERED_TEXT,
+    PYTHON_MISSING_TEXT,
     SERVER_NO_ANSWER_TEXT,
     SERVER_NOT_MERIDIAN_TEXT,
     SERVER_NOT_RUNNING_TEXT,
@@ -32,6 +35,7 @@ from meridian_desktop.tools_status import (
     STATUS_LIVE_UNCHECKED,
     STATUS_NOT_CONFIGURED,
     STATUS_NOT_LIVE,
+    STATUS_NOT_RUNNING,
     STATUS_NOT_SET,
     STATUS_UNCHECKED,
     TUNNEL_NOT_CHECKED_TEXT,
@@ -39,6 +43,7 @@ from meridian_desktop.tools_status import (
     UNCHECKED,
     NO,
     NOT_SET,
+    NOT_STARTED,
     YES,
     PlanOnlyRefused,
     PlanOnlyRunner,
@@ -171,6 +176,12 @@ def all_cell_text(status: tools_status.ToolsStatus) -> str:
     return json.dumps([list(row.cells()) for row in status.rows])
 
 
+def visible_text(status: tools_status.ToolsStatus) -> str:
+    """Every row's cells and the status line, as plain text. A path check reads this, never JSON, so backslashes stay as written."""
+    lines = [" | ".join(row.cells()) for row in status.rows]
+    return "\n".join(lines + [status_line(status)])
+
+
 # ----------------------------------------------------------- plan only
 
 
@@ -217,6 +228,60 @@ def test_the_server_and_tunnel_rows_are_still_shown_when_the_core_is_not_set(tmp
     assert tunnel_row(status).live == UNCHECKED
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["py", "-m", CORE_MODULE, "remove", "--client", "codex"],
+        ["py", "-m", CORE_MODULE, "apply", "--client", "codex", "--yes"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "all", "apply"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "codex", "extra"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "codex", "--yes"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "claude-code"],
+        ["py", "-m", CORE_MODULE, "plan"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "all", "--client", "codex"],
+    ],
+)
+def test_the_plan_guard_refuses_a_remove_a_trailing_word_or_any_other_list(tmp_path, argv):
+    seen: list[list[str]] = []
+
+    def inner(args, cwd, timeout):
+        seen.append(list(args))
+        return CommandOutput(0, "", "")
+
+    plan = PlanOnlyRunner(inner)
+    with pytest.raises(PlanOnlyRefused):
+        plan(argv, tmp_path, 5)
+    assert seen == []
+
+
+@pytest.mark.parametrize("target", ["all", "codex", "claude-desktop"])
+def test_the_plan_guard_runs_exactly_the_plan_argv_the_module_builds(tmp_path, target):
+    seen: list[list[str]] = []
+
+    def inner(args, cwd, timeout):
+        seen.append(list(args))
+        return CommandOutput(0, "", "")
+
+    plan = PlanOnlyRunner(inner, python="py")
+    argv = ["py", "-m", CORE_MODULE, "plan", "--client", target]
+    plan(argv, tmp_path, 5)
+    assert seen == [argv]
+    assert [recorded for recorded, _output in plan.outputs] == [tuple(argv)]
+
+
+def test_the_plan_guard_refuses_a_program_other_than_the_core_python(tmp_path):
+    seen: list[list[str]] = []
+
+    def inner(args, cwd, timeout):
+        seen.append(list(args))
+        return CommandOutput(0, "", "")
+
+    plan = PlanOnlyRunner(inner, python="py")
+    with pytest.raises(PlanOnlyRefused):
+        plan(["cmd", "-m", CORE_MODULE, "plan", "--client", "all"], tmp_path, 5)
+    assert seen == []
+
+
 # ----------------------------------------------------------- core not set
 
 
@@ -229,17 +294,56 @@ def test_unset_core_gives_a_plain_not_set_state_and_no_process_starts(tmp_path):
     assert len(codex) == 1
     assert codex[0].configured == NOT_SET
     assert codex[0].status == STATUS_NOT_SET
-    assert codex[0].detail == csr.NOT_SET_CHECKOUT_TEXT
-    assert status.message == csr.NOT_SET_CHECKOUT_TEXT
+    assert codex[0].cells()[2:5] == ("Not checked", "Not checked", "Not checked")
+    assert codex[0].detail == CHECKOUT_NOT_SET_TEXT
+    assert status.message == CHECKOUT_NOT_SET_TEXT
+    assert all(row.status == "Not checked" for row in rows_for(status, "Codex") + rows_for(status, "Claude Desktop"))
+    assert "Not set" not in visible_text(status)
 
 
-def test_missing_checkout_folder_is_not_set_with_the_path(tmp_path):
+def test_missing_checkout_folder_gives_one_fixed_sentence_and_never_the_path(tmp_path):
     missing = tmp_path / "gone"
     store = store_with(tmp_path, checkout=str(missing), python=str(tmp_path))
     status = read_tools_status(store, run=FakeRun(responder({})), probe=FakeProbe(), clock=clock)
     codex = rows_for(status, "Codex")[0]
     assert codex.status == STATUS_NOT_SET
-    assert str(missing) in codex.detail
+    assert codex.detail == CHECKOUT_INVALID_TEXT
+    assert status.message == CHECKOUT_INVALID_TEXT
+    assert str(missing) not in visible_text(status)
+
+
+def test_a_folder_that_is_not_a_core_checkout_is_invalid_and_hides_the_path(tmp_path):
+    folder = tmp_path / "not-core"
+    folder.mkdir()
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    store = store_with(tmp_path, checkout=str(folder), python=str(python))
+    run = FakeRun(responder({}))
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+    assert run.argvs == []
+    assert rows_for(status, "Codex")[0].detail == CHECKOUT_INVALID_TEXT
+    assert status.message == CHECKOUT_INVALID_TEXT
+    assert str(folder) not in visible_text(status)
+
+
+def test_a_python_program_that_is_missing_says_so_and_hides_the_path(tmp_path, core):
+    checkout, _python = core
+    gone = tmp_path / "gone" / "python.exe"
+    store = store_with(tmp_path, checkout=str(checkout), python=str(gone))
+    run = FakeRun(responder({}))
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+    assert run.argvs == []
+    assert rows_for(status, "Codex")[0].detail == PYTHON_MISSING_TEXT
+    assert status.message == PYTHON_MISSING_TEXT
+    assert str(gone) not in visible_text(status)
+
+
+def test_an_unset_python_says_it_is_missing(tmp_path, core):
+    checkout, _python = core
+    store = store_with(tmp_path, checkout=str(checkout), python="")
+    status = read_tools_status(store, run=FakeRun(responder({})), probe=FakeProbe(), clock=clock)
+    assert rows_for(status, "Codex")[0].detail == PYTHON_MISSING_TEXT
+    assert status.message == PYTHON_MISSING_TEXT
 
 
 def test_unset_core_still_says_claude_code_is_not_covered(tmp_path):
@@ -343,10 +447,32 @@ def test_a_core_error_for_one_client_leaves_the_others_readable(tmp_path, core):
     codex = rows_for(status, "Codex")
     assert len(codex) == 1
     assert codex[0].configured == UNCHECKED
-    assert codex[0].detail == "codex settings file is not readable"
+    assert codex[0].detail == NO_PLAN_TEXT
+    assert "codex settings file is not readable" not in visible_text(status)
     desktop = rows_for(status, "Claude Desktop")
     assert [row.tool for row in desktop] == ["meridian-docs"]
     assert desktop[0].configured == YES
+
+
+def test_a_core_error_that_names_an_absolute_path_never_shows_the_path(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    locked = tmp_path / "codex" / "config.toml"
+    message = f"cannot read {locked}: access denied"
+    run = FakeRun(
+        responder(
+            {
+                "codex": core_error(message),
+                "claude-desktop": entry("claude-desktop", tmp_path / "desktop.json", "unchanged", unchanged=["meridian-docs"]),
+            },
+            whole=core_error(message),
+        )
+    )
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+    assert rows_for(status, "Codex")[0].detail == NO_PLAN_TEXT
+    assert message not in visible_text(status)
+    assert str(locked) not in visible_text(status)
+    assert str(tmp_path) not in visible_text(status)
 
 
 def test_a_failed_plan_says_why_and_shows_nothing_as_configured(tmp_path, core):
@@ -456,6 +582,29 @@ def test_a_stopped_tunnel_is_configured_but_not_live_and_says_how_to_start_it_by
     assert "codebase-memory" in row.detail
 
 
+@pytest.mark.parametrize("child", ["stopped", "crashed"])
+def test_a_tunnel_that_was_stopped_or_crashed_stays_configured_and_not_live(tmp_path, child):
+    store = store_with(tmp_path)
+    status_call = tunnel_call(RunnerResult(verb="status", ok=True, payload={"scope": "tunnel", "child": {"state": child}}))
+    status = read_tools_status(store, run=FakeRun(responder({})), probe=FakeProbe(), tunnel_status_call=status_call, clock=clock)
+    row = tunnel_row(status)
+    assert (row.configured, row.live) == (YES, NO)
+    assert row.cells()[3] == "Yes"
+    assert row.status == STATUS_NOT_LIVE
+
+
+def test_a_tunnel_the_runner_has_no_record_of_is_not_checked_and_not_running(tmp_path):
+    store = store_with(tmp_path)
+    status_call = tunnel_call(RunnerResult(verb="status", ok=True, payload={"scope": "tunnel", "child": {"state": "not_started"}}))
+    status = read_tools_status(store, run=FakeRun(responder({})), probe=FakeProbe(), tunnel_status_call=status_call, clock=clock)
+    row = tunnel_row(status)
+    assert (row.configured, row.live) == (NOT_STARTED, NO)
+    assert row.cells()[2:5] == (STATUS_NOT_RUNNING, "Not checked", "No")
+    assert row.status == "Not running"
+    assert tunnel_status.START_COMMAND in row.detail
+    assert "no record of a tunnel process" in row.detail
+
+
 def test_an_unknown_tunnel_is_never_shown_as_live(tmp_path):
     store = store_with(tmp_path)
     status_call = tunnel_call(RunnerResult(verb="status", ok=False, error_code=ERR_NOT_AVAILABLE, error_message=NOT_AVAILABLE_MESSAGE))
@@ -500,6 +649,7 @@ def test_no_tunnel_call_wired_means_the_tunnel_is_not_checked(tmp_path):
         (NO, NO, STATUS_NOT_CONFIGURED),
         (UNCHECKED, UNCHECKED, STATUS_UNCHECKED),
         (NOT_SET, UNCHECKED, STATUS_NOT_SET),
+        (NOT_STARTED, NO, STATUS_NOT_RUNNING),
     ],
 )
 def test_each_row_state_has_one_status_word(configured, live, word):
@@ -529,7 +679,35 @@ def test_every_row_is_a_plain_sentence_with_no_placeholder_left(tmp_path, core):
     assert "Not built yet" not in text
 
 
+def test_a_deeply_nested_plan_reply_never_escapes_the_read(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    deep = "[" * 200_000 + "]" * 200_000
+    run = FakeRun(lambda argv: CommandOutput(0, deep, ""))
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+    assert "RecursionError" in status.message
+    assert server_row(status).live == YES
+    assert status.checked_at == CLOCK
+
+
 # ----------------------------------------------------------- source
+
+
+def test_the_copy_names_only_what_the_refresh_does():
+    panel = REPO / "meridian_desktop" / "ui" / "tools_panel.py"
+    module = REPO / "meridian_desktop" / "tools_status.py"
+    texts = {path: path.read_text(encoding="utf-8") for path in (module, panel)}
+    banned = (
+        "starts no process",
+        "starts, stops and installs",
+        "starts, stops, installs",
+        "Nothing is started",
+        "Nothing here starts",
+    )
+    for path, text in texts.items():
+        for phrase in banned:
+            assert phrase not in text, (path.name, phrase)
+    assert "No tool is started or stopped, and nothing is written." in texts[panel]
 
 
 def test_the_module_imports_no_qt():

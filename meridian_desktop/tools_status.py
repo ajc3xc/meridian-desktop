@@ -1,17 +1,19 @@
-"""Which Meridian tools each AI client has set up, and which are live right now. Pure Python: no Qt import.
+"""Which Meridian tools each AI client has set up, and whether the local server and the tunnel are live.
+Pure Python: no Qt import.
 
 The desktop runs no MCP server itself: the AI clients start them. So this module reads only what the
 desktop can check, and changes nothing:
 
 - each client's Meridian entries, from the Meridian core's client setup plan (ClientSetupRunner.check).
-  The plan is the only command this module runs. A wrapper around the injected runner refuses any other
-  argument list before it reaches the runner, so this read cannot apply or remove an entry.
+  The plan is the only process this module runs. A wrapper around the injected runner refuses every
+  argument list except the plan commands the core setup builds, so this read cannot apply or remove an entry.
 - the local Meridian server: GET /health through local_client.probe_health, on a loopback address only.
 - the tunnel: one read-only status call through tunnel_status.read_tunnel_status.
 
 An AI client starts its own tools, so the desktop cannot see whether one of its entries is running. Those
 rows say "Not checked" for live. Every row carries one plain sentence on what to do. No secret or token is
-read or kept, and an exception's text is never shown, only its class name.
+read or kept, and an exception's text is never shown, only its class name. The core's own error text is
+never shown either, and a core checkout or Python path never reaches a row or the status line.
 """
 
 from __future__ import annotations
@@ -37,25 +39,36 @@ from meridian_desktop.client_setup_runner import (
     unchecked_rows,
 )
 from meridian_desktop.runner_client import RunnerResult
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 
 TIME_TEMPLATE = "Time checked: {}."
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# The configured and live columns each take one of these. Live never takes NOT_SET.
+# The configured and live columns each take one of these. Live never takes NOT_SET or NOT_STARTED.
 YES = "yes"
 NO = "no"
 UNCHECKED = "unchecked"
 NOT_SET = "not_set"
-COLUMN_TEXT = {YES: "Yes", NO: "No", UNCHECKED: "Not checked", NOT_SET: "Not set"}
+NOT_STARTED = "not_started"
+COLUMN_TEXT = {
+    YES: "Yes",
+    NO: "No",
+    UNCHECKED: "Not checked",
+    # The desktop never read these client settings: no usable core checkout or Python was set.
+    NOT_SET: "Not checked",
+    # The tunnel runner has no record of a tunnel process, so the desktop cannot say whether one is configured.
+    NOT_STARTED: "Not checked",
+}
 
 # The status word for a row, from its configured and live columns.
 STATUS_LIVE = "Live"
 STATUS_NOT_LIVE = "Configured but not live"
 STATUS_LIVE_UNCHECKED = "Configured, live not checked"
 STATUS_NOT_CONFIGURED = "Not configured"
+STATUS_NOT_RUNNING = "Not running"
 STATUS_UNCHECKED = "Not checked"
-STATUS_NOT_SET = "Not set"
+# A client row the desktop never read (no usable core location). It reads as not checked, never "Not set".
+STATUS_NOT_SET = "Not checked"
 
 ENTRIES_TOOL = "Meridian entries"
 THIS_COMPUTER = "This computer"
@@ -76,7 +89,14 @@ NOT_COVERED_TEXT = (
     "entries. Check {label}'s own settings for Meridian tools."
 )
 NO_RESULT_TEXT = "The Meridian core did not report on {label}. Press Refresh to check again."
+NO_PLAN_TEXT = "The core check did not return a plan. See the Logs tab."
 CHECK_FAILED_TEXT = "The Meridian setup check failed ({name}). Nothing was written."
+
+# The one sentence shown when the core checkout or Python cannot be used. Each names the part at fault and
+# never the path: the runner's own message holds the machine-local path, and that never reaches the panel.
+CHECKOUT_NOT_SET_TEXT = "The Meridian core checkout is not set. Choose it in Settings."
+CHECKOUT_INVALID_TEXT = "The Meridian core checkout is not valid. Choose it again in Settings."
+PYTHON_MISSING_TEXT = "The Python interpreter is missing. Choose it again in Settings."
 
 SERVER_RUNNING_TEXT = "The local Meridian server answers on this computer."
 SERVER_NOT_RUNNING_TEXT = (
@@ -100,13 +120,26 @@ _HEALTH_TEXT = {
     local_client.HEALTH_NOT_MERIDIAN: SERVER_NOT_MERIDIAN_TEXT,
 }
 
-PLAN_PREFIX = ("-m", CORE_MODULE, "plan")
+# The tunnel child state the runner reports for a tunnel it has no record of.
+NOT_STARTED_CHILD = "not_started"
+
+# The argument lists this module runs, after the program path. Each is the core's plan command, either for
+# every client at once (ClientSetupRunner.check) or for one core client (its per-client fallback).
+PLAN_TAILS = frozenset(
+    {
+        ("-m", CORE_MODULE, "plan", "--client", "all"),
+        ("-m", CORE_MODULE, "plan", "--client", "codex"),
+        ("-m", CORE_MODULE, "plan", "--client", "claude-desktop"),
+    }
+)
 
 
 def status_word(configured: str, live: str) -> str:
     """The status word for one row. Configured decides first, then live."""
     if configured == NOT_SET:
         return STATUS_NOT_SET
+    if configured == NOT_STARTED:
+        return STATUS_NOT_RUNNING
     if configured == UNCHECKED:
         return STATUS_UNCHECKED
     if configured == NO:
@@ -146,7 +179,10 @@ class ToolRow:
 
 @dataclass(frozen=True)
 class ToolsStatus:
-    """One read of every tool row. ``message`` is the plan's plain line. ``checked_at`` is None if no read finished."""
+    """One read of every tool row.
+
+    ``message`` is the panel's plain line about the check. ``checked_at`` is None if no read finished.
+    """
 
     rows: tuple[ToolRow, ...]
     message: str = ""
@@ -165,20 +201,32 @@ class PlanOnlyRefused(RuntimeError):
     """The runner was asked for something other than the core's plan. The call never reaches the runner."""
 
 
+def _is_plan(argv: tuple[str, ...], python: str | None) -> bool:
+    """True only for the program, then exactly one of PLAN_TAILS. When ``python`` is known, it must be the program."""
+    if not argv or argv[1:] not in PLAN_TAILS:
+        return False
+    return python is None or argv[0] == python
+
+
 class PlanOnlyRunner:
     """The injected runner, limited to the core's plan. It keeps each plan's raw output so the entry names can be read.
+
+    An argument list runs only when it is exactly one of PLAN_TAILS after the program path, and, when ``python``
+    is given, that program is ``python``. Anything else is refused before the runner is called: a remove or
+    apply verb, a trailing word, a flag such as --yes, or a client the plan does not name.
 
     The runner's typed result carries only each client's state, not the entry names, so the names are read
     from the plan's own JSON here. Nothing else is kept.
     """
 
-    def __init__(self, run: CommandRunner) -> None:
+    def __init__(self, run: CommandRunner, python: str | None = None) -> None:
         self._run = run
+        self._python = python
         self.outputs: list[tuple[tuple[str, ...], CommandOutput]] = []
 
     def __call__(self, argv: Sequence[str], cwd: Path, timeout: int) -> CommandOutput:
         args = tuple(argv)
-        if args[1:4] != PLAN_PREFIX or "--yes" in args:
+        if not _is_plan(args, self._python):
             raise PlanOnlyRefused("only the Meridian core's plan command is run here")
         output = self._run(list(args), cwd, timeout)
         self.outputs.append((args, output))
@@ -208,11 +256,12 @@ def _plan_entries(outputs: Sequence[tuple[tuple[str, ...], CommandOutput]]) -> d
     """Read the entry names from each successful plan's JSON. A plan that does not read is skipped."""
     found: dict[str, _Entries] = {}
     for argv, output in outputs:
-        if argv[1:4] != PLAN_PREFIX or output.returncode != 0:
+        if not _is_plan(argv, None) or output.returncode != 0:
             continue
         try:
             data = json.loads(output.stdout)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A deeply nested reply raises RecursionError, not ValueError. local_client._json_object catches it too.
             continue
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
@@ -239,10 +288,10 @@ def _entry_row(label: str, name: str, entries: _Entries) -> ToolRow:
 
 
 def _covered_rows(row: ClientRow, entries: _Entries | None) -> list[ToolRow]:
-    """Rows for one client the core covers. A client the plan could not read says why, and is not configured."""
+    """Rows for one client the core covers. A client the plan could not read gets fixed words and is not configured."""
     label = row.label
     if row.state == NOT_READABLE:
-        return [ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, row.detail or NO_RESULT_TEXT.format(label=label))]
+        return [ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, NO_PLAN_TEXT)]
     if row.state not in (IN_PLACE, WOULD_CHANGE, MISSING):
         return [ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, NO_RESULT_TEXT.format(label=label))]
     if entries is not None and entries.names:
@@ -252,17 +301,38 @@ def _covered_rows(row: ClientRow, entries: _Entries | None) -> list[ToolRow]:
     return [ToolRow(label, ENTRIES_TOOL, NO, UNCHECKED, ENTRY_MISSING_TEXT.format(label=label))]
 
 
-def _client_rows(check: CheckResult, entries: dict[str, _Entries]) -> list[ToolRow]:
+def _client_rows(check: CheckResult, entries: dict[str, _Entries], not_ready: str) -> list[ToolRow]:
     rows: list[ToolRow] = []
     for client_row in check.rows:
         label = client_row.label
         if not client_row.covered:
             rows.append(ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, NOT_COVERED_TEXT.format(label=label)))
         elif not check.configured:
-            rows.append(ToolRow(label, ENTRIES_TOOL, NOT_SET, UNCHECKED, check.message))
+            rows.append(ToolRow(label, ENTRIES_TOOL, NOT_SET, UNCHECKED, not_ready))
         else:
             rows.extend(_covered_rows(client_row, entries.get(client_row.client)))
     return rows
+
+
+def _not_ready_text(settings: Settings) -> str:
+    """The one fixed sentence for a core location the runner would refuse.
+
+    It mirrors client_setup_runner's check order, so the sentence names the same part the refusal names.
+    Only the part is kept, never the runner's message, because that message holds the machine-local path.
+    """
+    checkout = settings.core_checkout.strip()
+    python = settings.core_python.strip()
+    if not checkout:
+        return CHECKOUT_NOT_SET_TEXT
+    if not python:
+        return PYTHON_MISSING_TEXT
+    folder = Path(checkout)
+    if not folder.is_dir() or not (folder / "meridian" / "__init__.py").is_file():
+        return CHECKOUT_INVALID_TEXT
+    if not Path(python).is_file():
+        return PYTHON_MISSING_TEXT
+    # The runner refused for a reason this mirror does not see (for example, a change between the two reads).
+    return CHECKOUT_INVALID_TEXT
 
 
 def _local_server_row(settings_store: SettingsStore, probe: Callable[[str], str]) -> ToolRow:
@@ -282,15 +352,40 @@ def _local_server_row(settings_store: SettingsStore, probe: Callable[[str], str]
     return ToolRow(THIS_COMPUTER, SERVER_TOOL, YES, NO, _HEALTH_TEXT.get(health, SERVER_NO_ANSWER_TEXT))
 
 
+def _reported_child_state(replies: list[object]) -> str | None:
+    """The tunnel state the last reply named, if it is an ok status reply. Read only to tell 'not started' apart."""
+    if not replies:
+        return None
+    reply = replies[-1]
+    if not isinstance(reply, RunnerResult) or not reply.ok or not isinstance(reply.payload, dict):
+        return None
+    child = reply.payload.get("child")
+    state = child.get("state") if isinstance(child, dict) else None
+    return state if isinstance(state, str) else None
+
+
 def _tunnel_row(status_call: Callable[[str], RunnerResult] | None, clock: Callable[[], datetime]) -> ToolRow:
-    """The tunnel from one read-only status call. Only RUNNING is live; an unknown answer is never shown as live."""
+    """The tunnel from one read-only status call. Only RUNNING is live; an unknown answer is never shown as live.
+
+    The mapping is tunnel_status's. The reply is only recorded, so a 'not started' reply, which means the runner
+    has no record of a tunnel process, can be told apart from a stopped or crashed one.
+    """
     if status_call is None:
         return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, UNCHECKED, UNCHECKED, TUNNEL_NOT_CHECKED_TEXT)
-    result = tunnel_status.read_tunnel_status(status_call, clock=clock)
+    replies: list[object] = []
+
+    def recorded(scope: str) -> RunnerResult:
+        reply = status_call(scope)
+        replies.append(reply)
+        return reply
+
+    result = tunnel_status.read_tunnel_status(recorded, clock=clock)
     if result.state == tunnel_status.RUNNING:
         return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, YES, YES, result.reason)
     if result.state == tunnel_status.NOT_RUNNING:
         detail = " ".join((result.reason, tunnel_status.DEPENDENCY_TEXT, tunnel_status.BY_HAND_NOT_STARTED))
+        if _reported_child_state(replies) == NOT_STARTED_CHILD:
+            return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, NOT_STARTED, NO, detail)
         return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, YES, NO, detail)
     detail = " ".join((result.reason, tunnel_status.BY_HAND_CHECK))
     return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, UNCHECKED, UNCHECKED, detail)
@@ -308,30 +403,51 @@ def read_tools_status(
 
     ``run`` is the injected process runner (run_process by default). ``probe`` takes a base address and
     returns a health word (local_client.probe_health by default). ``tunnel_status_call`` is
-    RunnerClient.status, or a fake. Nothing here starts, stops, installs or writes.
+    RunnerClient.status, or a fake. No tool is started or stopped, and nothing is written.
     """
-    plan = PlanOnlyRunner(run if run is not None else client_setup_runner.run_process)
+    settings = settings_store.load().settings
+    plan = PlanOnlyRunner(
+        run if run is not None else client_setup_runner.run_process,
+        python=settings.core_python.strip(),
+    )
+    # A deeply nested plan reply raises RecursionError while the core parses it. RecursionError is an Exception,
+    # so this clause catches it, and _plan_entries catches it again for the names.
     try:
         check = ClientSetupRunner(settings_store, run=plan).check()
     except Exception as exc:  # noqa: BLE001 - the other rows must still be shown
         check = CheckResult(rows=unchecked_rows(), message=CHECK_FAILED_TEXT.format(name=exc.__class__.__name__))
-    rows = _client_rows(check, _plan_entries(plan.outputs))
+    message = check.message
+    not_ready = ""
+    if not check.configured:
+        try:
+            not_ready = _not_ready_text(settings)
+        except OSError:
+            not_ready = CHECKOUT_INVALID_TEXT
+        message = not_ready
+    rows = _client_rows(check, _plan_entries(plan.outputs), not_ready)
     rows.append(_local_server_row(settings_store, probe))
     rows.append(_tunnel_row(tunnel_status_call, clock))
-    return ToolsStatus(rows=tuple(rows), message=check.message, checked_at=clock())
+    return ToolsStatus(rows=tuple(rows), message=message, checked_at=clock())
 
 
 __all__ = [
+    "CHECKOUT_INVALID_TEXT",
+    "CHECKOUT_NOT_SET_TEXT",
     "COLUMN_TEXT",
     "ENTRIES_TOOL",
     "NO",
     "NOT_SET",
+    "NOT_STARTED",
+    "NO_PLAN_TEXT",
+    "PLAN_TAILS",
+    "PYTHON_MISSING_TEXT",
     "PlanOnlyRefused",
     "PlanOnlyRunner",
     "STATUS_LIVE",
     "STATUS_LIVE_UNCHECKED",
     "STATUS_NOT_CONFIGURED",
     "STATUS_NOT_LIVE",
+    "STATUS_NOT_RUNNING",
     "STATUS_NOT_SET",
     "STATUS_UNCHECKED",
     "ToolRow",

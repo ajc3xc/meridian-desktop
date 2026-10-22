@@ -185,8 +185,18 @@ def test_a_provider_that_gives_no_status_says_so(qtbot):
 
 def test_before_any_read_the_panel_says_to_press_refresh(qtbot):
     panel = _panel(qtbot, lambda: _ready())
-    assert _status_text(panel) == "Press Refresh to read the tools. Nothing is started or written."
+    assert _status_text(panel) == "Press Refresh to read the tools. No tool is started or stopped, and nothing is written."
     assert _table(panel).rowCount() == 0
+
+
+def test_the_headline_says_what_is_set_up_and_what_is_live_without_calling_clients_live(qtbot):
+    panel = _panel(qtbot, lambda: _ready())
+    intro = panel.findChild(QLabel, "tools-intro").text()
+    assert "set up for each AI client" in intro
+    assert "the local Meridian server and the tunnel are live" in intro
+    assert "live right now" not in intro
+    assert "starts, stops and installs" not in intro
+    assert "No tool is started or stopped, and nothing is written." in intro
 
 
 def test_every_label_is_selectable(qtbot):
