@@ -12,15 +12,22 @@ only network calls, apart from the update check below, are loopback calls: to th
 server at the local_url setting, to the local LaTeX engine at the engine_url setting, to the local
 Zotero API on 127.0.0.1:23119,
 and to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
-when a tab is first shown and when a button is pressed. The Services check and the Logs
-read run only when their button is pressed, and the Tunnel tab makes no request. Hosted
-mode calls only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when no local
-server answers, and on the Test connection button in Settings.
+when a tab is first shown and when a button is pressed, except for the Sessions timer described below.
+The Services check and the Logs read run only when their button is pressed, and the Tunnel tab runs one
+read-only tunnel status call each time it is shown. Hosted mode calls only the hosted URL the owner sets:
+on the Projects tab, on the Sessions tab when it is first shown or its Refresh is pressed (for the project
+list, and for the sessions when no local server answers and a hosted token is saved), and on the Test
+connection button in Settings.
 
-The Sessions tab (read-only) lists the sessions of a project from the Projects tab's list. It reads the local
-server first. The Tools tab (read-only) shows which Meridian tools each AI client has set up, and whether the
-local server and the tunnel are live. Neither tab starts, stops or installs anything. Each reads when it is
-shown or when its Refresh is pressed, and the Sessions list also refreshes every 5 seconds while it is visible.
+The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
+and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
+chosen in the mode selector. While the tab stays visible, a 5-second timer reads only the local server, and only
+in local mode, for the picked project. The timer never reads the project list and never calls the hosted host,
+and when the local server does not answer it changes nothing on screen. Changing the picked project reads the
+local server the same way, in local mode only; in any other mode it clears the table and says to press Refresh.
+The Tools tab (read-only) shows which Meridian tools each AI client has set up, and whether the local server
+and the tunnel are live. It reads when it is first shown and when its Refresh button is pressed. Neither tab
+starts, stops or installs anything.
 
 At a real start, one update check runs on the thread pool. It asks GitHub for the latest release JSON and
 nothing else, and it shows a status-bar notice when a newer release is published. It is off when the
@@ -138,7 +145,8 @@ def _placeholder_page(
 
 
 class ProjectsUnavailable(Exception):
-    """The Projects resolver found no source to read. The Sessions tab shows only this class name, never a path."""
+    """The Projects resolver found no source to read. The Sessions tab then says the projects could not be read,
+    in plain words that name no class and no path."""
 
 
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
@@ -152,6 +160,15 @@ def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
 
     def read() -> str:
         return store.load().settings.local_url
+
+    return read
+
+
+def _saved_mode(store: SettingsStore) -> Callable[[], str]:
+    """The mode saved in Settings, read by the Sessions tab's timer. Runs on the worker thread, holds no window."""
+
+    def read() -> str:
+        return store.load().settings.mode
 
     return read
 
@@ -276,12 +293,14 @@ class MainWindow(QMainWindow):
                 self._settings_tab = SettingsTab(self._store, secrets=self._secrets, parent=page)
                 page.layout().insertWidget(0, self._settings_tab)
             elif name == "Sessions":
-                # Nothing is read on build. The list reads when the tab is shown, and again every 5 seconds while
-                # it stays visible. The three providers run on the worker thread, never on the UI thread.
+                # Nothing is read on build. The first show and the Refresh button read the project list and the
+                # sessions. While the tab stays visible, a 5-second timer reads only the local server, and only in
+                # local mode. The providers run on the worker thread, never on the UI thread, and hold no window.
                 page = SessionsPanel(
                     _saved_local_url(self._store),
                     _saved_hosted(self._store, self._secrets),
                     _saved_projects(self._store, self._sources),
+                    _saved_mode(self._store),
                     parent=self.tabs,
                 )
             elif name == "Tools":

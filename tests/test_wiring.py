@@ -220,6 +220,51 @@ def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settin
     assert "AGENT-NOTE-WIRING" not in text
 
 
+def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_there(
+    qtbot, settings_path, monkeypatch
+):
+    SettingsStore(settings_path).save(Settings(mode="hosted", local_url=LOCAL, hosted_url=HOSTED))
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    secrets.set_secret(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
+    local_calls = []
+    hosted_calls = []
+
+    def fake_local(base_url, project_id, *, transport=None, timeout=None):
+        local_calls.append(project_id)
+        return sessions_client.SessionsResult(
+            sessions_client.NOT_RUNNING, sessions_client.NOT_RUNNING_MESSAGE, sessions_client.SOURCE_LOCAL
+        )
+
+    def fake_hosted(base_url, project_id, token, *, transport=None, timeout=None):
+        hosted_calls.append((base_url, project_id))
+        row = sessions_client.SessionRow(name="auth-refactor", status="active", last_seen="", client="claude-code")
+        return sessions_client.SessionsResult(sessions_client.SESSIONS, "", sessions_client.SOURCE_HOSTED, (row,))
+
+    monkeypatch.setattr(sessions_panel, "local_sessions", fake_local)
+    monkeypatch.setattr(sessions_panel, "hosted_sessions", fake_hosted)
+    hosted_sources = DataSources(
+        probe=lambda url: HEALTH_NOT_RUNNING,
+        read_server=_unused,
+        read_file=_unused,
+        get_token=lambda: FAKE_TOKEN,
+        list_hosted=lambda url, token: [dict(PROJECT_ROW)],
+    )
+    window = _window(qtbot, settings_path, sources=hosted_sources, secrets=secrets, shown=True)
+    _select(window, "Sessions")
+    page = _page(window, "Sessions")
+    table = page.findChild(QTableWidget, "sessions-table")
+    qtbot.waitUntil(lambda: table.rowCount() == 1, timeout=5000)
+    assert page.findChild(QPushButton, "sessions-refresh") is not None
+    assert hosted_calls == [(HOSTED, PID)]  # the first show read the hosted sessions once
+
+    reads = (len(local_calls), len(hosted_calls))
+    for _ in range(3):
+        page._timer.timeout.emit()  # noqa: SLF001 - the timer's real connection
+        qtbot.waitUntil(lambda: page._in_flight is None, timeout=5000)  # noqa: SLF001
+    assert (len(local_calls), len(hosted_calls)) == reads  # three hosted-mode ticks read nothing
+    assert table.rowCount() == 1
+
+
 # ----------------------------------------------------------- Tools
 
 
