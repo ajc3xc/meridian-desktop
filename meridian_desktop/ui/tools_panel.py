@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, QThreadPool, Slot
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop.tools_status import ToolsStatus, status_line
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 HEADING_TEXT = "Tools"
@@ -66,14 +67,14 @@ class _RefreshJob(QRunnable):
 class ToolsPanel(QWidget):
     """The Tools page: one read-only table of tool rows, a status line with the time checked, and Refresh."""
 
-    _finished = Signal(object)
-
     def __init__(self, status_provider: Callable[[], ToolsStatus], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("tools-panel")
         self._provider = status_provider
         self._busy = False
         self._read_once = False
+        # Identifies this panel's reads. A plain object, so a job can hold it without holding the panel.
+        self._owner = object()
 
         heading = make_selectable(QLabel(HEADING_TEXT))
         heading.setObjectName("tools-heading")
@@ -108,7 +109,7 @@ class ToolsPanel(QWidget):
         layout.addWidget(self._table)
         layout.addWidget(self._status)
 
-        self._finished.connect(self._on_finished)
+        shared_delivery().delivered.connect(self._on_delivered)
 
     # ----------------------------------------------------------- reading
 
@@ -119,12 +120,21 @@ class ToolsPanel(QWidget):
         self._busy = True
         self._refresh.setEnabled(False)
         self._status.setText(CHECKING_TEXT)
-        QThreadPool.globalInstance().start(_RefreshJob(self._provider, self._finished.emit))
+        # The job holds the provider, the owner token and the shared delivery object. It never holds this panel.
+        owner = self._owner
+        delivery = shared_delivery()
+        QThreadPool.globalInstance().start(
+            _RefreshJob(self._provider, lambda status: delivery.delivered.emit(Delivered(owner, status)))
+        )
 
     @Slot(object)
-    def _on_finished(self, status: object) -> None:
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel is dropped here.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
         self._busy = False
         self._refresh.setEnabled(True)
+        status = item.value
         if not isinstance(status, ToolsStatus):
             status = ToolsStatus(rows=(), message=NO_RESULT_TEXT)
         self._show(status)

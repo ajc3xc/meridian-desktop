@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -64,6 +64,7 @@ from meridian_desktop.sessions_client import (
     last_seen_age,
     local_sessions,
 )
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 REFRESH_MS = 5000
@@ -162,13 +163,83 @@ class _RefreshJob(QRunnable):
             pass  # the panel was deleted while the read ran
 
 
+# ----------------------------------------------------------------- reads
+
+
+class _Reads:
+    """The reads the Sessions tab runs on the worker thread, through the providers Settings gives it.
+
+    It holds no widget. A read that is still running when the tab is deleted therefore never keeps the tab
+    alive, and never touches it. The tab holds one of these and hands its reads to the thread pool.
+    """
+
+    def __init__(
+        self,
+        local_url_provider: Callable[[], str],
+        hosted_provider: Callable[[], tuple[str, str | None]],
+        project_provider: Callable[[], Sequence[tuple[str, str]]],
+        mode_provider: Callable[[], str],
+        local_transport: Any,
+        hosted_transport: hosted_client.Transport | None,
+    ) -> None:
+        self._local_url = local_url_provider
+        self._hosted = hosted_provider
+        self._projects = project_provider
+        self._mode = mode_provider
+        self._local_transport = local_transport
+        self._hosted_transport = hosted_transport
+
+    def collect_full(self, generation: int, selected: str) -> _Snapshot:
+        """Runs on a worker. Lists the projects once, then reads the sessions of the chosen project."""
+        choices, failure = self._read_projects()
+        chosen = selected if choices is None else choose_project(selected, choices)
+        if not chosen:
+            if failure:
+                message = failure
+            elif choices == ():
+                message = NO_PROJECTS_TEXT
+            else:
+                message = PICK_TEXT
+            return _Snapshot(generation, choices, "", SessionsResult(NO_PROJECT, message))
+        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen))
+
+    def collect_local(self, generation: int, selected: str) -> _Snapshot:
+        """Runs on a worker. A local read: the local server only, for the picked project, and only in local mode.
+
+        It never lists the projects and never calls the hosted host. When the local server does not answer, there is
+        nothing new to show, so the result is None and the table and status line keep what they show.
+        """
+        if not selected or self._mode() != LOCAL_MODE:
+            return _Snapshot(generation, None, "", None)
+        result = local_sessions(self._local_url(), selected, transport=self._local_transport)
+        if result.state == NOT_RUNNING:
+            return _Snapshot(generation, None, selected, None)
+        return _Snapshot(generation, None, selected, result)
+
+    def _read_projects(self) -> tuple[tuple[tuple[str, str], ...] | None, str]:
+        """(choices, "") on success. (None, message) when the project list could not be read."""
+        try:
+            pairs = [(pid, name) for pid, name in self._projects() if isinstance(pid, str) and pid.strip()]
+        except Exception:  # noqa: BLE001 - a failed read is named in plain words, never by class or value
+            return None, PROJECTS_FAILED_TEXT
+        return tuple((pid.strip(), _plain(name) or pid.strip()) for pid, name in pairs), ""
+
+    def _read_sessions(self, project_id: str) -> SessionsResult:
+        """The local server first. Hosted only when the local server is not running and a token is saved."""
+        local = local_sessions(self._local_url(), project_id, transport=self._local_transport)
+        if local.state != NOT_RUNNING:
+            return local
+        hosted_url, token = self._hosted()
+        if not isinstance(token, str) or not token.strip():
+            return local
+        return hosted_sessions(hosted_url, project_id, token, transport=self._hosted_transport)
+
+
 # ----------------------------------------------------------------- panel
 
 
 class SessionsPanel(QWidget):
     """The Sessions tab: the picked project's sessions. Read on first show and on Refresh, and locally on a timer."""
-
-    _finished = Signal(object)
 
     def __init__(
         self,
@@ -183,16 +254,20 @@ class SessionsPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("sessions-panel")
-        self._local_url = local_url_provider
-        self._hosted = hosted_provider
-        self._projects = project_provider
-        self._mode = mode_provider
-        self._local_transport = local_transport
-        self._hosted_transport = hosted_transport
+        self._reads = _Reads(
+            local_url_provider,
+            hosted_provider,
+            project_provider,
+            mode_provider,
+            local_transport,
+            hosted_transport,
+        )
+        # Identifies this tab's reads. A plain object, so a job can hold it without holding the tab.
+        self._owner = object()
         self._generation = 0
         self._in_flight: int | None = None
         self._read_once = False
-        self._finished.connect(self._on_finished)
+        shared_delivery().delivered.connect(self._on_delivered)
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -251,60 +326,27 @@ class SessionsPanel(QWidget):
         if full:
             self._refresh.setEnabled(False)
 
+        # The job holds the reads, the owner token and the shared delivery object. It never holds this tab.
+        reads = self._reads
+        owner = self._owner
+        delivery = shared_delivery()
+
         def work() -> _Snapshot:
             if full:
-                return self._collect_full(generation, selected)
-            return self._collect_local(generation, selected)
+                return reads.collect_full(generation, selected)
+            return reads.collect_local(generation, selected)
 
-        QThreadPool.globalInstance().start(_RefreshJob(generation, work, self._finished.emit))
+        def deliver(snapshot: _Snapshot) -> None:
+            delivery.delivered.emit(Delivered(owner, snapshot))
 
-    def _collect_full(self, generation: int, selected: str) -> _Snapshot:
-        """Runs on a worker. Lists the projects once, then reads the sessions of the chosen project."""
-        choices, failure = self._read_projects()
-        chosen = selected if choices is None else choose_project(selected, choices)
-        if not chosen:
-            if failure:
-                message = failure
-            elif choices == ():
-                message = NO_PROJECTS_TEXT
-            else:
-                message = PICK_TEXT
-            return _Snapshot(generation, choices, "", SessionsResult(NO_PROJECT, message))
-        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen))
-
-    def _collect_local(self, generation: int, selected: str) -> _Snapshot:
-        """Runs on a worker. A local read: the local server only, for the picked project, and only in local mode.
-
-        It never lists the projects and never calls the hosted host. When the local server does not answer, there is
-        nothing new to show, so the result is None and the table and status line keep what they show.
-        """
-        if not selected or self._mode() != LOCAL_MODE:
-            return _Snapshot(generation, None, "", None)
-        result = local_sessions(self._local_url(), selected, transport=self._local_transport)
-        if result.state == NOT_RUNNING:
-            return _Snapshot(generation, None, selected, None)
-        return _Snapshot(generation, None, selected, result)
-
-    def _read_projects(self) -> tuple[tuple[tuple[str, str], ...] | None, str]:
-        """(choices, "") on success. (None, message) when the project list could not be read."""
-        try:
-            pairs = [(pid, name) for pid, name in self._projects() if isinstance(pid, str) and pid.strip()]
-        except Exception:  # noqa: BLE001 - a failed read is named in plain words, never by class or value
-            return None, PROJECTS_FAILED_TEXT
-        return tuple((pid.strip(), _plain(name) or pid.strip()) for pid, name in pairs), ""
-
-    def _read_sessions(self, project_id: str) -> SessionsResult:
-        """The local server first. Hosted only when the local server is not running and a token is saved."""
-        local = local_sessions(self._local_url(), project_id, transport=self._local_transport)
-        if local.state != NOT_RUNNING:
-            return local
-        hosted_url, token = self._hosted()
-        if not isinstance(token, str) or not token.strip():
-            return local
-        return hosted_sessions(hosted_url, project_id, token, transport=self._hosted_transport)
+        QThreadPool.globalInstance().start(_RefreshJob(generation, work, deliver))
 
     @Slot(object)
-    def _on_finished(self, snapshot: _Snapshot) -> None:
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another tab is dropped here, and so is one a newer read has superseded.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        snapshot = item.value
         if snapshot.generation != self._generation:
             return  # a newer read started after this one
         self._in_flight = None

@@ -5,13 +5,17 @@ thread it ran on, so a test can prove that a refresh runs off the UI thread, tha
 shown, and that a refused address sends nothing. The token is checked against every widget's visible text.
 """
 
+import gc
 import json
 import threading
+import weakref
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget
+import shiboken6
+from PySide6.QtCore import QThreadPool
+from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from meridian_desktop import hosted_client, sessions_client as sc
 from meridian_desktop.local_client import LocalClientError
@@ -677,3 +681,44 @@ def test_bad_local_address_never_makes_a_request(qtbot, base):
     panel.show()
     settle(qtbot, panel)
     assert local.calls == []
+
+
+def test_a_read_still_running_when_its_tab_is_deleted_does_not_keep_the_tab(qtbot):
+    """A tab deleted while its read still runs is freed on the GUI thread, because the read holds no tab.
+
+    The read used to hold the tab through a closure. When the pool ended the read on a worker, the worker dropped
+    the last reference, and the tab was freed off the GUI thread. The collector is off, so only reference counting
+    can free the tab here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def projects_held_at_the_gate():
+        entered.set()
+        gate.wait(5)
+        return [(PID, "Alpha")]
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = SessionsPanel(
+            lambda: LOCAL,
+            lambda: (HOSTED, None),
+            projects_held_at_the_gate,
+            lambda: "local",
+            local_transport=FakeLocal(),
+            hosted_transport=FakeHosted(),
+            parent=container,
+        )
+        panel.refresh()
+        assert entered.wait(5)  # the read has started and is held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the tab's widgets are deleted on the GUI thread while the read still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+    finally:
+        gate.set()
+        gc.enable()

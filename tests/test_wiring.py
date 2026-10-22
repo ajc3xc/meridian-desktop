@@ -6,11 +6,16 @@ URLs, and each opener is a fake that records the URLs it is given. The Sessions 
 status provider, so no core process starts.
 """
 
+import gc
 import json
+import threading
+import weakref
 from datetime import datetime
 
 import pytest
-from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget
+import shiboken6
+from PySide6.QtCore import QThreadPool
+from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop import sessions_client, updater
@@ -380,3 +385,37 @@ def test_no_transport_means_no_check_and_no_notice(qtbot, settings_path):
 
     assert not bar.check_finished
     assert bar.isHidden()
+
+
+def test_a_check_still_running_when_its_bar_is_deleted_does_not_keep_the_bar(qtbot):
+    """A bar deleted while its check still runs is freed on the GUI thread, because the check holds no bar.
+
+    The check emits to the shared delivery object, never to the bar's own signal, so a worker never touches a bar
+    that the GUI thread may have deleted. This is a guard: a check that captured the bar would keep it alive here.
+    The collector is off, so only reference counting can free the bar. The transport answers only after the gate.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    answer = FakeTransport(tag=NEWER_TAG)
+
+    def held_transport(url, max_bytes, dest):
+        entered.set()
+        gate.wait(5)
+        return answer(url, max_bytes, dest)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        bar = UpdateNoticeBar(APP_VERSION, held_transport, parent=container)
+        bar.start(enabled=True)
+        assert entered.wait(5)  # the check has started and is held at the gate
+        ref = weakref.ref(bar)
+        shiboken6.delete(container)  # the bar is deleted on the GUI thread while the check still runs
+        del bar
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+    finally:
+        gate.set()
+        gc.enable()

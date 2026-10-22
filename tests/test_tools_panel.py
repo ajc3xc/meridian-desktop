@@ -4,11 +4,14 @@ The status provider is a fake, so nothing reads a real settings file, runs the c
 Qt runs offscreen (conftest). The panel has no start, stop or install control, and these tests check that.
 """
 
+import gc
 import threading
+import weakref
 from datetime import datetime
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QAbstractItemView, QLabel, QPushButton, QTableWidget
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtWidgets import QAbstractItemView, QLabel, QPushButton, QTableWidget, QWidget
 
 from meridian_desktop.tools_status import (
     ENTRY_IN_PLACE_TEXT,
@@ -208,3 +211,36 @@ def test_every_label_is_selectable(qtbot):
     for label in labels:
         flags = label.textInteractionFlags()
         assert bool(flags & BY_MOUSE) and bool(flags & BY_KEYBOARD), label.objectName() or label.text()
+
+
+def test_a_read_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(qtbot):
+    """A panel deleted while its read still runs is freed on the GUI thread, because the read holds no panel.
+
+    The read emits to the shared delivery object, never to the panel's own signal, so a worker never touches a panel
+    that the GUI thread may have deleted. This is a guard: a read that captured the panel would keep it alive here.
+    The collector is off, so only reference counting can free the panel.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def held_provider() -> ToolsStatus:
+        entered.set()
+        gate.wait(5)
+        return _ready()
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = ToolsPanel(held_provider, parent=container)
+        panel.refresh()
+        assert entered.wait(5)  # the read has started and is held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the read still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+    finally:
+        gate.set()
+        gc.enable()
