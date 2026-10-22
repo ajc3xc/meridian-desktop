@@ -4,4 +4,6 @@ Allowed imports inside this package: PySide6, the standard library, and
 meridian_desktop itself. The Qt boundary is checked by tests/test_boundary.py.
 """
 
-__version__ = "0.1.0"
+from meridian_desktop.version import APP_VERSION
+
+__version__ = APP_VERSION
