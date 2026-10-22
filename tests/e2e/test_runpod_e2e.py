@@ -26,7 +26,8 @@ from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.runpod_panel import KEY_MISSING_TEXT, KEY_STORED_TEXT, POD_COLUMNS, RunPodPanel
 
 FAKE_KEY = "test-key-not-real"
-EXPECTED_PATHS = {"/health", "/compute/runpod/check", "/compute/runpod/pods"}
+# /projects is the Projects tab's read-only GET on the local server, made when the window first shows.
+EXPECTED_PATHS = {"/health", "/projects", "/compute/runpod/check", "/compute/runpod/pods"}
 NO_KEY_MESSAGE = (
     "No RunPod API key was found in the sources tried. Set RUNPOD_API_KEY, store the key "
     "in the keyring entry, or set up the runpodctl config."
