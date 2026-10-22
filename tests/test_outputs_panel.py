@@ -5,11 +5,14 @@ client and its typed states, with no socket opened. The fake records each call a
 so a test can prove that a search runs off the UI thread and that the panel sends nothing when it is built.
 """
 
+import gc
 import json
 import threading
+import weakref
 
 import pytest
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetSelectionRange,
+    QWidget,
 )
 
 from meridian_desktop import local_client, outputs_client as oc
@@ -441,3 +445,38 @@ def test_hit_row_marks_missing_provenance_as_not_reported_and_a_missing_canonica
         "C:/a.csv", "not reported", "not reported", "no", "none", "not reported", "not reported",
         "not reported", "not reported",
     )
+
+
+# ----------------------------------------------------------------- a panel deleted while its search runs
+
+
+def test_a_search_still_running_when_its_panel_is_deleted_touches_no_widget(qtbot, monkeypatch):
+    """A panel deleted while its search still runs is freed on the GUI thread, and its late answer touches no widget.
+
+    The search job holds the provider, the query, the owner token and the shared delivery object, never the panel.
+    So the panel is freed here on the GUI thread, and the late answer is dropped without the panel's update step
+    running. That step is replaced by a recorder, so the test can show that it never ran. The collector is off, so
+    only reference counting can free the panel.
+    """
+    gate = threading.Event()
+    fake = _fake(monkeypatch, reply=ok({"hits": [_hit()]}), release=gate)
+    applied = []
+    monkeypatch.setattr(OutputsPanel, "_finish", lambda self, answer: applied.append(answer))
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = OutputsPanel(lambda: LOCAL, container)
+        _named(panel, QLineEdit, "outputs-search-input").setText("fit")
+        _named(panel, QPushButton, "outputs-search-button").click()
+        qtbot.waitUntil(lambda: len(fake.calls) == 1, timeout=5000)  # the search has started, held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the search still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late answer reaches the event loop, and nothing raises
+        assert applied == []
+    finally:
+        gate.set()
+        gc.enable()

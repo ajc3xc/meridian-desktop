@@ -10,9 +10,11 @@ read-only and has the shared Copy action (Ctrl+C or the right-click menu).
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -39,6 +41,7 @@ from meridian_desktop.code_client import (
     SearchResult,
     Transport,
 )
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 SEARCH_LIMIT = DEFAULT_LIMIT
@@ -122,17 +125,30 @@ def snippet_text(snippet: str) -> str:
     return " ".join(snippet.split())
 
 
-class _SearchJob(QRunnable):
-    """Run ``work`` on the thread pool and deliver (result, failure_text).
+@dataclass(frozen=True)
+class _Answer:
+    """One finished search: the generation it was started under, and either its result or its failure text."""
 
-    Any exception is reduced to its class name, so no traceback or response text reaches the UI.
+    generation: int
+    result: Any
+    failure: str | None
+
+
+class _SearchJob(QRunnable):
+    """Run ``work`` on the thread pool and deliver an _Answer to the shared delivery object.
+
+    The job holds only its work, its owner token, its generation and the shared delivery object. It never holds the
+    tab, so a tab deleted while the search runs is never kept alive by the pool. Any exception is reduced to its
+    class name, so no traceback or response text reaches the UI.
     """
 
-    def __init__(self, work: Callable[[], Any], deliver: Callable[[tuple], None]) -> None:
+    def __init__(self, owner: object, generation: int, work: Callable[[], Any], delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._owner = owner
+        self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._delivery = delivery
 
     def run(self) -> None:
         result: Any = None
@@ -142,9 +158,15 @@ class _SearchJob(QRunnable):
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failure = SEARCH_FAILED_TEXT.format(exc.__class__.__name__)
         try:
-            self._deliver((result, failure))
+            self._delivery.delivered.emit(Delivered(self._owner, _Answer(self._generation, result, failure)))
         except RuntimeError:
-            pass  # the tab was deleted while the search ran
+            pass  # the shared delivery object is never deleted, so this is only a guard
+
+
+def _search_read(url_provider: Callable[[], str], transport: Transport | None, query: str) -> tuple[str, SearchResult]:
+    """Runs on a worker thread. The Local URL is read here, so the UI thread does no settings I/O."""
+    url = url_provider()
+    return url, code_client.search(url, query, limit=SEARCH_LIMIT, transport=transport)
 
 
 def _is_answer(result: object) -> bool:
@@ -153,8 +175,6 @@ def _is_answer(result: object) -> bool:
 
 class CodePanel(QWidget):
     """The Code tab: a search box over the local server's code index, with path:line results and copy."""
-
-    _search_ready = Signal(object)
 
     def __init__(
         self,
@@ -169,7 +189,10 @@ class CodePanel(QWidget):
         self._transport = transport
         self._searching = False
         self._pending_query = ""
-        self._search_ready.connect(self._on_search_ready)
+        # Identifies this tab's searches. A plain object, so a job can hold it without holding the tab.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -218,26 +241,34 @@ class CodePanel(QWidget):
             return
         self._searching = True
         self._pending_query = query
+        self._generation += 1
+        generation = self._generation
         self._search_button.setEnabled(False)
         self._results.setRowCount(0)
         self._status.setText(SEARCHING_TEXT)
-        QThreadPool.globalInstance().start(_SearchJob(lambda: self._run_search(query), self._search_ready.emit))
-
-    def _run_search(self, query: str) -> tuple[str, SearchResult]:
-        """Runs on a worker thread. The Local URL is read here, so the UI thread does no settings I/O."""
-        url = self._url_provider()
-        return url, code_client.search(url, query, limit=SEARCH_LIMIT, transport=self._transport)
+        # The job holds the provider, the transport, the query, the owner token, its generation and the shared
+        # delivery object. It never holds this tab.
+        work = partial(_search_read, self._url_provider, self._transport, query)
+        QThreadPool.globalInstance().start(_SearchJob(self._owner, generation, work, shared_delivery()))
 
     @Slot(object)
-    def _on_search_ready(self, payload: tuple) -> None:
-        result, failure = payload
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another tab is dropped here, and so is one a newer search superseded.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        answer = item.value
+        if not isinstance(answer, _Answer) or answer.generation != self._generation:
+            return
+        self._finish(answer)
+
+    def _finish(self, answer: _Answer) -> None:
         self._searching = False
         self._search_button.setEnabled(True)
         self._results.setRowCount(0)
-        if failure is not None or not _is_answer(result):
-            self._status.setText(failure or SEARCH_FAILED_TEXT.format("NoResult"))
+        if answer.failure is not None or not _is_answer(answer.result):
+            self._status.setText(answer.failure or SEARCH_FAILED_TEXT.format("NoResult"))
             return
-        url, outcome = result
+        url, outcome = answer.result
         if outcome.state == STATE_OK:
             self._fill_results(outcome.hits)
         self._status.setText(status_text(outcome, self._pending_query, url))
