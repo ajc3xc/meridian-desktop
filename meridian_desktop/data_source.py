@@ -17,7 +17,7 @@ state is shown on the top bar, not checked here, and a stopped tunnel does not c
 
 This module makes no network call and reads no file itself. Each outside effect is an
 injected callable in DataSources. The app passes the real functions (local_client.probe_health,
-a server reader, projects_reader.list_projects, token_store.get_token and hosted_client.list_projects),
+local_client.list_projects, projects_reader.list_projects, token_store.get_token and hosted_client.list_projects),
 and tests pass fakes. The token goes only to the hosted client. It never appears in a
 Resolution, a message or an error.
 

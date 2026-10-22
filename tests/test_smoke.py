@@ -5,10 +5,16 @@ the real home directory or reads the keychain. The one real database is a temp f
 """
 
 import dataclasses
+import gc
+import json
 import sqlite3
+import threading
+import weakref
 from pathlib import Path
 
 import pytest
+import shiboken6
+from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -457,16 +463,157 @@ def test_mode_change_reloads_the_projects_tab(qtbot, settings_path):
     qtbot.waitUntil(lambda: status.text() == NOT_SIGNED_IN_MESSAGE, timeout=5000)
 
 
-def test_unbuilt_server_reader_says_so(qtbot, settings_path):
-    """The running-server read is not built yet. Its state says so, and no network call is made for it."""
+def test_a_closed_window_is_freed_by_reference_counting(qtbot, settings_path):
+    """A closed window is freed when its last reference goes, not later by the cyclic collector.
+
+    The collector runs on whichever thread allocates. A window left for it could be freed on a pool
+    worker, which would delete its widgets off the GUI thread. The collector is off for this test,
+    so only reference counting can free the window here.
+    """
+    gc.disable()
+    try:
+        window = _shown_window(qtbot, settings_path, _sources(token=None))
+        ref = weakref.ref(window)
+        window.close()
+        del window
+        assert ref() is None
+    finally:
+        gc.enable()
+
+
+def test_a_load_that_finishes_after_its_tab_is_deleted_touches_no_tab(qtbot, settings_path):
+    """The worker finishes a load after its tab is gone. It emits to the shared delivery object only,
+    so nothing raises and the deleted tab is never touched."""
     SettingsStore(settings_path).save(Settings(mode="local"))
-    real = default_sources(KeyringSecretStore(backend=MemoryKeyring()))
-    sources = dataclasses.replace(real, probe=lambda url: local_client.HEALTH_RUNNING)
-    window = _shown_window(qtbot, settings_path, sources)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def transport(request, timeout):
+        entered.set()
+        release.wait(5)
+        return local_client._Reply(200, json.dumps(SERVER_PROJECT_ROWS).encode("utf-8"))
+
+    window = _shown_window(qtbot, settings_path, _server_sources(transport))
+    assert entered.wait(5)
+    window.close()
+    shiboken6.delete(window)  # the tab's widgets are gone on the GUI thread while the worker still reads
+    del window
+    release.set()
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    qtbot.wait(50)  # let any delivered result reach the event loop
+
+
+# The running server's GET /projects rows. Newest first, as the server orders them, and each row
+# carries the hidden fields, so a test can prove the Projects tab drops them.
+SERVER_PROJECT_ROWS = [
+    {
+        "id": "s-new", "name": "Served new", "creator_human_id": "human-2", "icon": "rocket",
+        "status": "parked", "priority": "P0", "parent_project_id": None,
+        "created_at": "2026-04-20 16:45:00",
+        "executor_config": "EXEC-SECRET-SERVER", "agent_instructions": "AGENT-NOTE-SERVER",
+    },
+    {
+        "id": "s-old", "name": "Served old", "creator_human_id": None, "icon": None,
+        "status": "active", "priority": "P2", "parent_project_id": "s-new",
+        "created_at": "2026-04-01 08:00:00",
+        "executor_config": "EXEC-SECRET-SERVER", "agent_instructions": "AGENT-NOTE-SERVER",
+    },
+]
+
+
+def _server_sources(transport, probe_state=local_client.HEALTH_RUNNING):
+    """The real default sources. The probe answers probe_state, and the server read goes through transport."""
+    real = default_sources(KeyringSecretStore(backend=MemoryKeyring()), server_transport=transport)
+    return dataclasses.replace(real, probe=lambda url: probe_state)
+
+
+def test_projects_tab_shows_rows_from_the_running_server(qtbot, settings_path):
+    """A running server gives the rows. The fake transport answers the one GET /projects, so no socket opens."""
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    calls = []
+
+    def transport(request, timeout):
+        calls.append((request.get_method(), request.full_url, timeout))
+        return local_client._Reply(200, json.dumps(SERVER_PROJECT_ROWS).encode("utf-8"))
+
+    window = _shown_window(qtbot, settings_path, _server_sources(transport))
+    page = _page(window, "Projects")
+    table = page.findChild(QTableWidget, "projects-table")
+    detail = page.findChild(QLabel, "projects-detail")
+    status = page.findChild(QLabel, "projects-status")
+
+    qtbot.waitUntil(lambda: table.rowCount() == 2, timeout=5000)
+    assert status.text() == "Showing 2 project(s) from the local Meridian server."
+    assert [table.item(row, 0).text() for row in range(2)] == ["Served new", "Served old"]
+    qtbot.waitUntil(lambda: "Name: Served new" in detail.text(), timeout=5000)
+    # The one request is a GET to the loopback server, with the 10 second timeout.
+    assert calls[0] == ("GET", "http://127.0.0.1:7878/projects", 10.0)
+    # Only the listed fields reach the tab. The hidden ones never do.
+    text = _all_text(page) + "\n" + detail.text() + "\n" + status.text()
+    assert "EXEC-SECRET" not in text
+    assert "AGENT-NOTE" not in text
+    assert "executor_config" not in text
+
+
+def test_projects_tab_refuses_a_non_list_server_reply_and_does_not_fall_back(qtbot, settings_path, tmp_path):
+    """A reply that is not a JSON list is read_failed. The database file is not read in its place."""
+    db = _projects_db(tmp_path)
+    SettingsStore(settings_path).save(Settings(mode="local", db_path=str(db)))
+
+    def transport(request, timeout):
+        return local_client._Reply(200, b'{"detail": "SERVER-BODY-SENTINEL"}')
+
+    window = _shown_window(qtbot, settings_path, _server_sources(transport))
+    page = _page(window, "Projects")
+    table = page.findChild(QTableWidget, "projects-table")
+    status = page.findChild(QLabel, "projects-status")
+
+    expected = "The local Meridian server could not be read (LocalClientError)."
+    qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
+    # The file has three rows, and none of them is shown. The body and the path never reach the tab.
+    assert table.rowCount() == 0
+    assert "SERVER-BODY-SENTINEL" not in _all_text(page)
+    assert str(db) not in status.text()
+
+
+def test_projects_tab_refuses_a_non_loopback_server_url_before_any_request(qtbot, settings_path):
+    """A non-loopback local URL is refused by the client before it sends anything. The fake transport sees no call."""
+    SettingsStore(settings_path).save(Settings(mode="local", local_url="http://evil.example:7878"))
+    calls = []
+
+    def transport(request, timeout):
+        calls.append(request)
+        return local_client._Reply(200, b"[]")
+
+    window = _shown_window(qtbot, settings_path, _server_sources(transport))
     status = _page(window, "Projects").findChild(QLabel, "projects-status")
 
-    expected = "The local Meridian server could not be read (SourceNotBuilt)."
+    expected = "The local Meridian server could not be read (LocalClientError)."
     qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
+    assert calls == []
+    assert "evil.example" not in status.text()
+
+
+def test_projects_tab_falls_back_to_the_file_when_the_server_is_down(qtbot, settings_path, tmp_path):
+    """With the server down and a database file chosen, the tab shows the file's rows. The server is not read."""
+    db = _projects_db(tmp_path)
+    SettingsStore(settings_path).save(Settings(mode="local", db_path=str(db)))
+    calls = []
+
+    def transport(request, timeout):
+        calls.append(request)
+        return local_client._Reply(200, b"[]")
+
+    sources = _server_sources(transport, probe_state=local_client.HEALTH_NOT_RUNNING)
+    window = _shown_window(qtbot, settings_path, sources)
+    page = _page(window, "Projects")
+    table = page.findChild(QTableWidget, "projects-table")
+    status = page.findChild(QLabel, "projects-status")
+
+    qtbot.waitUntil(lambda: table.rowCount() == 3, timeout=5000)
+    assert status.text() == "Showing 3 project(s) from the database file."
+    assert [table.item(row, 0).text() for row in range(3)] == ["Newest", "Middle", "Oldest"]
+    assert calls == []
 
 
 def test_hosted_reader_gets_the_stored_token_and_never_shows_it(qtbot, settings_path):
