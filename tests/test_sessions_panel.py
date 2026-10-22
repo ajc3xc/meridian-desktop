@@ -19,6 +19,9 @@ from meridian_desktop.ui.sessions_panel import (
     COLUMNS,
     LOADING_TEXT,
     NO_PROJECTS_TEXT,
+    PRESS_REFRESH_TEXT,
+    PROJECTS_FAILED_TEXT,
+    READ_FAILED_TEXT,
     REFRESH_MS,
     SessionsPanel,
     choose_project,
@@ -111,18 +114,47 @@ class ScriptedLocal:
         return SimpleNamespace(status=200, body=self.bodies[index - 1])
 
 
-def make_panel(qtbot, *, local, hosted=None, local_url=LOCAL, hosted_value=(HOSTED, None),
-               projects=((PID, "Alpha"),), project_provider=None):
-    hosted = hosted if hosted is not None else FakeHosted()
+def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, None), projects=((PID, "Alpha"),),
+                project_provider=None, hosted_provider=None, mode="local"):
+    """Build the panel with fake providers. Returns (panel, counts): how many times each provider was called.
+
+    ``mode`` is the mode saved in Settings. The mode provider runs on the worker, so counts.mode also shows each
+    timer tick that reached the worker.
+    """
+    counts = SimpleNamespace(projects=0, hosted=0, mode=0)
+
+    def list_projects():
+        counts.projects += 1
+        return project_provider() if project_provider is not None else list(projects)
+
+    def hosted_pair():
+        counts.hosted += 1
+        return hosted_value
+
+    def mode_value():
+        counts.mode += 1
+        return mode
+
     panel = SessionsPanel(
         lambda: local_url,
-        lambda: hosted_value,
-        project_provider if project_provider is not None else (lambda: list(projects)),
+        hosted_provider if hosted_provider is not None else hosted_pair,
+        list_projects,
+        mode_value,
         local_transport=local,
         hosted_transport=hosted,
     )
     qtbot.addWidget(panel)
     panel.hide()
+    return panel, counts
+
+
+def make_panel(qtbot, *, local, hosted=None, local_url=LOCAL, hosted_value=(HOSTED, None),
+               projects=((PID, "Alpha"),), project_provider=None, mode="local"):
+    hosted = hosted if hosted is not None else FakeHosted()
+    panel, _counts = build_panel(
+        qtbot, local=local, hosted=hosted, local_url=local_url, hosted_value=hosted_value,
+        projects=projects, project_provider=project_provider, mode=mode,
+    )
     return panel, hosted
 
 
@@ -257,12 +289,12 @@ def test_unnamed_row_reads_as_unnamed(qtbot):
     assert table_of(panel).item(0, 0).text() == "(unnamed)"
 
 
-def test_table_is_read_only_and_has_no_action_buttons(qtbot):
+def test_table_is_read_only_and_the_only_button_is_refresh(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
     panel.show()
     settle(qtbot, panel)
     assert table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert panel.findChildren(QPushButton) == []
+    assert [button.objectName() for button in panel.findChildren(QPushButton)] == ["sessions-refresh"]
 
 
 def test_every_label_is_selectable(qtbot):
@@ -296,15 +328,18 @@ def test_picker_lists_projects_and_selects_the_first(qtbot):
     assert f"/projects/{PID}/sessions" in local.calls[0][1]
 
 
-def test_switching_project_refetches_for_the_new_project(qtbot):
+def test_switching_project_reads_only_the_local_server_for_the_new_project(qtbot):
     local = FakeLocal(body=b"[]")
-    panel, _hosted = make_panel(qtbot, local=local, projects=((PID, "Alpha"), (PID2, "Beta")))
+    panel, counts = build_panel(qtbot, local=local, hosted=FakeHosted(), projects=((PID, "Alpha"), (PID2, "Beta")))
     panel.show()
     settle(qtbot, panel)
+    projects_read = counts.projects
     picker_of(panel).setCurrentIndex(1)
     qtbot.waitUntil(lambda: len(local.calls) == 2)
     settle(qtbot, panel)
     assert f"/projects/{PID2}/sessions" in local.calls[-1][1]
+    assert counts.projects == projects_read  # the project list is not read again
+    assert counts.hosted == 0
 
 
 def test_no_projects_says_so_and_sends_nothing(qtbot):
@@ -316,15 +351,21 @@ def test_no_projects_says_so_and_sends_nothing(qtbot):
     assert local.calls == []
 
 
-def test_a_failed_project_list_is_named_by_class_and_sends_nothing(qtbot):
+class ProjectsUnavailable(Exception):
+    """Stands in for the window's exception. Its class name must never reach the status line."""
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), ProjectsUnavailable("/home/x/secret.db")])
+def test_a_failed_project_list_says_so_in_plain_words_and_sends_nothing(qtbot, failure):
     def broken():
-        raise RuntimeError("db path with secret")
+        raise failure
 
     local = FakeLocal()
     panel, _hosted = make_panel(qtbot, local=local, project_provider=broken)
     panel.show()
     settle(qtbot, panel)
-    assert status_of(panel) == "Projects could not be read (RuntimeError)."
+    assert status_of(panel) == PROJECTS_FAILED_TEXT
+    assert type(failure).__name__ not in all_visible_text(panel)
     assert "secret" not in all_visible_text(panel)
     assert local.calls == []
 
@@ -402,6 +443,171 @@ def test_a_failed_refresh_keeps_the_tab_usable(qtbot):
     settle(qtbot, panel)
     assert "could not be checked" in status_of(panel)
     assert "blew up" not in all_visible_text(panel)
+
+
+def test_a_failed_sessions_read_says_so_in_plain_words_and_names_no_class(qtbot):
+    class KeychainError(Exception):
+        pass
+
+    def broken_hosted():
+        raise KeychainError("token store locked")
+
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    panel, _counts = build_panel(qtbot, local=local, hosted=FakeHosted(), hosted_provider=broken_hosted)
+    panel.show()
+    settle(qtbot, panel)
+    assert status_of(panel).startswith(READ_FAILED_TEXT)
+    assert "KeychainError" not in all_visible_text(panel)
+    assert "locked" not in all_visible_text(panel)
+
+
+# ----------------------------------------------------------------- when the reads happen, and what each one reads
+
+
+def test_a_show_makes_one_project_read_and_one_sessions_read(qtbot):
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, counts = build_panel(qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN))
+    panel.show()
+    settle(qtbot, panel)
+    assert counts.projects == 1
+    assert len(local.calls) == 1  # the sessions read asks the local server first
+    assert counts.hosted == 1
+    assert len(hosted.calls) == 1  # and then the hosted host, once
+
+
+def test_in_hosted_mode_three_timer_ticks_make_no_hosted_call(qtbot):
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session()]))
+    panel, counts = build_panel(
+        qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN), mode="hosted",
+    )
+    panel.show()
+    settle(qtbot, panel)
+    projects, hosted_reads = counts.projects, counts.hosted
+    hosted_calls, local_calls = len(hosted.calls), len(local.calls)
+    mode_reads = counts.mode
+    for _ in range(3):
+        panel._timer.timeout.emit()  # noqa: SLF001 - the timer's real connection
+        settle(qtbot, panel)
+    assert counts.mode == mode_reads + 3  # each tick ran, and only read the saved mode
+    assert counts.projects == projects
+    assert counts.hosted == hosted_reads
+    assert len(hosted.calls) == hosted_calls
+    assert len(local.calls) == local_calls
+
+
+def test_a_refresh_press_makes_exactly_one_project_read_and_one_sessions_read(qtbot):
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session()]))
+    panel, counts = build_panel(
+        qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN), mode="hosted",
+    )
+    panel.show()
+    settle(qtbot, panel)
+    projects, hosted_reads = counts.projects, counts.hosted
+    hosted_calls, local_calls = len(hosted.calls), len(local.calls)
+    button = panel.findChild(QPushButton, "sessions-refresh")
+    button.click()
+    settle(qtbot, panel)
+    assert counts.projects == projects + 1
+    assert counts.hosted == hosted_reads + 1
+    assert len(local.calls) == local_calls + 1
+    assert len(hosted.calls) == hosted_calls + 1
+    assert button.isEnabled()
+
+
+def test_a_second_show_makes_no_read(qtbot):
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session()]))
+    panel, counts = build_panel(
+        qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN), mode="hosted",
+    )
+    panel.show()
+    settle(qtbot, panel)
+    panel.hide()
+    before = (counts.projects, counts.hosted, len(local.calls), len(hosted.calls))
+    panel.show()
+    qtbot.wait(50)
+    assert (counts.projects, counts.hosted, len(local.calls), len(hosted.calls)) == before
+    assert panel._timer.isActive()  # noqa: SLF001
+
+
+def test_a_local_tick_reads_only_the_local_server_for_the_picked_project(qtbot):
+    local = FakeLocal(body=body_of([session()]))
+    hosted = FakeHosted()
+    panel, counts = build_panel(qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN))
+    panel.show()
+    settle(qtbot, panel)
+    projects, local_calls = counts.projects, len(local.calls)
+    for _ in range(2):
+        panel._timer.timeout.emit()  # noqa: SLF001
+        settle(qtbot, panel)
+    assert len(local.calls) == local_calls + 2
+    assert all(f"/projects/{PID}/sessions" in path for _base, path, _timeout in local.calls[local_calls:])
+    assert counts.projects == projects  # the timer never reads the project list
+    assert counts.hosted == 0
+    assert hosted.calls == []
+
+
+def test_a_local_tick_that_gets_no_answer_changes_nothing_and_asks_hosted_nothing(qtbot):
+    local = FakeLocal(body=body_of([session(name="kept")]))
+    hosted = FakeHosted()
+    panel, counts = build_panel(qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN))
+    panel.show()
+    settle(qtbot, panel)
+    status_before = status_of(panel)
+    local.error = LocalClientError("not_running", "x")  # the server stops answering
+    hosted_reads = counts.hosted
+    panel._timer.timeout.emit()  # noqa: SLF001
+    settle(qtbot, panel)
+    assert len(local.calls) == 2
+    assert counts.hosted == hosted_reads
+    assert hosted.calls == []
+    assert status_of(panel) == status_before
+    assert table_of(panel).item(0, 0).text() == "kept"
+
+
+def test_a_project_change_outside_local_mode_reads_nothing_and_says_press_refresh(qtbot):
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session()]))
+    panel, counts = build_panel(
+        qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN), mode="hosted",
+        projects=((PID, "Alpha"), (PID2, "Beta")),
+    )
+    panel.show()
+    settle(qtbot, panel)
+    before = (counts.projects, counts.hosted, len(local.calls), len(hosted.calls))
+    picker_of(panel).setCurrentIndex(1)
+    settle(qtbot, panel)
+    assert (counts.projects, counts.hosted, len(local.calls), len(hosted.calls)) == before
+    assert status_of(panel) == PRESS_REFRESH_TEXT
+    assert table_of(panel).rowCount() == 0
+
+
+def test_a_project_change_with_no_local_answer_keeps_the_press_refresh_line(qtbot):
+    local = FakeLocal(body=body_of([session()]))
+    panel, _counts = build_panel(qtbot, local=local, hosted=FakeHosted(), projects=((PID, "Alpha"), (PID2, "Beta")))
+    panel.show()
+    settle(qtbot, panel)
+    local.error = LocalClientError("not_running", "x")
+    picker_of(panel).setCurrentIndex(1)
+    settle(qtbot, panel)
+    assert status_of(panel) == PRESS_REFRESH_TEXT
+    assert table_of(panel).rowCount() == 0
+
+
+def test_the_refresh_button_is_disabled_while_a_full_read_runs(qtbot):
+    release = threading.Event()
+    local = FakeLocal(body=b"[]", release=release)
+    panel, _hosted = make_panel(qtbot, local=local)
+    panel.show()
+    qtbot.waitUntil(lambda: len(local.calls) == 1)
+    button = panel.findChild(QPushButton, "sessions-refresh")
+    assert not button.isEnabled()
+    release.set()
+    settle(qtbot, panel)
+    assert button.isEnabled()
 
 
 # ----------------------------------------------------------------- stale results
