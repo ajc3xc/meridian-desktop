@@ -13,9 +13,11 @@ The only control that sends a request is Search. The panel has no register, anno
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import outputs_client
 from meridian_desktop.outputs_client import EMPTY, ERROR, INVALID, RESULTS, IndexState, OutputHit, OutputsResult
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 INTRO_TEXT = (
@@ -105,17 +108,30 @@ def hit_row(hit: OutputHit) -> tuple[str, ...]:
     )
 
 
-class _Job(QRunnable):
-    """Run ``work`` on the thread pool and deliver (result, failure_text).
+@dataclass(frozen=True)
+class _Answer:
+    """One finished search: the generation it was started under, and either its result or its failure text."""
 
-    Any exception is reduced to its class name, so no traceback or raw detail reaches the UI.
+    generation: int
+    result: Any
+    failure: str | None
+
+
+class _Job(QRunnable):
+    """Run ``work`` on the thread pool and deliver an _Answer to the shared delivery object.
+
+    The job holds only its work, its owner token, its generation and the shared delivery object. It never holds the
+    panel, so a panel deleted while the search runs is never kept alive by the pool. Any exception is reduced to its
+    class name, so no traceback or raw detail reaches the UI.
     """
 
-    def __init__(self, work: Callable[[], Any], deliver: Callable[[tuple], None]) -> None:
+    def __init__(self, owner: object, generation: int, work: Callable[[], Any], delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._owner = owner
+        self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._delivery = delivery
 
     def run(self) -> None:
         result: Any = None
@@ -125,22 +141,29 @@ class _Job(QRunnable):
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failure = CHECK_FAILED_TEXT.format(exc.__class__.__name__)
         try:
-            self._deliver((result, failure))
+            self._delivery.delivered.emit(Delivered(self._owner, _Answer(self._generation, result, failure)))
         except RuntimeError:
-            pass  # the panel was deleted while the search ran
+            pass  # the shared delivery object is never deleted, so this is only a guard
+
+
+def _search_read(local_url_provider: Callable[[], str], text: str) -> OutputsResult:
+    """Read the server address from the provider, then search. Runs on a worker thread."""
+    url = local_url_provider()
+    return outputs_client.search_outputs(url, text)
 
 
 class OutputsPanel(QWidget):
     """The Outputs tab: a search box, the index state, and a read-only, copyable list of hits."""
-
-    _search_finished = Signal(object)
 
     def __init__(self, local_url_provider: Callable[[], str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("outputs-panel")
         self._local_url_provider = local_url_provider
         self._searching = False
-        self._search_finished.connect(self._on_search_finished)
+        # Identifies this panel's searches. A plain object, so a job can hold it without holding the panel.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -189,26 +212,34 @@ class OutputsPanel(QWidget):
             self._show(OutputsResult(INVALID, problem, query=text))
             return
         self._searching = True
+        self._generation += 1
+        generation = self._generation
         self._search_button.setEnabled(False)
         self._status.setText(SEARCHING_TEXT)
         self._index.setText(INDEX_NOT_CHECKED_TEXT)
         self._results.setRowCount(0)
-        QThreadPool.globalInstance().start(_Job(lambda: self._search_work(text), self._search_finished.emit))
-
-    def _search_work(self, text: str) -> OutputsResult:
-        """Read the server address from the provider, then search. Runs on a worker thread."""
-        url = self._local_url_provider()
-        return outputs_client.search_outputs(url, text)
+        # The job holds the provider, the query, the owner token, its generation and the shared delivery object.
+        # It never holds this panel.
+        work = partial(_search_read, self._local_url_provider, text)
+        QThreadPool.globalInstance().start(_Job(self._owner, generation, work, shared_delivery()))
 
     @Slot(object)
-    def _on_search_finished(self, payload: tuple) -> None:
-        result, failure = payload
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel is dropped here, and so is one a newer search superseded.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        answer = item.value
+        if not isinstance(answer, _Answer) or answer.generation != self._generation:
+            return
+        self._finish(answer)
+
+    def _finish(self, answer: _Answer) -> None:
         self._searching = False
         self._search_button.setEnabled(True)
-        if failure is not None or not isinstance(result, OutputsResult):
-            self._show(OutputsResult(ERROR, failure or CHECK_FAILED_TEXT.format("NoResult")))
+        if answer.failure is not None or not isinstance(answer.result, OutputsResult):
+            self._show(OutputsResult(ERROR, answer.failure or CHECK_FAILED_TEXT.format("NoResult")))
             return
-        self._show(result)
+        self._show(answer.result)
 
     def _show(self, result: OutputsResult) -> None:
         self._status.setText(result.message)

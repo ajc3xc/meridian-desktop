@@ -4,10 +4,13 @@ The panel is built with a fake loopback fetch (outputs_client.fetch), so each re
 client and its typed states, with no socket opened. The fake records each call and the thread it ran on.
 """
 
+import gc
 import json
 import threading
+import weakref
 
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetSelectionRange,
+    QWidget,
 )
 
 from meridian_desktop import local_client, outputs_client as oc
@@ -32,17 +36,23 @@ LOCAL = "http://127.0.0.1:8471"
 
 
 class FakeFetch:
-    """Stands in for the loopback fetch. Records each call and its thread, and returns or raises as given."""
+    """Stands in for the loopback fetch. Records each call and its thread, and returns or raises as given.
 
-    def __init__(self, reply=None, error=None):
+    With ``release`` set, the call waits until the test sets it, so a test can act while a read runs.
+    """
+
+    def __init__(self, reply=None, error=None, release=None):
         self.reply = reply
         self.error = error
+        self.release = release
         self.calls = []
         self.threads = []
 
     def __call__(self, base_url, path, timeout):
         self.calls.append((base_url, path, timeout))
         self.threads.append(threading.current_thread())
+        if self.release is not None:
+            self.release.wait(5)
         if self.error is not None:
             raise self.error
         return self.reply
@@ -65,8 +75,8 @@ def _run(**overrides):
     return run
 
 
-def _fake(monkeypatch, reply=None, error=None):
-    fake = FakeFetch(reply=reply, error=error)
+def _fake(monkeypatch, reply=None, error=None, release=None):
+    fake = FakeFetch(reply=reply, error=error, release=release)
     monkeypatch.setattr(oc, "fetch", fake)
     return fake
 
@@ -285,3 +295,37 @@ def test_every_label_is_selectable_and_plain_text_and_none_says_not_built_yet(qt
 def test_before_any_check_the_status_says_not_checked_yet(qtbot):
     panel = _panel(qtbot)
     assert _text(panel, "research-status") == NOT_CHECKED_TEXT
+
+
+# ----------------------------------------------------------------- a panel deleted while its read runs
+
+
+def test_a_read_still_running_when_its_panel_is_deleted_touches_no_widget(qtbot, monkeypatch):
+    """A panel deleted while its read still runs is freed on the GUI thread, and its late answer touches no widget.
+
+    The read job holds the provider, the owner token and the shared delivery object, never the panel. So the panel is
+    freed here on the GUI thread, and the late answer is dropped without the panel's update step running. That step
+    is replaced by a recorder, so the test can show that it never ran. The collector is off, so only reference
+    counting can free the panel.
+    """
+    gate = threading.Event()
+    fake = _fake(monkeypatch, reply=ok({"runs": [_run()], "count": 1}), release=gate)
+    applied = []
+    monkeypatch.setattr(ResearchPanel, "_finish", lambda self, answer: applied.append(answer))
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = ResearchPanel(lambda: LOCAL, container)
+        _named(panel, QPushButton, "research-refresh").click()
+        qtbot.waitUntil(lambda: len(fake.calls) == 1, timeout=5000)  # the read has started, held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the read still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late answer reaches the event loop, and nothing raises
+        assert applied == []
+    finally:
+        gate.set()
+        gc.enable()

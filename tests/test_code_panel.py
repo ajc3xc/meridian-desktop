@@ -5,12 +5,15 @@ on. No test contacts another host or reads a real setting. A fake records each c
 so a test can show that the Local URL is read and the search runs off the UI thread.
 """
 
+import gc
 import json
 import socket
 import threading
+import weakref
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetSelectionRange,
+    QWidget,
 )
 
 from meridian_desktop.code_client import (
@@ -437,3 +441,37 @@ def test_score_text_is_blank_without_a_score():
 
 def test_snippet_text_collapses_to_one_line():
     assert snippet_text("def f():\n    return 1\n") == "def f(): return 1"
+
+
+# ----------------------------------------------------------------- a panel deleted while its search runs
+
+
+def test_a_search_still_running_when_its_panel_is_deleted_touches_no_widget(qtbot, monkeypatch):
+    """A panel deleted while its search still runs is freed on the GUI thread, and its late answer touches no widget.
+
+    The search job holds the provider, the transport, the owner token and the shared delivery object, never the
+    panel. So the panel is freed here on the GUI thread, and the late answer is dropped without the panel's update
+    step running. That step is replaced by a recorder, so the test can show that it never ran. The collector is off,
+    so only reference counting can free the panel.
+    """
+    gate = threading.Event()
+    transport = FakeTransport(gate=gate)
+    applied = []
+    monkeypatch.setattr(CodePanel, "_finish", lambda self, answer: applied.append(answer))
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = CodePanel(Provider(), container, transport=transport)
+        _search_no_wait(panel, "search")
+        qtbot.waitUntil(lambda: len(transport.calls) == 1, timeout=5000)  # the search has started, held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the search still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late answer reaches the event loop, and nothing raises
+        assert applied == []
+    finally:
+        gate.set()
+        gc.enable()
