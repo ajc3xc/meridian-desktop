@@ -44,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
+from PySide6.QtCore import QThreadPool, Qt, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -63,6 +63,7 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.code_panel import CodePanel
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.outputs_panel import OutputsPanel
@@ -246,9 +247,6 @@ class _ConfiguredRunner:
 class MainWindow(QMainWindow):
     """Mode selector above one tab per area. Projects is read-only. Settings holds the RunPod panel."""
 
-    # One finished tunnel check: (generation, (status, failure)). See _start_tunnel_check.
-    _tunnel_checked = Signal(object)
-
     def __init__(
         self,
         settings_store: SettingsStore | None = None,
@@ -274,7 +272,9 @@ class MainWindow(QMainWindow):
         self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
         # Each tunnel check takes the next number. A result with an older number is dropped.
         self._tunnel_generation = 0
-        self._tunnel_checked.connect(self._on_tunnel_checked)
+        # A plain token that identifies this window's checks. A result carries it, so the window keeps only its own.
+        self._owner = object()
+        shared_delivery().delivered.connect(self._on_delivered)
         self.setWindowTitle("Meridian")
 
         central = QWidget(self)
@@ -430,22 +430,32 @@ class MainWindow(QMainWindow):
             self._tunnel_generation += 1
 
     def _start_tunnel_check(self) -> None:
-        """One read-only tunnel status call on the thread pool. The UI thread never waits on it."""
+        """One read-only tunnel status call on the thread pool. The UI thread never waits on it.
+
+        The job holds the runner, this window's owner token and the shared delivery object, never the window. Its
+        result comes back to _on_delivered on the GUI thread. A window that is closed while the check runs is never
+        touched by the worker.
+        """
         self._tunnel_generation += 1
         generation = self._tunnel_generation
         runner = self._tunnel_runner
+        owner = self._owner
+        delivery = shared_delivery()
         self.tunnel_status_label.setText(BAR_CHECKING_TEXT)
         self.tunnel_detail.setText(DEPENDENCY_TEXT)
         QThreadPool.globalInstance().start(
             TunnelCheckJob(
                 lambda: read_tunnel_status(runner.status),
-                lambda payload: self._tunnel_checked.emit((generation, payload)),
+                lambda payload: delivery.delivered.emit(Delivered(owner, (generation, payload))),
             )
         )
 
     @Slot(object)
-    def _on_tunnel_checked(self, payload: tuple) -> None:
-        generation, (status, failure) = payload
+    def _on_delivered(self, item: object) -> None:
+        """Runs on the GUI thread. A result for another window, an older check, or one from before a mode change is dropped."""
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        generation, (status, failure) = item.value
         if generation != self._tunnel_generation or self._saved_mode != TUNNEL_MODE:
             return  # an older check, or the mode changed after this check started
         line, detail = bar_texts(status, failure)

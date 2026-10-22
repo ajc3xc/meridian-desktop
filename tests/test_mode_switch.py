@@ -7,10 +7,12 @@ temp directory. Process launches are patched to record and refuse, so a test tha
 Nothing reads the real %LOCALAPPDATA%, the keychain or the network.
 """
 
+import gc
 import json
 import re
 import subprocess
 import threading
+import weakref
 from datetime import datetime
 
 import pytest
@@ -496,6 +498,33 @@ def test_a_check_that_finishes_after_the_mode_changed_is_dropped(qtbot, settings
     # The check finished, but the mode is no longer Tunnel, so its answer is not shown.
     assert window.tunnel_status_label.isHidden()
     assert _line(window) == BAR_CHECKING_TEXT
+
+
+def test_a_tunnel_check_still_running_when_its_window_closes_does_not_keep_the_window(qtbot, settings_path):
+    """A closed window is freed on the GUI thread even while its tunnel check is still running.
+
+    The check job used to hold the window through its deliver callback. When the pool ended the job on a worker,
+    the worker dropped the last reference, and the window's widgets were deleted off the GUI thread. The job now
+    holds only the runner, an owner token and the shared delivery object. The collector is off, so only reference
+    counting can free the window here.
+    """
+    gc.disable()
+    gate = threading.Event()
+    try:
+        runner = RecordingRunner(reply=_status_reply("running"), gate=gate)
+        window = _window(qtbot, settings_path, mode="tunnel", runner=runner)
+        # The check has started and is held at the gate, so it is still running when the window closes.
+        qtbot.waitUntil(lambda: runner.snapshot() == [("status", "tunnel")], timeout=5000)
+        ref = weakref.ref(window)
+        window.close()
+        del window
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+    finally:
+        gate.set()
+        gc.enable()
 
 
 def test_a_failed_save_on_the_switch_to_tunnel_runs_no_check(qtbot, settings_path, monkeypatch):

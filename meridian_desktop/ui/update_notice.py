@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, QUrl, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from meridian_desktop import updater
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 LABEL_TEXT = "Update available: v{version}"
@@ -69,8 +70,6 @@ class UpdateNoticeBar(QWidget):
     no transport was given. Only an UpdateNotice result shows the bar. Every other result hides it again.
     """
 
-    _checked = Signal(object)
-
     def __init__(
         self,
         current_version: str,
@@ -86,7 +85,9 @@ class UpdateNoticeBar(QWidget):
         self._url = ""
         self._started = False
         self._finished = False
-        self._checked.connect(self._on_checked)
+        # Identifies this bar's check. A plain object, so the check job can hold it without holding the bar.
+        self._owner = object()
+        shared_delivery().delivered.connect(self._on_delivered)
 
         self._label = make_selectable(QLabel("", self))
         self._label.setObjectName("update-notice-label")
@@ -121,10 +122,19 @@ class UpdateNoticeBar(QWidget):
         if not enabled or self._started or self._transport is None:
             return
         self._started = True
-        QThreadPool.globalInstance().start(_CheckJob(self._current, self._transport, self._checked.emit))
+        # The job holds the version, the transport, the owner token and the shared delivery. It never holds the bar.
+        owner = self._owner
+        delivery = shared_delivery()
+        QThreadPool.globalInstance().start(
+            _CheckJob(self._current, self._transport, lambda result: delivery.delivered.emit(Delivered(owner, result)))
+        )
 
     @Slot(object)
-    def _on_checked(self, result: object) -> None:
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another bar is dropped here.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        result = item.value
         self._finished = True
         if isinstance(result, updater.UpdateNotice):
             self._url = result.release_page_url
