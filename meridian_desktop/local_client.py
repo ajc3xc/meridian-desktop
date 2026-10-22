@@ -1,8 +1,8 @@
 """Loopback client for the local Meridian server. Pure Python: stdlib urllib only, no Qt import.
 
 Every request goes to an http URL whose host is 127.0.0.1, localhost or ::1
-(assert_loopback). Each request has a deadline, set by its timeout over the whole
-call, a fixed User-Agent and no credentials. Redirects are refused and not followed.
+(assert_loopback). Each request has a timeout, which bounds each read and sets a deadline
+for the body (see _get), a fixed User-Agent and no credentials. Redirects are refused and not followed.
 A response is capped at MAX_RESPONSE_BYTES, enforced before anything is parsed. A proxy
 is never used, so loopback traffic stays on this machine.
 
@@ -129,7 +129,7 @@ def _bounded_read(response: Any, deadline: float) -> bytes:
     A larger body is refused before any parsing. The deadline is checked before each read,
     and read1 returns as soon as some bytes arrive, so a server that trickles bytes is cut
     off at the first read after the deadline. A read already waiting for data is still
-    limited by the socket timeout, so the call ends at most one timeout after the deadline.
+    limited by the socket timeout, so the body read ends at most one timeout after the deadline.
     """
     declared = response.headers.get("Content-Length") if response.headers is not None else None
     if declared is not None and declared.strip().isdigit() and int(declared) > MAX_RESPONSE_BYTES:
@@ -162,9 +162,13 @@ def _transport_error(reason: object) -> LocalClientError:
 def _get(base_url: str, path: str, timeout: float, transport: Transport | None = None) -> _Reply:
     """GET one path under base_url. A non-2xx status is returned as a reply, not raised.
 
-    ``timeout`` also sets a deadline for the body read, counted from this call. The header
-    lines are read under the socket timeout alone. ``transport``, when given, sends the request
-    in place of urllib. The loopback check still runs first, so a refused URL reaches no transport.
+    ``timeout`` is the socket timeout for each blocking read: the connect, each header line and
+    each body read. The body deadline is ``timeout`` seconds from the start of this call, and it is
+    checked before each body read. The header lines have no deadline of their own, and a body read
+    already waiting for data can run one more timeout past the deadline. So a call is not bounded
+    to ``timeout`` seconds in total. ``transport``, when given, sends the request in place of urllib,
+    and the timeout is passed to it unchanged. The loopback check still runs first, so a refused URL
+    reaches no transport.
     """
     assert_loopback(base_url)
     deadline = time.monotonic() + timeout
@@ -254,7 +258,8 @@ def list_projects(
     followed. Any other non-200 status raises LocalClientError, with the server's error code when
     it is a safe slug. The body must be a JSON array of objects. Anything else raises "bad_json",
     and the body is never echoed. A row keeps only the listed columns, and a column it lacks reads
-    as None, as it does for the file reader. ``timeout`` is the whole-call limit, 10 seconds by default.
+    as None, as it does for the file reader. ``timeout`` is 10 seconds by default. It is the socket
+    timeout for each read and the body deadline, not a limit on the whole call (see _get).
     """
     reply = _get(base_url, PROJECTS_PATH, timeout, transport=transport)
     if 300 <= reply.status < 400:
