@@ -24,6 +24,7 @@ control that starts, stops or restarts anything.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
@@ -118,6 +119,21 @@ def _placeholder_page(
     return page
 
 
+def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
+    """The provider the Code, Outputs and Research panels call: the local URL as saved now.
+
+    It holds the store, not the window. A bound method of the window kept the window in a reference
+    cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
+    thread allocates, and the panels call this provider on the pool, so a window could be freed on a
+    pool worker and its widgets deleted off the GUI thread.
+    """
+
+    def read() -> str:
+        return store.load().settings.local_url
+
+    return read
+
+
 class _ConfiguredRunner:
     """The runner's read-only status call, through the core Python and folder saved in Settings.
 
@@ -199,11 +215,11 @@ class MainWindow(QMainWindow):
                 page = ZoteroPanel(client=self._zotero, parent=self.tabs)
             elif name == "Code":
                 # Search runs only when the owner presses Search. The local URL is read at that moment.
-                page = CodePanel(self._current_local_url, parent=self.tabs)
+                page = CodePanel(_saved_local_url(self._store), parent=self.tabs)
             elif name == "Outputs":
-                page = OutputsPanel(self._current_local_url, parent=self.tabs)
+                page = OutputsPanel(_saved_local_url(self._store), parent=self.tabs)
             elif name == "Research":
-                page = ResearchPanel(self._current_local_url, parent=self.tabs)
+                page = ResearchPanel(_saved_local_url(self._store), parent=self.tabs)
             else:
                 page = _placeholder_page(name, self.tabs)
             self.tabs.addTab(page, name)
@@ -217,10 +233,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(STATUS_MESSAGE)
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
-
-    def _current_local_url(self) -> str:
-        """The local server URL as saved now. The Code, Outputs and Research panels call this when they search."""
-        return self._store.load().settings.local_url
 
     def _build_mode_bar(self, parent: QWidget) -> QVBoxLayout:
         result = self._store.load()

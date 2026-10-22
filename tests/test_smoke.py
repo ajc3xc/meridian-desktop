@@ -5,11 +5,16 @@ the real home directory or reads the keychain. The one real database is a temp f
 """
 
 import dataclasses
+import gc
 import json
 import sqlite3
+import threading
+import weakref
 from pathlib import Path
 
 import pytest
+import shiboken6
+from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -456,6 +461,46 @@ def test_mode_change_reloads_the_projects_tab(qtbot, settings_path):
     combo.setCurrentIndex(combo.findData("hosted"))
 
     qtbot.waitUntil(lambda: status.text() == NOT_SIGNED_IN_MESSAGE, timeout=5000)
+
+
+def test_a_closed_window_is_freed_by_reference_counting(qtbot, settings_path):
+    """A closed window is freed when its last reference goes, not later by the cyclic collector.
+
+    The collector runs on whichever thread allocates. A window left for it could be freed on a pool
+    worker, which would delete its widgets off the GUI thread. The collector is off for this test,
+    so only reference counting can free the window here.
+    """
+    gc.disable()
+    try:
+        window = _shown_window(qtbot, settings_path, _sources(token=None))
+        ref = weakref.ref(window)
+        window.close()
+        del window
+        assert ref() is None
+    finally:
+        gc.enable()
+
+
+def test_a_load_that_finishes_after_its_tab_is_deleted_touches_no_tab(qtbot, settings_path):
+    """The worker finishes a load after its tab is gone. It emits to the shared delivery object only,
+    so nothing raises and the deleted tab is never touched."""
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def transport(request, timeout):
+        entered.set()
+        release.wait(5)
+        return local_client._Reply(200, json.dumps(SERVER_PROJECT_ROWS).encode("utf-8"))
+
+    window = _shown_window(qtbot, settings_path, _server_sources(transport))
+    assert entered.wait(5)
+    window.close()
+    shiboken6.delete(window)  # the tab's widgets are gone on the GUI thread while the worker still reads
+    del window
+    release.set()
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    qtbot.wait(50)  # let any delivered result reach the event loop
 
 
 # The running server's GET /projects rows. Newest first, as the server orders them, and each row
