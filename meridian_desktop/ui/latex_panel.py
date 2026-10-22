@@ -12,16 +12,18 @@ answers, what the probe found, and one sentence on how to start the engine.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop import latex_client
 from meridian_desktop.latex_client import PROBE_TIMEOUT, EngineStatus
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 UNCHECKED_TEXT = "LaTeX engine: not checked yet"
@@ -49,6 +51,16 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     return make_selectable(label)
+
+
+def _probe(settings: SettingsStore, client: Any) -> _Probe:
+    """Read the engine address from settings, then probe it. Runs on a worker thread.
+
+    A module-level function over the settings store and the client only, so the job never holds the panel.
+    """
+    url = settings.load().settings.engine_url
+    status = client.probe_engine(url, PROBE_TIMEOUT)
+    return _Probe(port=latex_client.port_text(url), status=status)
 
 
 def engine_version_text(status: EngineStatus | None) -> str:
@@ -115,13 +127,11 @@ class _ProbeJob(QRunnable):
         try:
             self._deliver((probe, failure))
         except RuntimeError:
-            pass  # the panel was deleted while the probe ran
+            pass  # the shared delivery object is gone, for example at shutdown
 
 
 class LatexPanel(QWidget):
     """The LaTeX section of the Writing tab: running or not, with both versions side by side."""
-
-    _probe_finished = Signal(object)
 
     def __init__(
         self,
@@ -135,7 +145,11 @@ class LatexPanel(QWidget):
         self._client = client
         self._probed_on_show = False
         self._probing = False
-        self._probe_finished.connect(self._on_probe_finished)
+        # Identifies this panel's probes. A plain object, so a job can hold it without holding the panel.
+        self._owner = object()
+        # Each probe takes the next number. A result with an older number is dropped.
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -185,18 +199,32 @@ class LatexPanel(QWidget):
         if self._probing:
             return
         self._probing = True
+        self._generation += 1
+        generation = self._generation
         self._check_button.setEnabled(False)
         self._status.setText(CHECKING_TEXT)
         self._detail.setText("")
-        QThreadPool.globalInstance().start(_ProbeJob(self._probe_work, self._probe_finished.emit))
+        # The job holds the probe's inputs (the settings store and the client), this panel's owner token and the
+        # shared delivery object. It never holds the panel, and the deliver closure captures no widget.
+        work = functools.partial(_probe, self._settings, self._client)
+        owner = self._owner
+        delivery = shared_delivery()
 
-    def _probe_work(self) -> _Probe:
-        """Read the engine address from settings, then probe it. Runs on a worker thread."""
-        url = self._settings.load().settings.engine_url
-        status = self._client.probe_engine(url, PROBE_TIMEOUT)
-        return _Probe(port=latex_client.port_text(url), status=status)
+        def deliver(payload: tuple) -> None:
+            delivery.delivered.emit(Delivered(owner, (generation, payload)))
+
+        QThreadPool.globalInstance().start(_ProbeJob(work, deliver))
 
     @Slot(object)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel, or for an older probe, is dropped here.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        generation, payload = item.value
+        if generation != self._generation:
+            return
+        self._on_probe_finished(payload)
+
     def _on_probe_finished(self, payload: tuple) -> None:
         probe, failure = payload
         self._probing = False
