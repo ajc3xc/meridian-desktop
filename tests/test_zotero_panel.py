@@ -5,10 +5,13 @@ The fake records each call and the thread it ran on, so a test can prove that ch
 and the start action run off the UI thread.
 """
 
+import gc
 import threading
+import weakref
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetSelectionRange,
+    QWidget,
 )
 
 from meridian_desktop.ui.text import SELECTABLE_TEXT
@@ -173,6 +177,44 @@ def test_first_show_checks_zotero_once_off_the_ui_thread(qtbot):
     panel.show()
     qtbot.wait(20)
     assert fake.names() == ["status"]
+
+
+def test_a_status_check_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(qtbot, monkeypatch):
+    """A panel deleted while its status check still runs is freed on the GUI thread, and no widget of it is touched.
+
+    The job used to hold the panel's own signal emit. When the pool ended the job on a worker, the worker dropped the
+    last reference, and the panel's widgets were deleted off the GUI thread. The job now emits to the shared delivery
+    object. The collector is off, so only reference counting can free the panel here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    touched = []
+    monkeypatch.setattr(ZoteroPanel, "_on_status_ready", lambda self, payload: touched.append(self._owner))
+
+    class HeldAtTheGate(FakeZotero):
+        def status(self):
+            entered.set()
+            gate.wait(5)
+            return super().status()
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = ZoteroPanel(client=HeldAtTheGate(), parent=container)
+        _named(panel, QPushButton, "zotero-refresh").click()
+        assert entered.wait(5)  # the status check has started and is held at the gate
+        owner = panel._owner
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the check still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert all(token is not owner for token in touched)  # the deleted panel's widgets are never touched
+    finally:
+        gate.set()
+        gc.enable()
 
 
 def test_refresh_button_checks_again(qtbot):

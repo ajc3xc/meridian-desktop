@@ -7,13 +7,16 @@ them. That line names the missing core item (MS-104). Nothing here makes a reque
 process or reads a real file. The page runs under pytest-qt on the offscreen platform (conftest).
 """
 
+import gc
 import threading
+import weakref
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget, QWidget
 
 from meridian_desktop.runner_client import (
     ERR_TIMEOUT,
@@ -234,6 +237,43 @@ def test_an_explicit_client_with_no_interpreter_is_a_missing_runner(qtbot):
     _show_and_wait(qtbot, page, HEADLINES[UNKNOWN])
 
     assert _label(page, "tunnel-run-reason").text() == NOT_AVAILABLE_REASON
+
+
+def test_a_check_still_running_when_its_page_is_deleted_does_not_keep_the_page(qtbot, monkeypatch):
+    """A page deleted while its check still runs is freed on the GUI thread, and no widget of it is touched.
+
+    The check used to hold the page's own signal emit. When the pool ended the check on a worker, the worker dropped
+    the last reference, and the page's widgets were deleted off the GUI thread. The check now emits to the shared
+    delivery object. The collector is off, so only reference counting can free the page here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    touched = []
+    monkeypatch.setattr(TunnelPage, "_on_check_finished", lambda self, payload: touched.append(self._owner))
+
+    def held(scope):
+        entered.set()
+        gate.wait(5)
+        return _reply("running")
+
+    gc.disable()
+    try:
+        container = QWidget()
+        page = TunnelPage(container, status=held, clock=_clock)
+        page.refresh()
+        assert entered.wait(5)  # the check has started and is held at the gate
+        owner = page._owner
+        ref = weakref.ref(page)
+        shiboken6.delete(container)  # the page's widgets are deleted on the GUI thread while the check still runs
+        del page
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert all(token is not owner for token in touched)  # the deleted page's widgets are never touched
+    finally:
+        gate.set()
+        gc.enable()
 
 
 def test_a_status_call_that_raises_shows_unknown_and_the_page_still_works(qtbot):

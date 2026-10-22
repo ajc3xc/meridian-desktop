@@ -5,11 +5,15 @@ socket opens and no request leaves this process. The settings file is a temp fil
 from conftest.
 """
 
+import gc
+import threading
 import urllib.error
+import weakref
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QPushButton
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
 from meridian_desktop import latex_client, local_client
 from meridian_desktop.latex_client import (
@@ -240,6 +244,45 @@ def test_panel_never_shows_not_built_yet(qtbot, settings_path):
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(NOT_RUNNING_STATUS)))
 
     assert "Not built yet" not in _all_label_text(panel)
+
+
+def test_a_probe_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(qtbot, settings_path, monkeypatch):
+    """A panel deleted while its probe still runs is freed on the GUI thread, and no widget of it is touched.
+
+    The job used to hold the panel: its probe was a bound method, and the result went to the panel's own signal. When
+    the pool ended the probe on a worker, the worker dropped the last reference, and the panel's widgets were deleted
+    off the GUI thread. The job now holds the settings store, the client and the shared delivery object. The collector
+    is off, so only reference counting can free the panel here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    touched = []
+    monkeypatch.setattr(LatexPanel, "_on_probe_finished", lambda self, payload: touched.append(self._owner))
+
+    class HeldAtTheGate(_FakeEngineClient):
+        def probe_engine(self, base_url, timeout):
+            entered.set()
+            gate.wait(5)
+            return super().probe_engine(base_url, timeout)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = LatexPanel(SettingsStore(settings_path), client=HeldAtTheGate(CONNECTED_STATUS), parent=container)
+        panel.findChild(QPushButton, "latex-check").click()
+        assert entered.wait(5)  # the probe has started and is held at the gate
+        owner = panel._owner
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the probe still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert all(token is not owner for token in touched)  # the deleted panel's widgets are never touched
+    finally:
+        gate.set()
+        gc.enable()
 
 
 def test_panel_makes_no_probe_until_it_is_shown(qtbot, settings_path):

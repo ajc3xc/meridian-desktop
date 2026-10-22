@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QTableWidget,
     QToolButton,
+    QWidget,
 )
 
 from _fakes import MemoryKeyring
@@ -44,7 +45,7 @@ from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import INTRO_UNREAD_TEXT, LogsPage
 from meridian_desktop.ui.main_window import TAB_NAMES, WRITING_SECTIONS, MainWindow
-from meridian_desktop.ui.projects_tab import default_sources
+from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.services_page import NOT_CHECKED, UNCHECKED_TEXT, ServicesPage
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
@@ -615,6 +616,45 @@ def test_projects_tab_falls_back_to_the_file_when_the_server_is_down(qtbot, sett
     assert status.text() == "Showing 3 project(s) from the database file."
     assert [table.item(row, 0).text() for row in range(3)] == ["Newest", "Middle", "Oldest"]
     assert calls == []
+
+
+def test_a_load_still_running_when_its_projects_tab_is_deleted_does_not_keep_the_tab(qtbot, settings_path, monkeypatch):
+    """A Projects tab deleted while its load still runs is freed on the GUI thread, and no widget of it is touched.
+
+    The load holds the settings store, the sources and the shared delivery object, never the tab, and the tab's own
+    token tells its results apart. The collector is off, so only reference counting can free the tab here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    touched = []
+    monkeypatch.setattr(ProjectsTab, "_show", lambda self, outcome: touched.append(self._owner))
+
+    def held_probe(url):
+        entered.set()
+        gate.wait(5)
+        return local_client.HEALTH_NOT_RUNNING
+
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    sources = dataclasses.replace(_sources(), probe=held_probe)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        tab = ProjectsTab(SettingsStore(settings_path), sources, parent=container)
+        tab.refresh()
+        assert entered.wait(5)  # the load has started and is held at the probe
+        owner = tab._owner
+        ref = weakref.ref(tab)
+        shiboken6.delete(container)  # the tab's widgets are deleted on the GUI thread while the load still runs
+        del tab
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert all(token is not owner for token in touched)  # the deleted tab's widgets are never touched
+    finally:
+        gate.set()
+        gc.enable()
 
 
 def test_hosted_reader_gets_the_stored_token_and_never_shows_it(qtbot, settings_path):

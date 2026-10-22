@@ -10,11 +10,13 @@ and has the shared Copy action (Ctrl+C or the right-click menu).
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop import zotero_client
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 from meridian_desktop.zotero_client import (
     API_DISABLED,
@@ -84,6 +87,10 @@ NO_RESULTS_TEXT = "No items in your Zotero library match \"{}\"."
 RESULTS_TEXT = "{} result(s) for \"{}\"."
 LIMIT_TEXT = " Showing the first {}; narrow the search to see fewer."
 RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
+# The three kinds of read the panel runs. Each kind has at most one read in flight.
+STATUS = "status"
+SEARCH = "search"
+ACTION = "action"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -148,6 +155,22 @@ def ask_start(parent: QWidget | None, command: str, folder: str) -> bool:
     return box.clickedButton() is start
 
 
+@dataclass(frozen=True)
+class _Done:
+    """One finished read: its kind, the number it was started with, and the (result, failure_text) its job made."""
+
+    kind: str
+    generation: int
+    payload: tuple
+
+
+def _launch(client: Any, exe: str) -> tuple[str, bool]:
+    """Start Zotero, then ask the local API once. Runs on a worker thread, and only after a yes."""
+    line = client.start_zotero(exe)
+    check = client.probe_api()
+    return line, check.state == API_ON
+
+
 class _Job(QRunnable):
     """Run ``work`` on the thread pool and deliver (result, failure_text).
 
@@ -173,15 +196,11 @@ class _Job(QRunnable):
         try:
             self._deliver((result, failure))
         except RuntimeError:
-            pass  # the tab was deleted while the job ran
+            pass  # the shared delivery object is gone, for example at shutdown
 
 
 class ZoteroPanel(QWidget):
     """The Zotero tab: status, Start Zotero behind a confirmation, and a read-only library search."""
-
-    _status_ready = Signal(object)
-    _search_ready = Signal(object)
-    _action_ready = Signal(object)
 
     def __init__(
         self,
@@ -200,9 +219,13 @@ class ZoteroPanel(QWidget):
         self._acting = False
         self._probed_on_show = False
         self._pending_query = ""
-        self._status_ready.connect(self._on_status_ready)
-        self._search_ready.connect(self._on_search_ready)
-        self._action_ready.connect(self._on_action_ready)
+        # Identifies this panel's reads. A plain object, so a job can hold it without holding the panel.
+        self._owner = object()
+        # Each read takes the next number, and each kind keeps the number of its latest read. A result from an older
+        # read of the same kind is dropped. Reads of different kinds never supersede each other.
+        self._generation = 0
+        self._latest: dict[str, int] = {}
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -285,9 +308,38 @@ class ZoteroPanel(QWidget):
         self._api.setText("")
         self._api_detail.setText("")
         self._start_hint.setText("")
-        QThreadPool.globalInstance().start(_Job(self._client.status, self._status_ready.emit))
+        self._start_read(STATUS, self._client.status)
+
+    def _start_read(self, kind: str, work: Callable[[], Any]) -> None:
+        """Start one read on the thread pool. Its result comes back to _on_delivered, tagged with kind and number."""
+        self._generation += 1
+        generation = self._generation
+        self._latest[kind] = generation
+        # The deliver closure captures only the owner, the kind, the number and the delivery object, never the panel.
+        owner = self._owner
+        delivery = shared_delivery()
+
+        def deliver(payload: tuple) -> None:
+            delivery.delivered.emit(Delivered(owner, _Done(kind, generation, payload)))
+
+        QThreadPool.globalInstance().start(_Job(work, deliver))
 
     @Slot(object)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel is dropped here, and so is one a newer read of its kind
+        # has superseded.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        done = item.value
+        if not isinstance(done, _Done) or done.generation != self._latest.get(done.kind):
+            return
+        if done.kind == STATUS:
+            self._on_status_ready(done.payload)
+        elif done.kind == SEARCH:
+            self._on_search_ready(done.payload)
+        elif done.kind == ACTION:
+            self._on_action_ready(done.payload)
+
     def _on_status_ready(self, payload: tuple) -> None:
         result, failure = payload
         self._checking = False
@@ -338,15 +390,8 @@ class ZoteroPanel(QWidget):
         self._acting = True
         self._start_button.setEnabled(False)
         self._start_result.setText(STARTING_TEXT)
-        QThreadPool.globalInstance().start(_Job(lambda: self._launch(exe), self._action_ready.emit))
+        self._start_read(ACTION, functools.partial(_launch, self._client, exe))
 
-    def _launch(self, exe: str) -> tuple[str, bool]:
-        """Start Zotero, then ask the local API once. Runs on a worker thread, and only after a yes."""
-        line = self._client.start_zotero(exe)
-        check = self._client.probe_api()
-        return line, check.state == API_ON
-
-    @Slot(object)
     def _on_action_ready(self, payload: tuple) -> None:
         result, failure = payload
         self._acting = False
@@ -374,11 +419,8 @@ class ZoteroPanel(QWidget):
         self._search_button.setEnabled(False)
         self._search_status.setText(SEARCHING_TEXT)
         self._results.setRowCount(0)
-        QThreadPool.globalInstance().start(
-            _Job(lambda: self._client.search_items(query), self._search_ready.emit)
-        )
+        self._start_read(SEARCH, functools.partial(self._client.search_items, query))
 
-    @Slot(object)
     def _on_search_ready(self, payload: tuple) -> None:
         result, failure = payload
         self._searching = False

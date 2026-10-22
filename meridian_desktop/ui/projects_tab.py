@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -50,6 +50,7 @@ from meridian_desktop.data_source import (
 from meridian_desktop.projects_reader import PROJECT_COLUMNS
 from meridian_desktop.secret_store import SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
@@ -116,12 +117,11 @@ def detail_text(row: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class _Loaded:
-    """One finished load: the tab that started it, its generation, and what the resolver returned.
+    """One finished load: the number it was started with, and what the resolver returned.
 
-    ``owner`` is a plain token object, not the tab, so a _Loaded holds no Qt object.
+    It is the value of a Delivered whose owner is the tab's token, so it holds no Qt object.
     """
 
-    owner: object
     generation: int
     outcome: Resolution
 
@@ -131,30 +131,13 @@ def _settings_resolution(store: SettingsStore, sources: DataSources) -> Resoluti
     return resolve(store.load().settings, sources)
 
 
-class _Delivery(QObject):
-    """The one object a pool job emits to. It is never deleted, so an emit always has a live target."""
-
-    delivered = Signal(object)
-
-
-_DELIVERY: _Delivery | None = None
-
-
-def _delivery() -> _Delivery:
-    """The shared delivery object. The first tab creates it on the GUI thread, and it lives until the process ends."""
-    global _DELIVERY
-    if _DELIVERY is None:
-        _DELIVERY = _Delivery()
-    return _DELIVERY
-
-
 class _LoadJob(QRunnable):
-    """Run one resolve on the thread pool and emit its _Loaded to the shared delivery object.
+    """Run one resolve on the thread pool and deliver its _Loaded to the shared delivery object.
 
-    The job holds plain data only: an owner token, a generation number, the work, and the emit of
-    the delivery object. It never holds the tab, so the worker never touches a tab, even one that
-    was deleted while the load ran. A failure becomes a read_failed Resolution that names the
-    exception class only, so a raw exception, and any value inside it, never reaches the UI thread.
+    The job holds plain data only: an owner token, a generation number, the work, and the shared delivery object.
+    It never holds the tab, so the worker never touches a tab, even one that was deleted while the load ran. A failure
+    becomes a read_failed Resolution that names the exception class only, so a raw exception, and any value inside it,
+    never reaches the UI thread.
     """
 
     def __init__(
@@ -162,21 +145,24 @@ class _LoadJob(QRunnable):
         owner: object,
         generation: int,
         work: Callable[[], Resolution],
-        deliver: Callable[[_Loaded], None],
+        delivery: Delivery,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._owner = owner
         self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._delivery = delivery
 
     def run(self) -> None:
         try:
             outcome = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             outcome = Resolution(STATE_READ_FAILED, None, message=f"Projects could not be loaded ({exc.__class__.__name__}).")
-        self._deliver(_Loaded(self._owner, self._generation, outcome))
+        try:
+            self._delivery.delivered.emit(Delivered(self._owner, _Loaded(self._generation, outcome)))
+        except RuntimeError:
+            pass  # the shared delivery object is gone, for example at shutdown
 
 
 class ProjectsTab(QWidget):
@@ -191,7 +177,7 @@ class ProjectsTab(QWidget):
         # Identifies this tab's loads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._rows: list[dict[str, Any]] = []
-        _delivery().delivered.connect(self._on_delivered)
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
@@ -240,14 +226,17 @@ class ProjectsTab(QWidget):
         """Start a load of the rows. A load still running is superseded, and its result is dropped."""
         self._generation += 1
         self._status.setText(LOADING_TEXT)
-        # The job gets the store and the sources, not self: a worker never holds the tab.
+        # The job gets the store, the sources and the shared delivery object, not self: a worker never holds the tab.
         work = functools.partial(_settings_resolution, self._settings, self._sources)
-        QThreadPool.globalInstance().start(_LoadJob(self._owner, self._generation, work, _delivery().delivered.emit))
+        QThreadPool.globalInstance().start(_LoadJob(self._owner, self._generation, work, shared_delivery()))
 
     @Slot(object)
-    def _on_delivered(self, loaded: _Loaded) -> None:
+    def _on_delivered(self, item: object) -> None:
         # Runs on the GUI thread. Another tab's load, or a load a newer one has superseded, is dropped.
-        if loaded.owner is not self._owner or loaded.generation != self._generation:
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        loaded = item.value
+        if not isinstance(loaded, _Loaded) or loaded.generation != self._generation:
             return
         self._show(loaded.outcome)
 

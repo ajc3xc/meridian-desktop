@@ -19,7 +19,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,6 +46,7 @@ from meridian_desktop.tunnel_status import (
     read_tunnel_status,
 )
 from meridian_desktop.tunnel_view import slot_details, slots_of
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 NOT_AVAILABLE_TEXT = (
@@ -79,8 +80,9 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
 class TunnelCheckJob(QRunnable):
     """Run one tunnel check on the thread pool and deliver (status, failure_name).
 
-    A check that raises is reduced to its class name here, so a raw exception never reaches the UI thread.
-    The top bar in Tunnel mode uses this job too (ui/main_window.py).
+    The job holds only the work and the deliver callable its caller builds. The caller's deliver emits to the shared
+    delivery object, never to a window or page, so the worker never holds one (see TunnelPage.refresh and
+    ui/main_window.py). A check that raises is reduced to its class name here, so a raw exception never reaches the UI.
     """
 
     def __init__(self, work: Callable[[], TunnelStatus], deliver: Callable[[tuple], None]) -> None:
@@ -99,13 +101,11 @@ class TunnelCheckJob(QRunnable):
         try:
             self._deliver((status, failure))
         except RuntimeError:
-            pass  # the page was deleted while the check ran
+            pass  # the shared delivery object is gone, for example at shutdown
 
 
 class TunnelPage(QWidget):
     """The Tunnel tab: the tunnel's running state, then the slot table. It has no control of its own."""
-
-    _checks_finished = Signal(object)
 
     def __init__(
         self,
@@ -121,7 +121,11 @@ class TunnelPage(QWidget):
         self._check_runner = status if status is not None else RunnerClient().status
         self._clock = clock
         self._busy = False
-        self._checks_finished.connect(self._on_check_finished)
+        # Identifies this page's checks. A plain object, so a job can hold it without holding the page.
+        self._owner = object()
+        # Each check takes the next number. A result with an older number is dropped.
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         layout = QVBoxLayout(self)
 
         self._run_state = _label(self, "tunnel-run-state", NOT_CHECKED_TEXT)
@@ -153,15 +157,33 @@ class TunnelPage(QWidget):
         if self._busy:
             return
         self._busy = True
+        self._generation += 1
+        generation = self._generation
         self._run_state.setText(CHECKING_TEXT)
         check, clock = self._check_runner, self._clock
-        QThreadPool.globalInstance().start(
-            TunnelCheckJob(lambda: read_tunnel_status(check, clock=clock), self._checks_finished.emit)
-        )
+        # The job holds the check, the clock, this page's owner token and the shared delivery object. It never holds
+        # the page, and the deliver closure captures only the owner, the generation and the delivery object.
+        owner = self._owner
+        delivery = shared_delivery()
+
+        def deliver(payload: tuple) -> None:
+            delivery.delivered.emit(Delivered(owner, (generation, payload)))
+
+        QThreadPool.globalInstance().start(TunnelCheckJob(lambda: read_tunnel_status(check, clock=clock), deliver))
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self.refresh()
+
+    @Slot(object)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another page or window, or for an older check, is dropped here.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        generation, payload = item.value
+        if generation != self._generation:
+            return
+        self._on_check_finished(payload)
 
     def _on_check_finished(self, payload: tuple) -> None:
         status, failure = payload
