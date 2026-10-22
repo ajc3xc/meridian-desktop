@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop.desktop_log import read_desktop_log_tail, redact_text
@@ -38,6 +38,7 @@ from meridian_desktop.log_tail import (
     read_tunnel_log_tail,
 )
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
@@ -189,18 +190,56 @@ def _pane(parent: QWidget, name: str) -> QPlainTextEdit:
     return pane
 
 
-class _ReadJob(QRunnable):
-    """Run the reads on the thread pool and deliver (outcome, failure_name).
+@dataclass(frozen=True)
+class _Finished:
+    """One finished pass, as its job hands it back. ``failure`` is the class name of an exception that got past the guards."""
 
-    Any exception that gets past the per-read guards is reduced to its class name here, so a
-    raw exception never reaches the UI thread.
+    generation: int
+    outcome: LogsOutcome | None
+    failure: str | None
+
+
+class _Reads:
+    """The three reads the Logs tab runs on the worker thread, through the readers it was given.
+
+    It holds no widget. A pass still running when the page is deleted therefore never keeps the page alive, and never
+    touches it. The page holds one of these and hands its ``collect`` method to the thread pool.
     """
 
-    def __init__(self, work: Callable[[], LogsOutcome], deliver: Callable[[tuple], None]) -> None:
+    def __init__(
+        self,
+        desktop_log: Callable[[], LogTail],
+        tunnel_log: Callable[[], LogTail],
+        runner: Callable[[], RunnerResult],
+    ) -> None:
+        self._desktop_log = desktop_log
+        self._tunnel_log = tunnel_log
+        self._runner = runner
+
+    def collect(self) -> LogsOutcome:
+        """Run the three reads in order. Runs on a worker thread, and never raises for one failed read."""
+        failures: dict[str, str] = {}
+        desktop = _guarded("desktop", failures, self._desktop_log)
+        tunnel = _guarded("tunnel", failures, self._tunnel_log)
+        runner = _guarded("runner", failures, self._runner)
+        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures, desktop=desktop)
+
+
+class _ReadJob(QRunnable):
+    """Run one pass of the reads on the thread pool and deliver a _Finished to the shared delivery object.
+
+    The job holds only the work, the owner token, the generation and the shared delivery object. It never holds the
+    page. Any exception that gets past the per-read guards is reduced to its class name here, so a raw exception
+    never reaches the UI thread.
+    """
+
+    def __init__(self, generation: int, work: Callable[[], LogsOutcome], owner: object, delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._owner = owner
+        self._delivery = delivery
 
     def run(self) -> None:
         outcome: LogsOutcome | None = None
@@ -209,10 +248,7 @@ class _ReadJob(QRunnable):
             outcome = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failure = exc.__class__.__name__
-        try:
-            self._deliver((outcome, failure))
-        except RuntimeError:
-            pass  # the page was deleted while the reads ran
+        self._delivery.delivered.emit(Delivered(self._owner, _Finished(self._generation, outcome, failure)))
 
 
 class LogsPage(QWidget):
@@ -220,8 +256,6 @@ class LogsPage(QWidget):
 
     The three reads are injected. The app passes the defaults above. Tests pass fakes or temp files.
     """
-
-    _reads_finished = Signal(object)
 
     def __init__(
         self,
@@ -233,11 +267,12 @@ class LogsPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("logs-page")
-        self._desktop_log = desktop_log
-        self._tunnel_log = tunnel_log
-        self._runner = runner
+        self._reads = _Reads(desktop_log, tunnel_log, runner)
         self._busy = False
-        self._reads_finished.connect(self._on_reads_finished)
+        # Identifies this page's passes. A plain object, so a job can hold it without holding the page.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     @property
@@ -280,27 +315,27 @@ class LogsPage(QWidget):
         if self._busy:
             return
         self._busy = True
+        self._generation += 1
+        generation = self._generation
         self._refresh_button.setEnabled(False)
         self._show_reading()
-        QThreadPool.globalInstance().start(_ReadJob(self._collect, self._reads_finished.emit))
-
-    def _collect(self) -> LogsOutcome:
-        """Run the three reads in order. Runs on a worker thread, and never raises for one failed read."""
-        failures: dict[str, str] = {}
-        desktop = _guarded("desktop", failures, self._desktop_log)
-        tunnel = _guarded("tunnel", failures, self._tunnel_log)
-        runner = _guarded("runner", failures, self._runner)
-        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures, desktop=desktop)
+        # The job holds the reads, the owner token, the generation and the shared delivery object. It never holds the page.
+        QThreadPool.globalInstance().start(_ReadJob(generation, self._reads.collect, self._owner, shared_delivery()))
 
     @Slot(object)
-    def _on_reads_finished(self, payload: tuple) -> None:
-        outcome, failure = payload
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another page is dropped here, and so is one from an earlier pass.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        finished = item.value
+        if not isinstance(finished, _Finished) or finished.generation != self._generation:
+            return
         self._busy = False
         self._refresh_button.setEnabled(True)
-        if failure is not None or not isinstance(outcome, LogsOutcome):
-            self._show_all_failed(failure or NO_RESULT)
+        if finished.failure is not None or not isinstance(finished.outcome, LogsOutcome):
+            self._show_all_failed(finished.failure or NO_RESULT)
             return
-        self._show(outcome)
+        self._show(finished.outcome)
 
     # ----------------------------------------------------------- display
 

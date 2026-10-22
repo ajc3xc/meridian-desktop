@@ -8,15 +8,18 @@ no request leaves this process. Nothing starts a process or reads the keychain. 
 is a temp file. Offscreen Qt, from conftest.
 """
 
+import gc
 import itertools
 import subprocess
 import threading
 import urllib.error
 import urllib.parse
+import weakref
 from datetime import datetime, timedelta
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
+import shiboken6
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QTableWidget,
     QToolButton,
+    QWidget,
 )
 
 from meridian_desktop import latex_client, local_client
@@ -724,7 +728,7 @@ def test_an_unexpected_failure_of_the_whole_pass_is_reported_without_its_text(qt
     def broken_pass():
         raise KeyError("SECRET-KEY-TEXT")
 
-    page._collect = broken_pass
+    page._checks.collect = broken_pass
     _press(qtbot, page)
 
     assert _text(page, "services-health") == "Local server health: could not check"
@@ -741,3 +745,43 @@ def test_a_runner_reply_without_a_child_state_reads_could_not_check(qtbot, setti
 
     assert _text(page, "services-runner") == "Runner: could not check"
     assert _text(page, "services-runner-seen") == "The runner reply did not include a child state."
+
+
+def test_a_pass_still_running_when_the_page_is_deleted_does_not_keep_the_page(qtbot, settings_path, monkeypatch):
+    """A page deleted while its checks still run is freed on the GUI thread, because the pass holds no page.
+
+    The pass used to hold the page through its bound collect method and its signal emit. When the pool ended the
+    pass on a worker, the worker dropped the last reference, so the page could be freed off the GUI thread. The
+    collector is off here, so only reference counting can free the page. Nothing reaches the page after it is gone.
+    """
+    gate = threading.Event()
+    shown = []
+    monkeypatch.setattr(ServicesPage, "_show", lambda self, outcome: shown.append(outcome))
+    monkeypatch.setattr(ServicesPage, "_show_all_failed", lambda self, failure: shown.append(failure))
+    health = Recorder(HealthFacts(state="running"), gate=gate)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        page = ServicesPage(
+            SettingsStore(settings_path),
+            health=health,
+            engine=Recorder(ENGINE_UP),
+            runner=Recorder(_runner_ok()),
+            ports=Recorder(_ports()),
+            clock=lambda: FIXED_NOW,
+            parent=container,
+        )
+        page.findChild(QPushButton, "services-check").click()
+        qtbot.waitUntil(lambda: bool(health.calls), timeout=5000)  # the pass has started and is held at the gate
+        ref = weakref.ref(page)
+        shiboken6.delete(container)  # the page's widgets are deleted on the GUI thread while the pass still runs
+        del page
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert shown == []
+    finally:
+        gate.set()
+        gc.enable()

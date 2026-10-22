@@ -22,11 +22,11 @@ Meridian core checkout and its Python, and one row per client. Nothing in it run
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop import hosted_client, token_store
@@ -36,6 +36,7 @@ from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -101,30 +102,61 @@ def _set_message(label: QLabel, text: str) -> None:
     label.setVisible(bool(text))
 
 
-class _ConnectionTestJob(QRunnable):
-    """Run one connection test on the thread pool and deliver its plain-words text."""
+@dataclass(frozen=True)
+class _TestDone:
+    """One finished connection test, as its job hands it back: its generation and the plain-words text to show."""
 
-    def __init__(self, work: Callable[[], str], deliver: Callable[[str], None]) -> None:
+    generation: int
+    text: str
+
+
+class _ConnectionCheck:
+    """The hosted connection test, run on the worker thread through the settings store, the keychain and the list call.
+
+    It holds no widget. A test still running when the tab is deleted therefore never keeps the tab alive, and never
+    touches it. The tab holds one of these and hands its ``run`` method to the thread pool.
+    """
+
+    def __init__(self, settings_store: SettingsStore, secrets: SecretStore, list_hosted: ListHostedFn) -> None:
+        self._store = settings_store
+        self._secrets = secrets
+        self._list_hosted = list_hosted
+
+    def run(self) -> str:
+        """Runs on a worker. One GET /projects with the saved URL and token. Returns the text to show."""
+        url = self._store.load().settings.hosted_url
+        token = token_store.get_token(store=self._secrets)
+        try:
+            rows = self._list_hosted(url, token)
+        except Exception as exc:  # noqa: BLE001 - shown as plain words, never as the raw exception
+            return describe_test_failure(exc)
+        return TEST_CONNECTED_TEXT.format(url=url, count=len(rows))
+
+
+class _ConnectionTestJob(QRunnable):
+    """Run one connection test on the thread pool and deliver a _TestDone to the shared delivery object.
+
+    The job holds only the work, the owner token, the generation and the shared delivery object. It never holds the tab.
+    """
+
+    def __init__(self, generation: int, work: Callable[[], str], owner: object, delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._generation = generation
         self._work = work
-        self._deliver = deliver
+        self._owner = owner
+        self._delivery = delivery
 
     def run(self) -> None:
         try:
             text = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             text = describe_test_failure(exc)
-        try:
-            self._deliver(text)
-        except RuntimeError:
-            pass  # the tab was deleted while the test ran
+        self._delivery.delivered.emit(Delivered(self._owner, _TestDone(self._generation, text)))
 
 
 class SettingsTab(QWidget):
     """Edit the hosted URL and token, test the hosted connection, edit the local URL and the database file, and show the saved mode."""
-
-    _test_done = Signal(str)
 
     def __init__(
         self,
@@ -140,7 +172,11 @@ class SettingsTab(QWidget):
         self._choose_database = choose_database
         self._secrets = secrets if secrets is not None else KeyringSecretStore()
         self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
-        self._test_done.connect(self._on_test_done)
+        self._check = _ConnectionCheck(settings_store, self._secrets, self._list_hosted)
+        # Identifies this tab's connection tests. A plain object, so a job can hold it without holding the tab.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
         self.refresh()
 
@@ -319,22 +355,21 @@ class SettingsTab(QWidget):
     def _on_test_clicked(self) -> None:
         self._test_button.setEnabled(False)
         _set_message(self._test_result, TEST_RUNNING_TEXT)
-        QThreadPool.globalInstance().start(_ConnectionTestJob(self._run_connection_test, self._test_done.emit))
+        self._generation += 1
+        generation = self._generation
+        # The job holds the check, the owner token, the generation and the shared delivery object. It never holds the tab.
+        QThreadPool.globalInstance().start(_ConnectionTestJob(generation, self._check.run, self._owner, shared_delivery()))
 
-    def _run_connection_test(self) -> str:
-        """Runs on a worker. One GET /projects with the saved URL and token. Returns the text to show."""
-        url = self._store.load().settings.hosted_url
-        token = token_store.get_token(store=self._secrets)
-        try:
-            rows = self._list_hosted(url, token)
-        except Exception as exc:  # noqa: BLE001 - shown as plain words, never as the raw exception
-            return describe_test_failure(exc)
-        return TEST_CONNECTED_TEXT.format(url=url, count=len(rows))
-
-    @Slot(str)
-    def _on_test_done(self, text: str) -> None:
+    @Slot(object)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another tab is dropped here, and so is one from an earlier test.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        done = item.value
+        if not isinstance(done, _TestDone) or done.generation != self._generation:
+            return
         self._test_button.setEnabled(True)
-        _set_message(self._test_result, text)
+        _set_message(self._test_result, done.text)
 
     # ----------------------------------------------------------- local settings
 

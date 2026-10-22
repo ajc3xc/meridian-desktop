@@ -33,6 +33,7 @@ from meridian_desktop import local_client
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
@@ -155,19 +156,68 @@ class _Outcome:
     failure: str | None = None
 
 
-class _Job(QRunnable):
-    """Run one callable on the thread pool and deliver (job_id, result, error_text).
+@dataclass(frozen=True)
+class _JobDone:
+    """One finished job, as it is handed back: its job id, the callable's result, and the error text if it failed."""
 
-    The error text is produced here, in the worker, so a raw exception never reaches
-    the UI thread. An exception that could hold a value is reduced to its class name.
+    job_id: int
+    result: Any
+    error: str | None
+
+
+class _Work:
+    """The panel's work on the thread pool: the keychain calls and the loopback calls, through the stores and client it was given.
+
+    It holds no widget. A job that holds one of these methods never keeps the panel alive, and never touches it. The
+    panel holds one of these and hands its methods to the thread pool.
     """
 
-    def __init__(self, job_id: int, work: Callable[[], Any], deliver: Callable[[tuple], None]) -> None:
+    def __init__(self, settings_store: SettingsStore, secret_store: SecretStore, client: Any) -> None:
+        self._settings = settings_store
+        self._secrets = secret_store
+        self._client = client
+
+    def read_key_present(self) -> bool:
+        """True when a key is stored. The value stays in the worker and is never returned."""
+        return self._secrets.get_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT) is not None
+
+    def set_key(self, value: str) -> Any:
+        return self._secrets.set_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT, value)
+
+    def delete_key(self) -> Any:
+        return self._secrets.delete_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT)
+
+    def local(self, fetch: Callable[[str, float], dict[str, Any]] | None) -> _Outcome:
+        """Probe the local server, then run ``fetch`` only when it is running. Runs on a worker."""
+        url = self._settings.load().settings.local_url
+        state = self._client.probe_health(url, PROBE_TIMEOUT)
+        outcome = _Outcome(url=url, state=state)
+        if fetch is not None and state == local_client.HEALTH_RUNNING:
+            try:
+                outcome.payload = fetch(url, RUNPOD_TIMEOUT)
+            except LocalClientError as exc:
+                outcome.failure = describe_local_error(exc)
+        return outcome
+
+    def probe_only(self) -> _Outcome:
+        return self.local(None)
+
+
+class _Job(QRunnable):
+    """Run one callable on the thread pool and deliver a _JobDone to the shared delivery object.
+
+    The job holds only the callable, the owner token, its job id and the shared delivery object. It never holds the
+    panel. The error text is produced here, in the worker, so a raw exception never reaches the UI thread. An
+    exception that could hold a value is reduced to its class name.
+    """
+
+    def __init__(self, job_id: int, work: Callable[[], Any], owner: object, delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._job_id = job_id
         self._work = work
-        self._deliver = deliver
+        self._owner = owner
+        self._delivery = delivery
 
     def run(self) -> None:
         result: Any = None
@@ -180,10 +230,7 @@ class _Job(QRunnable):
             error = str(exc)
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             error = f"Unexpected {exc.__class__.__name__}. Details were not shown."
-        try:
-            self._deliver((self._job_id, result, error))
-        except RuntimeError:
-            pass  # the panel was deleted while the job ran
+        self._delivery.delivered.emit(Delivered(self._owner, _JobDone(self._job_id, result, error)))
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -199,7 +246,6 @@ class RunPodPanel(QWidget):
 
     #: Emitted when no background job is running.
     idle = Signal()
-    _job_finished = Signal(object)
 
     @property
     def busy(self) -> bool:
@@ -215,16 +261,18 @@ class RunPodPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("runpod-panel")
-        self._settings = settings_store
-        self._secrets = secret_store
         self._client = client
+        self._work = _Work(settings_store, secret_store, client)
+        # Identifies this panel's jobs. A plain object, so a job can hold it without holding the panel.
+        self._owner = object()
         self._job_ids = itertools.count(1)
-        self._handlers: dict[int, Callable[[Any, str | None], None]] = {}
+        # Each waiting job's handler, as an unbound function. A bound method would make the panel hold itself.
+        self._handlers: dict[int, Callable[[RunPodPanel, Any, str | None], None]] = {}
         self._pending = 0
         self._probed_on_show = False
-        self._job_finished.connect(self._on_job_finished)
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
-        self._submit(self._read_key_present, self._on_key_checked)
+        self._submit(self._work.read_key_present, RunPodPanel._on_key_checked)
 
     # ----------------------------------------------------------- layout
 
@@ -286,19 +334,26 @@ class RunPodPanel(QWidget):
 
     # ----------------------------------------------------------- jobs
 
-    def _submit(self, work: Callable[[], Any], handler: Callable[[Any, str | None], None]) -> None:
+    def _submit(self, work: Callable[[], Any], handler: Callable[[RunPodPanel, Any, str | None], None]) -> None:
         job_id = next(self._job_ids)
         self._handlers[job_id] = handler
         self._pending += 1
         self._set_busy(True)
-        QThreadPool.globalInstance().start(_Job(job_id, work, self._job_finished.emit))
+        # The job holds the callable, the owner token, its job id and the shared delivery object. It never holds the panel.
+        QThreadPool.globalInstance().start(_Job(job_id, work, self._owner, shared_delivery()))
 
     @Slot(object)
-    def _on_job_finished(self, payload: tuple) -> None:
-        job_id, result, error = payload
-        handler = self._handlers.pop(job_id)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel is dropped here, and so is one for a job this panel is not
+        # waiting for. Every job has its own id, and each one's handler must run, so no newer job supersedes another.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        done = item.value
+        if not isinstance(done, _JobDone) or done.job_id not in self._handlers:
+            return
+        handler = self._handlers.pop(done.job_id)
         self._pending -= 1
-        handler(result, error)
+        handler(self, done.result, done.error)
         self._set_busy(self._pending > 0)
         if self._pending == 0:
             self.idle.emit()
@@ -311,22 +366,6 @@ class RunPodPanel(QWidget):
         if result.state is not None:
             self._server_status.setText(server_state_text(result.state, result.url))
         return result
-
-    def _local_work(self, fetch: Callable[[str, float], dict[str, Any]] | None) -> _Outcome:
-        """Probe the local server, then run ``fetch`` only when it is running. Runs on a worker."""
-        url = self._settings.load().settings.local_url
-        state = self._client.probe_health(url, PROBE_TIMEOUT)
-        outcome = _Outcome(url=url, state=state)
-        if fetch is not None and state == local_client.HEALTH_RUNNING:
-            try:
-                outcome.payload = fetch(url, RUNPOD_TIMEOUT)
-            except LocalClientError as exc:
-                outcome.failure = describe_local_error(exc)
-        return outcome
-
-    def _read_key_present(self) -> bool:
-        """True when a key is stored. The value stays in the worker and is never returned."""
-        return self._secrets.get_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT) is not None
 
     def _on_key_checked(self, result: Any, error: str | None) -> None:
         if error is not None:
@@ -342,7 +381,8 @@ class RunPodPanel(QWidget):
         if not value.strip():
             self._result.setText("Type a key first, then press Save key.")
             return
-        self._submit(lambda: self._secrets.set_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT, value), self._on_save_done)
+        work = self._work
+        self._submit(lambda: work.set_key(value), RunPodPanel._on_save_done)
 
     def _on_save_done(self, result: Any, error: str | None) -> None:
         if error is not None:
@@ -354,7 +394,7 @@ class RunPodPanel(QWidget):
 
     @Slot()
     def _on_remove_clicked(self) -> None:
-        self._submit(lambda: self._secrets.delete_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT), self._on_remove_done)
+        self._submit(self._work.delete_key, RunPodPanel._on_remove_done)
 
     def _on_remove_done(self, result: Any, error: str | None) -> None:
         if error is not None:
@@ -368,7 +408,8 @@ class RunPodPanel(QWidget):
     @Slot()
     def _on_test_clicked(self) -> None:
         check = self._client.runpod_check
-        self._submit(lambda: self._local_work(check), self._on_test_done)
+        work = self._work
+        self._submit(lambda: work.local(check), RunPodPanel._on_test_done)
 
     def _on_test_done(self, result: Any, error: str | None) -> None:
         outcome = self._take(result, error)
@@ -384,7 +425,8 @@ class RunPodPanel(QWidget):
     @Slot()
     def _on_refresh_clicked(self) -> None:
         listing = self._client.runpod_list_pods
-        self._submit(lambda: self._local_work(listing), self._on_refresh_done)
+        work = self._work
+        self._submit(lambda: work.local(listing), RunPodPanel._on_refresh_done)
 
     def _on_refresh_done(self, result: Any, error: str | None) -> None:
         outcome = self._take(result, error)
@@ -423,10 +465,7 @@ class RunPodPanel(QWidget):
         super().showEvent(event)
         if not self._probed_on_show:
             self._probed_on_show = True
-            self._submit(self._local_work_probe_only, self._take_probe_only)
-
-    def _local_work_probe_only(self) -> _Outcome:
-        return self._local_work(None)
+            self._submit(self._work.probe_only, RunPodPanel._take_probe_only)
 
     def _take_probe_only(self, result: Any, error: str | None) -> None:
         self._take(result, error)

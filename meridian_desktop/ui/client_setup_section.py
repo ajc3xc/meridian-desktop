@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -45,6 +45,7 @@ from meridian_desktop.client_setup_runner import (
     unchecked_rows,
 )
 from meridian_desktop.settings_store import CORE_CHECKOUT_KEY, CORE_PYTHON_KEY, SettingsStore
+from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 HEADING_TEXT = "Client setup"
@@ -209,15 +210,37 @@ class _Pending:
     mode: str
 
 
-class _CommandJob(QRunnable):
-    """Run one command on the thread pool and hand (pending, result) back to the window."""
+@dataclass(frozen=True)
+class _Done:
+    """One finished command, as its job hands it back: its generation, what it was started for, and its result."""
 
-    def __init__(self, pending: _Pending, work: Callable[[], object], deliver: Callable[[object], None]) -> None:
+    generation: int
+    pending: _Pending
+    payload: object
+
+
+class _CommandJob(QRunnable):
+    """Run one command on the thread pool and deliver a _Done to the shared delivery object.
+
+    The job holds only the command, the owner token, the generation and the shared delivery object. It never holds the
+    section.
+    """
+
+    def __init__(
+        self,
+        generation: int,
+        pending: _Pending,
+        work: Callable[[], object],
+        owner: object,
+        delivery: Delivery,
+    ) -> None:
         super().__init__()
         self.setAutoDelete(True)
+        self._generation = generation
         self._pending = pending
         self._work = work
-        self._deliver = deliver
+        self._owner = owner
+        self._delivery = delivery
 
     def run(self) -> None:
         try:
@@ -229,10 +252,7 @@ class _CommandJob(QRunnable):
                 payload = CheckResult(rows=unchecked_rows(), message=text)
             else:
                 payload = CommandResult(False, KIND_FAILED, text)
-        try:
-            self._deliver((self._pending, payload))
-        except RuntimeError:
-            pass  # the section was deleted while the command ran
+        self._delivery.delivered.emit(Delivered(self._owner, _Done(self._generation, self._pending, payload)))
 
 
 @dataclass
@@ -246,8 +266,6 @@ class _RowWidgets:
 
 class ClientSetupSection(QWidget):
     """The client setup block for the Settings page. One section, one row per client."""
-
-    _finished = Signal(object)
 
     def __init__(
         self,
@@ -272,7 +290,10 @@ class ClientSetupSection(QWidget):
         self._configured = False
         self._missing = ""
         self._last_status = DEFAULT_STATUS_TEXT
-        self._finished.connect(self._on_finished)
+        # Identifies this section's commands. A plain object, so a job can hold it without holding the section.
+        self._owner = object()
+        self._generation = 0
+        shared_delivery().delivered.connect(self._on_delivered)
         self._build()
         self.refresh()
         self._render_rows()
@@ -469,8 +490,10 @@ class ClientSetupSection(QWidget):
 
     def _start(self, pending: _Pending, work: Callable[[], object]) -> None:
         self._busy = True
+        self._generation += 1
         self._apply_enablement()
-        QThreadPool.globalInstance().start(_CommandJob(pending, work, self._finished.emit))
+        # The job holds the command, the owner token, the generation and the shared delivery object. It never holds the section.
+        QThreadPool.globalInstance().start(_CommandJob(self._generation, pending, work, self._owner, shared_delivery()))
 
     @Slot()
     def _on_check_clicked(self) -> None:
@@ -479,11 +502,18 @@ class ClientSetupSection(QWidget):
 
     def _start_preview(self, client: str, mode: str) -> None:
         """Dry run first. The dialog then shows exactly what a Yes would write."""
-        self._start(_Pending(_PREVIEW, client, mode), lambda: self._runner.preview(client, mode))
+        runner = self._runner
+        self._start(_Pending(_PREVIEW, client, mode), lambda: runner.preview(client, mode))
 
     @Slot(object)
-    def _on_finished(self, done: object) -> None:
-        pending, payload = done
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another section is dropped here, and so is one from an earlier command.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        done = item.value
+        if not isinstance(done, _Done) or done.generation != self._generation:
+            return
+        pending, payload = done.pending, done.payload
         self._busy = False
         self._apply_enablement()
         if pending.purpose == _CHECK:
@@ -517,9 +547,10 @@ class ClientSetupSection(QWidget):
         if not self._confirm(self, title, confirmation_text(pending.mode, label, change, command)):
             _set_message(self._result, CANCELLED_TEXT)
             return
+        runner = self._runner
         self._start(
             _Pending(_CHANGE, pending.client, pending.mode),
-            lambda: self._runner.run_change(pending.client, pending.mode),
+            lambda: runner.run_change(pending.client, pending.mode),
         )
 
     def _after_change(self, pending: _Pending, result: object) -> None:
