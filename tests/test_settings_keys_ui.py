@@ -18,7 +18,7 @@ from meridian_desktop.api_keys import KEY_SERVICE, STATUS_NOT_SET, STATUS_SET, A
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import keys_section as keys_module
-from meridian_desktop.ui.keys_section import ADDED_TEXT, STATUS_TEXT, KeysSection
+from meridian_desktop.ui.keys_section import ADDED_TEXT, NOT_REMOVED_OS_TEXT, STATUS_TEXT, KeysSection
 from meridian_desktop.ui.runpod_panel import (
     KEY_MISSING_TEXT,
     KEY_STORED_TEXT,
@@ -329,6 +329,28 @@ def test_replace_changes_only_the_value_and_remove_asks_first(qtbot, settings_pa
     # The card is removed when the event loop runs its deferred delete, so wait for that.
     qtbot.waitUntil(lambda: tab.findChild(QWidget, "keys-entry-openai") is None, timeout=5000)
     assert SettingsStore(settings_path).load().settings.key_names == ()
+
+
+def test_a_settings_write_that_fails_after_the_keychain_delete_shows_the_keychain_state(qtbot, settings_path, monkeypatch):
+    backend = MemoryKeyring()
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab.findChild(QLineEdit, "keys-new-name").setText("OpenAI")
+    tab.findChild(QLineEdit, "keys-new-value").setText(FAKE_VALUE)
+    tab.findChild(QPushButton, "keys-add").click()
+
+    # The keychain value is deleted first, then the names list is written. A refused write must not leave the card
+    # saying a value is set when the keychain no longer holds one.
+    def refuse_save(self, settings):
+        raise PermissionError("the settings file is locked")
+
+    monkeypatch.setattr(keys_module, "_ask_remove", lambda parent, title, text: True)
+    monkeypatch.setattr(SettingsStore, "save", refuse_save)
+    tab.findChild(QPushButton, "keys-entry-openai-remove").click()
+
+    assert backend.snapshot() == {}
+    assert tab.findChild(QLabel, "keys-entry-openai-status").text() == STATUS_TEXT[STATUS_NOT_SET]
+    assert tab.findChild(QLabel, "keys-message").text() == NOT_REMOVED_OS_TEXT
+    assert FAKE_VALUE not in _all_text(tab)
 
 
 def test_no_value_is_ever_shown_on_the_tab_after_a_save_or_a_refresh(qtbot, settings_path):

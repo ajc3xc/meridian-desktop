@@ -329,6 +329,9 @@ class KeysSection(QWidget):
             self._show(NOT_REMOVED_TEXT.format(detail=exc))
             return
         except OSError:
+            # The keychain value is deleted before the names list is written, so it can already be gone here. The card is
+            # read again, so it never says a value is set when the keychain no longer holds one.
+            self.refresh()
             self._show(NOT_REMOVED_OS_TEXT)
             return
         self.refresh()
