@@ -13,7 +13,8 @@ Steps, in order. A failed check stops the build:
 2. PyInstaller runs with --copy-metadata for each bundled distribution, so each
    dist-info, with its licence files, is in _internal. setuptools is excluded:
    nothing the app or its direct dependencies imports it, and its vendored
-   packages carry no licence files in the bundle.
+   packages carry no licence files in the bundle. The conda env's Library/bin is first on
+   its PATH (pyinstaller_env), so the DLLs it bundles are the copies native_runtimes.toml pins.
 3. Forbidden Qt files are pruned (packaging/lgpl_manifest.toml). Microsoft runtime
    files (the Visual C++ runtime, ucrtbase.dll and the api-ms-win- stubs) are removed
    from every folder of the bundle, and each removal is logged. The build fails if one
@@ -46,6 +47,7 @@ import argparse
 import fnmatch
 import hashlib
 import importlib.metadata
+import os
 import re
 import shutil
 import subprocess
@@ -230,6 +232,28 @@ def pyinstaller_command(metadata: list[str]) -> list[str]:
         cmd += ["--copy-metadata", dist]
     cmd.append(str(ENTRY))
     return cmd
+
+
+def runtime_bin(prefix: str | Path | None = None) -> Path:
+    """The folder where the conda env keeps its native DLLs: OpenSSL, libffi, expat, bzip2, XZ, zlib and SQLite."""
+    return Path(prefix or sys.base_prefix) / "Library" / "bin"
+
+
+def pyinstaller_env(prefix: str | Path | None = None) -> dict[str, str]:
+    """The environment for PyInstaller, with the env's runtime folder first on PATH.
+
+    On Windows, PyInstaller finds the DLLs that a .pyd or .dll needs by searching PATH. `pixi run`
+    puts Library/bin on PATH, but a plain `python packaging/build.py` does not. Then the OpenSSL,
+    libffi, expat, bzip2 and XZ DLLs were not found, and sqlite3.dll was taken from another program's
+    folder (C:\\Program Files\\Amazon\\AWSCLIV2, file version 3.37.2.0, not the pinned 3.54.0).
+    Putting the env's folder first makes PyInstaller bundle the copies that native_runtimes.toml pins.
+    """
+    env = dict(os.environ)
+    folder = runtime_bin(prefix)
+    if folder.is_dir():
+        rest = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+        env["PATH"] = os.pathsep.join([str(folder), *rest])
+    return env
 
 
 def prune_forbidden(bundle_root: Path, qt: dict) -> list[str]:
@@ -772,7 +796,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = pyinstaller_command(metadata_distributions(manifest))
     print("running:", " ".join(cmd))
-    subprocess.run(cmd, cwd=REPO, check=True)
+    env = pyinstaller_env()
+    print("PyInstaller PATH starts with:", env.get("PATH", "").split(os.pathsep)[0])
+    subprocess.run(cmd, cwd=REPO, check=True, env=env)
     if not (BUNDLE_DIR / f"{APP_NAME}.exe").is_file():
         raise SystemExit("PyInstaller did not produce the executable")
     removed = prune_forbidden(BUNDLE_DIR, manifest["qt"])
