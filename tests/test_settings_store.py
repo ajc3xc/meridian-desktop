@@ -1,11 +1,12 @@
 import ast
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from meridian_desktop import settings_store
+from meridian_desktop import settings_store, token_store
 from meridian_desktop.settings_store import (
     DEFAULT_LOCAL_URL,
     Settings,
@@ -16,6 +17,9 @@ from meridian_desktop.settings_store import (
 
 REPO = Path(__file__).resolve().parents[1]
 
+# What a missing, corrupt or unreadable file gives: the defaults, with no mode the owner chose.
+NO_FILE_SETTINGS = replace(Settings(), mode_explicit=False)
+
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -24,7 +28,8 @@ def _write(path: Path, text: str) -> None:
 
 def test_missing_file_gives_defaults_without_warning(settings_path):
     result = SettingsStore(settings_path).load()
-    assert result.settings == Settings()
+    assert result.settings == NO_FILE_SETTINGS
+    assert result.settings.mode_explicit is False
     assert result.settings.mode == "local"
     assert result.warning is None
 
@@ -53,7 +58,7 @@ def test_set_mode_round_trip(settings_path):
 def test_corrupt_file_returns_defaults_and_warning(settings_path):
     _write(settings_path, "{not json")
     result = SettingsStore(settings_path).load()
-    assert result.settings == Settings()
+    assert result.settings == NO_FILE_SETTINGS
     assert result.warning is not None
     assert "corrupt" in result.warning
 
@@ -61,7 +66,7 @@ def test_corrupt_file_returns_defaults_and_warning(settings_path):
 def test_json_that_is_not_an_object_returns_defaults_and_warning(settings_path):
     _write(settings_path, "[1, 2, 3]")
     result = SettingsStore(settings_path).load()
-    assert result.settings == Settings()
+    assert result.settings == NO_FILE_SETTINGS
     assert result.warning is not None
     assert "JSON object" in result.warning
 
@@ -71,7 +76,7 @@ def test_unreadable_file_returns_defaults_and_warning(tmp_path):
     path = tmp_path / "settings.json"
     path.mkdir()
     result = SettingsStore(path).load()
-    assert result.settings == Settings()
+    assert result.settings == NO_FILE_SETTINGS
     assert result.warning is not None
     assert "unreadable" in result.warning
 
@@ -354,44 +359,61 @@ def test_check_updates_that_is_not_true_or_false_warns_and_stays_on(settings_pat
     assert result.warning is not None and "check_updates" in result.warning
 
 
-# ----------------------------------------------------------- the three runner control switches (contract rule 10, amendment A and B)
+# ----------------------------------------------------------- the runner control switches (contract rule 10, amendments A to C)
 
 CONTROL_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+# The defaults. tunnel_control_enabled is on by owner decision on 2026-10-23 (contract amendment F). The two
+# launch-time switches are off until the owner confirms them.
+CONTROL_DEFAULTS = {"tunnel_control_enabled": True, "zotero_autostart": False, "local_server_autostart": False}
+CONFIRMED_KEYS = ("confirmed_core_python", "confirmed_core_checkout", "confirmed_zotero_exe")
 
 
-def test_runner_control_switches_default_to_off_and_are_not_written(settings_path):
+def test_runner_control_switches_default_to_their_defaults_and_are_not_written(settings_path):
     store = SettingsStore(settings_path)
     loaded = store.load()
 
     assert loaded.warning is None
     for key in CONTROL_KEYS:
-        assert getattr(loaded.settings, key) is False, key
+        assert getattr(loaded.settings, key) is CONTROL_DEFAULTS[key], key
     store.save(loaded.settings)
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
     assert not any(key in saved for key in CONTROL_KEYS)
 
 
-@pytest.mark.parametrize("key", CONTROL_KEYS)
-def test_each_runner_switch_round_trips_when_on_and_leaves_the_others_off(settings_path, key):
+def test_the_tunnel_switch_defaults_to_on_and_is_written_only_when_turned_off(settings_path):
     store = SettingsStore(settings_path)
-    store.save(Settings(**{key: True}))
+    assert store.load().settings.tunnel_control_enabled is True
+
+    store.save(Settings(tunnel_control_enabled=False))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["tunnel_control_enabled"] is False
+    assert SettingsStore(settings_path).load().settings.tunnel_control_enabled is False
+
+    store.save(Settings(tunnel_control_enabled=True))
+    assert "tunnel_control_enabled" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("key", CONTROL_KEYS)
+def test_each_runner_switch_round_trips_when_changed_and_leaves_the_others_at_their_defaults(settings_path, key):
+    store = SettingsStore(settings_path)
+    changed = not CONTROL_DEFAULTS[key]
+    store.save(Settings(**{key: changed}))
 
     loaded = store.load()
     assert loaded.warning is None
-    assert getattr(loaded.settings, key) is True
+    assert getattr(loaded.settings, key) is changed
     for other in CONTROL_KEYS:
         if other != key:
-            assert getattr(loaded.settings, other) is False, other
-    assert json.loads(settings_path.read_text(encoding="utf-8"))[key] is True
+            assert getattr(loaded.settings, other) is CONTROL_DEFAULTS[other], other
+    assert json.loads(settings_path.read_text(encoding="utf-8"))[key] is changed
 
 
-def test_turning_a_runner_switch_back_off_removes_its_key(settings_path):
+def test_a_launch_switch_turned_back_off_removes_its_key(settings_path):
     store = SettingsStore(settings_path)
     store.save(Settings(zotero_autostart=True, tunnel_control_enabled=True))
-    store.save(Settings(zotero_autostart=True, tunnel_control_enabled=False))
+    store.save(Settings(zotero_autostart=False, tunnel_control_enabled=True))
 
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert saved["zotero_autostart"] is True
+    assert "zotero_autostart" not in saved
     assert "tunnel_control_enabled" not in saved
 
 
@@ -402,7 +424,7 @@ def test_a_non_boolean_runner_switch_is_refused_with_a_warning(settings_path, ke
 
     loaded = SettingsStore(settings_path).load()
 
-    assert getattr(loaded.settings, key) is False
+    assert getattr(loaded.settings, key) is CONTROL_DEFAULTS[key]
     assert f"{key} must be true or false" in loaded.warning
 
 
@@ -414,3 +436,179 @@ def test_a_saved_switch_keeps_every_other_field(settings_path):
     assert loaded.local_url == "http://127.0.0.1:7999"
     assert loaded.zotero_autostart is True
     assert loaded.local_server_autostart is False
+
+
+# ----------------------------------------------------------- the confirmed values (amendments A and B)
+
+
+def test_confirmed_values_round_trip_exactly_and_are_not_written_when_unset(settings_path, tmp_path):
+    exe = str(tmp_path / "Zotero" / "zotero.exe")
+    confirmed = dict(
+        confirmed_core_python=str(tmp_path / "python.exe"),
+        confirmed_core_checkout=str(tmp_path / "core"),
+        confirmed_zotero_exe=exe,
+    )
+    store = SettingsStore(settings_path)
+    store.save(Settings(**confirmed))
+
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.warning is None
+    for key, value in confirmed.items():
+        assert getattr(loaded.settings, key) == value, key
+
+    store.save(Settings())
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert not any(key in saved for key in CONFIRMED_KEYS)
+
+
+def test_a_confirmed_value_that_is_not_text_warns_and_is_empty(settings_path):
+    _write(settings_path, json.dumps({"confirmed_zotero_exe": 7}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.settings.confirmed_zotero_exe == ""
+    assert "confirmed_zotero_exe must be a path" in loaded.warning
+
+
+def test_saving_a_core_path_turns_both_launch_switches_off_and_keeps_the_other_fields(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    store.save(
+        Settings(
+            zotero_autostart=True,
+            local_server_autostart=True,
+            tunnel_control_enabled=False,
+            local_url="http://127.0.0.1:7999",
+            confirmed_core_python=str(tmp_path / "old-python.exe"),
+            confirmed_zotero_exe=str(tmp_path / "zotero.exe"),
+        )
+    )
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+
+    updated = store.set_core_path("core_python", str(python))
+
+    assert updated.zotero_autostart is False
+    assert updated.local_server_autostart is False
+    loaded = SettingsStore(settings_path).load().settings
+    assert loaded.zotero_autostart is False
+    assert loaded.local_server_autostart is False
+    assert loaded.core_python == str(python)
+    assert loaded.tunnel_control_enabled is False  # the tunnel switch is not a launch switch, so it is kept
+    assert loaded.local_url == "http://127.0.0.1:7999"
+    assert loaded.confirmed_zotero_exe == str(tmp_path / "zotero.exe")
+
+
+def test_a_refused_core_path_leaves_the_launch_switches_as_they_were(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    store.save(Settings(zotero_autostart=True, local_server_autostart=True))
+
+    with pytest.raises(ValueError):
+        store.set_core_path("core_checkout", str(tmp_path / "gone"))
+
+    loaded = SettingsStore(settings_path).load().settings
+    assert loaded.zotero_autostart is True
+    assert loaded.local_server_autostart is True
+
+
+# ----------------------------------------------------------- the launch mode (owner decision, 2026-10-23)
+
+FAKE_TOKEN = "sk_meridian_FAKE-launch-mode-0001"
+
+
+class FakeSecrets:
+    """A fake secret store. It holds one token, or none, and counts the reads. It is never the real keychain."""
+
+    def __init__(self, token=None):
+        self._token = token
+        self.reads = 0
+
+    def get_secret(self, service, account):
+        self.reads += 1
+        return self._token
+
+    def set_secret(self, service, account, value):
+        raise AssertionError("the launch mode never writes a token")
+
+    def delete_secret(self, service, account):
+        raise AssertionError("the launch mode never removes a token")
+
+
+def _launch_mode(settings_path, secrets):
+    store = SettingsStore(settings_path)
+    mode = store.resolve_launch_mode(lambda: token_store.has_token(store=secrets))
+    return store, mode
+
+
+def test_no_mode_in_the_file_and_a_saved_hosted_token_starts_in_hosted(settings_path):
+    _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    store, mode = _launch_mode(settings_path, FakeSecrets(FAKE_TOKEN))
+
+    assert mode == "hosted"
+    assert store.load().settings.mode == "hosted"
+    assert store.load().warning is None
+
+
+def test_no_mode_in_the_file_and_no_token_starts_in_local(settings_path):
+    _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    store, mode = _launch_mode(settings_path, FakeSecrets(None))
+
+    assert mode == "local"
+    assert store.load().settings.mode == "local"
+
+
+def test_a_missing_settings_file_starts_in_hosted_only_when_a_token_is_saved(settings_path):
+    assert _launch_mode(settings_path, FakeSecrets(FAKE_TOKEN))[1] == "hosted"
+    assert _launch_mode(settings_path, FakeSecrets(None))[1] == "local"
+
+
+@pytest.mark.parametrize("mode", ["local", "hosted", "tunnel"])
+@pytest.mark.parametrize("token", [FAKE_TOKEN, None])
+def test_an_explicit_mode_in_the_file_always_wins_and_the_keychain_is_not_read(settings_path, mode, token):
+    _write(settings_path, json.dumps({"mode": mode}))
+    secrets = FakeSecrets(token)
+
+    store, resolved = _launch_mode(settings_path, secrets)
+
+    assert resolved == mode
+    assert store.load().settings.mode == mode
+    assert secrets.reads == 0
+
+
+def test_the_launch_mode_is_never_written_to_the_file(settings_path):
+    _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+    store, _mode = _launch_mode(settings_path, FakeSecrets(FAKE_TOKEN))
+
+    store.set_core_path("core_checkout", "")
+    store.save(store.load().settings)
+
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "mode" not in saved
+
+
+def test_choosing_a_mode_makes_it_explicit_and_it_then_wins_over_a_saved_token(settings_path):
+    _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+    store, mode = _launch_mode(settings_path, FakeSecrets(FAKE_TOKEN))
+    assert mode == "hosted"
+
+    store.set_mode("local")
+
+    assert SettingsStore(settings_path).resolve_launch_mode(lambda: True) == "local"
+
+
+def test_an_invalid_saved_mode_warns_and_follows_the_launch_mode(settings_path):
+    _write(settings_path, json.dumps({"mode": "cloud"}))
+
+    store, mode = _launch_mode(settings_path, FakeSecrets(FAKE_TOKEN))
+
+    assert mode == "hosted"
+    loaded = store.load()
+    assert loaded.settings.mode == "hosted"
+    assert "mode must be one of" in loaded.warning
+
+
+def test_without_a_resolved_launch_mode_a_store_still_reads_local(settings_path):
+    _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    assert SettingsStore(settings_path).load().settings.mode == "local"

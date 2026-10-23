@@ -2,16 +2,17 @@
 
 Each start runs at most once, when the desktop launches, and only when its own setting is on:
 
-- Zotero (amendment A): only when nothing answers on 127.0.0.1:23119, and only when Zotero is found in its
-  usual install folder. It starts once, through zotero_client.start_zotero, which logs the attempt.
-- The local server (amendment B): only when the core checkout and its Python are set, nothing answers at the
-  local URL, and the runner reports the local scope not running. It runs the fixed local start once, through
-  runner_controls, which logs the attempt. The local URL check is an extra guard: the core's server stops any
+- Zotero (amendment A): only when nothing answers on 127.0.0.1:23119, and only with the zotero.exe path the owner
+  confirmed in Settings. It starts once, through zotero_client.start_zotero, which logs the attempt.
+- The local server (amendment B): only when the core checkout and its Python were confirmed in Settings, nothing
+  answers at the local URL, and the runner reports the local scope not running. It runs the fixed local start once,
+  through runner_controls, which logs the attempt. The local URL check is an extra guard: the core's server stops any
   program already using its port before it starts, so a server the owner runs by hand must not be replaced.
 
-Neither start restarts anything, and an unknown state is never treated as not running. The caller supplies
-every outside call through LaunchDeps, so the tests use fakes. Each step catches its own failure and reports
-it in plain words, with a class name only when there is no fixed message.
+A switch that is on but has no confirmed value is skipped with a plain sentence, so the status line says why. Neither
+start restarts anything, and an unknown state is never treated as not running. The caller supplies every outside call
+through LaunchDeps, so the tests use fakes. Each step catches its own failure and reports it in plain words, with a
+class name only when there is no fixed message.
 """
 
 from __future__ import annotations
@@ -34,9 +35,15 @@ FAILED = "failed"
 
 ZOTERO_STARTED_TEXT = "Zotero was started once, at launch."
 ZOTERO_ANSWERING_TEXT = "Zotero's local API already answers, or could not be checked, on 127.0.0.1:23119. Nothing was started."
-ZOTERO_NOT_INSTALLED_TEXT = "Zotero is not installed in a usual folder, so it was not started at launch."
+ZOTERO_NOT_CONFIRMED_TEXT = (
+    "Zotero was not started at launch, because its program path was not confirmed in Settings. "
+    "Turn the Zotero switch on again to confirm it."
+)
 ZOTERO_FAILED_TEXT = "Zotero could not be started at launch ({})."
-LOCAL_CORE_NOT_SET_TEXT = "The core checkout and its Python are not set, so the local server was not started at launch."
+LOCAL_CORE_NOT_SET_TEXT = (
+    "The core checkout and its Python were not confirmed in Settings, so the local server was not started at launch. "
+    "Turn the local server switch on again to confirm them."
+)
 LOCAL_ANSWERING_TEXT = "Something already answers at the local URL, so the local server was not started at launch."
 LOCAL_STATUS_TEXT = "The runner does not report the local server as not running, so it was not started at launch."
 LOCAL_FAILED_TEXT = "The local server was not started at launch. {}"
@@ -57,9 +64,10 @@ class LaunchDeps:
     """Every outside call the launch-time starts make. Each is a fake in the tests.
 
     zotero_probe() returns an object with a ``state`` (zotero_client.probe_api). zotero_exe() returns the zotero.exe
-    path or None. zotero_start(exe) starts it and raises ZoteroError on failure. local_health() returns a
-    local_client HEALTH_* word for the saved local URL. local_status() and local_start() return a ControlResult
-    for the local scope. core_ready says whether the core checkout and its Python are set.
+    path the owner confirmed in Settings, or None when none was confirmed. zotero_start(exe) starts it and raises
+    ZoteroError on failure. local_health() returns a local_client HEALTH_* word for the saved local URL. local_status()
+    and local_start() return a ControlResult for the local scope. core_ready says whether the core checkout and its
+    Python were confirmed in Settings.
     """
 
     zotero_probe: Callable[[], Any]
@@ -78,7 +86,7 @@ def _zotero_step(deps: LaunchDeps) -> LaunchNote:
             return LaunchNote(PROGRAM_ZOTERO, SKIPPED, ZOTERO_ANSWERING_TEXT)
         exe = deps.zotero_exe()
         if exe is None:
-            return LaunchNote(PROGRAM_ZOTERO, SKIPPED, ZOTERO_NOT_INSTALLED_TEXT)
+            return LaunchNote(PROGRAM_ZOTERO, SKIPPED, ZOTERO_NOT_CONFIRMED_TEXT)
         deps.zotero_start(exe)
     except ZoteroError as exc:
         return LaunchNote(PROGRAM_ZOTERO, FAILED, ZOTERO_FAILED_TEXT.format(exc.message))

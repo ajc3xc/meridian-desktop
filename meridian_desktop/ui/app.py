@@ -16,8 +16,9 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from meridian_desktop import updater
+from meridian_desktop import token_store, updater
 from meridian_desktop.desktop_log import start_desktop_log
+from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tray import MeridianTray
 from meridian_desktop.ui.first_run import needs_first_run, run_first_run
@@ -41,6 +42,9 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
     app.setQuitOnLastWindowClosed(False)
 
     store = SettingsStore(settings_path)
+    # The mode this run starts in. A mode the file names wins. With none, hosted when a hosted token is saved, and
+    # local otherwise. Only whether a token exists is checked here. The token is never read into the window.
+    store.resolve_launch_mode(lambda: token_store.has_token(store=KeyringSecretStore()))
     if first_run and needs_first_run(store, smoke=smoke):
         outcome = run_first_run(store)
         if outcome.notice:

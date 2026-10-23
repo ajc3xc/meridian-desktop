@@ -125,13 +125,13 @@ def test_zotero_is_not_started_when_something_already_answers_or_cannot_be_check
     assert not any(call.startswith("zotero_start") for call in rec.calls)
 
 
-def test_zotero_is_skipped_when_it_is_not_installed_in_a_usual_folder():
+def test_zotero_is_skipped_with_a_plain_line_when_no_program_path_was_confirmed():
     rec = Recorder(probe=API_NOT_RUNNING, exe=None)
 
     notes = _run(rec, zotero=True)
 
     assert [n.outcome for n in notes] == [SKIPPED]
-    assert "not installed" in notes[0].message
+    assert "its program path was not confirmed in Settings" in notes[0].message
     assert not any(call.startswith("zotero_start") for call in rec.calls)
 
 
@@ -167,12 +167,13 @@ def test_the_local_server_starts_once_when_the_runner_says_not_running_and_nothi
     assert rec.calls == ["local_health", "local_status", "local_start"]
 
 
-def test_the_local_server_is_not_started_when_the_core_is_not_set():
+def test_the_local_server_is_not_started_when_the_core_is_not_confirmed_and_says_so_in_plain_words():
     rec = Recorder(core_ready=False)
 
     notes = _run(rec, local=True)
 
     assert [n.outcome for n in notes] == [SKIPPED]
+    assert "not confirmed in Settings" in notes[0].message
     assert rec.calls == []
 
 

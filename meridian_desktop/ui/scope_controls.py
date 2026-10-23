@@ -34,8 +34,8 @@ from meridian_desktop.ui.text import make_selectable
 
 RESTART = "restart"
 TUNNEL_OFF_TEXT = (
-    "The tunnel controls are off. To turn them on, set tunnel_control_enabled to true in the desktop settings "
-    "file. The desktop never starts or stops the tunnel by itself."
+    "The tunnel controls are off, because tunnel_control_enabled is false in the desktop settings file. "
+    "To turn them on, set it to true. The desktop never starts or stops the tunnel by itself."
 )
 CORE_NOT_SET_TEXT = (
     "Set the Meridian core checkout and its Python in the client setup section of the Settings tab first."
@@ -54,6 +54,9 @@ BUSY_TEXT = {START: "Starting the {label}...", STOP: "Stopping the {label}..."}
 RESTART_BUSY_TEXT = "Restarting the {label}: stopping it first..."
 START_CANCELLED_TEXT = "Start cancelled. The {label} is stopped."
 RESTART_STOPPED_TEXT = "Restart stopped: the stop was not confirmed, so nothing was started."
+RESTART_BLOCKED_TEXT = (
+    "Restart stopped before the start, so nothing was started. The controls are now off, or the core setup changed."
+)
 ACTION_FAILED_TEXT = "The {label} action could not be completed ({failure})."
 
 Gate = Callable[[CoreSetup], tuple[bool, str]]
@@ -163,6 +166,21 @@ class ScopeControls(QWidget):
         self._set_buttons()
         self.actionFinished.emit()
 
+    def _start_allowed(self, python: str, cwd: str) -> bool:
+        """True when the second step of a restart may start with these values.
+
+        The gate must be on now, and the core setup must be the one the owner was shown.
+        """
+        core = self._actions.core()
+        enabled, _note = self._gate(core)
+        return enabled and (core.python, core.cwd) == (python, cwd)
+
+    def _stop_restart_before_start(self, stop_text: str) -> None:
+        """The restart ends after its stop: nothing starts, and the buttons read the gate again."""
+        self._show(f"{stop_text} {RESTART_BLOCKED_TEXT}")
+        self.refresh_enabled()
+        self._finish()
+
     # ----------------------------------------------------------- asking and running
 
     @Slot()
@@ -234,12 +252,20 @@ class ScopeControls(QWidget):
                 self._show(f"{result.message} {RESTART_STOPPED_TEXT}")
                 self._finish()
                 return
+            # The gate is checked again before the start is asked, so a switch turned off after the stop is not asked.
+            if not self._start_allowed(python, cwd):
+                self._stop_restart_before_start(result.message)
+                return
             # The stop is confirmed, so the owner is asked before the start, as rule 9 requires.
             body = confirmation_text(python, START, self._scope, cwd)
             question = RESTART_START_QUESTION.format(label=self._label)
             if not self._actions.ask(self, question, body, CONFIRM_TEXT[START]):
                 self._show(f"{result.message} {START_CANCELLED_TEXT.format(label=self._label)}")
                 self._finish()
+                return
+            # Checked once more after the dialog, just before the start runs. It uses the values the dialog showed.
+            if not self._start_allowed(python, cwd):
+                self._stop_restart_before_start(result.message)
                 return
             self._submit(START, python, cwd, then=None)
             return

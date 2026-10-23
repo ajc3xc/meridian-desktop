@@ -15,7 +15,7 @@ meridian_desktop/launch_starts.py, and the contract is docs/local-trust-contract
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QWidget
 from meridian_desktop import local_client, zotero_client
 from meridian_desktop.launch_starts import LaunchDeps, LaunchNote, run_launch_starts
 from meridian_desktop.runner_controls import SCOPE_LOCAL, RunnerControl, default_log_path
-from meridian_desktop.settings_store import CONTROL_FLAG_KEYS, SettingsStore
+from meridian_desktop.settings_store import CONFIRMED_KEYS, CONTROL_FLAG_KEYS, SettingsStore
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
@@ -37,7 +37,11 @@ _LAUNCH_GENERATION = 1
 
 @dataclass(frozen=True)
 class CoreSetup:
-    """The settings the controls read: the core checkout and its Python, the local URL, and the three switches."""
+    """The settings the controls read: the core checkout and its Python, the local URL, and the three switches.
+
+    The confirmed values are the exact ones the owner saw in the dialog when a launch-time switch was turned on. The
+    launch-time starts use only these, never the current core setup (docs/local-trust-contract.md, amendments A and B).
+    """
 
     python: str
     cwd: str
@@ -45,10 +49,18 @@ class CoreSetup:
     tunnel_control_enabled: bool
     zotero_autostart: bool
     local_server_autostart: bool
+    confirmed_python: str = ""
+    confirmed_cwd: str = ""
+    confirmed_zotero_exe: str = ""
 
     @property
     def core_ready(self) -> bool:
         return bool(self.python.strip() and self.cwd.strip())
+
+    @property
+    def launch_ready(self) -> bool:
+        """True when the core checkout and its Python were confirmed for a launch-time start."""
+        return bool(self.confirmed_python.strip() and self.confirmed_cwd.strip())
 
 
 ConfirmFn = Callable[[QWidget | None, str, str, str], bool]
@@ -126,6 +138,9 @@ class RunnerActions:
             tunnel_control_enabled=settings.tunnel_control_enabled,
             zotero_autostart=settings.zotero_autostart,
             local_server_autostart=settings.local_server_autostart,
+            confirmed_python=settings.confirmed_core_python,
+            confirmed_cwd=settings.confirmed_core_checkout,
+            confirmed_zotero_exe=settings.confirmed_zotero_exe,
         )
 
     def control(self, python: str, cwd: str) -> RunnerControl:
@@ -134,32 +149,43 @@ class RunnerActions:
     def ask(self, parent: QWidget | None, title: str, body: str, confirm_text: str) -> bool:
         return self._confirm(parent, title, body, confirm_text)
 
-    def set_flag(self, name: str, value: bool) -> None:
-        """Save one runner switch. Every other field in the saved file is kept. Raises OSError or ValueError when it cannot."""
+    def set_flag(self, name: str, value: bool, *, confirmed: Mapping[str, str] | None = None) -> None:
+        """Save one runner switch, and any confirmed values in the same save. Every other field is kept.
+
+        ``confirmed`` holds the exact values the owner saw in the dialog for a switch turned on. Only the confirmed
+        keys are accepted. Raises OSError or ValueError when it cannot save.
+        """
         if name not in CONTROL_FLAG_KEYS:
             raise ValueError(f"unknown runner switch: {name}")
-        self._store.save(replace(self._store.load().settings, **{name: value}))
+        recorded = dict(confirmed or {})
+        if any(key not in CONFIRMED_KEYS for key in recorded):
+            raise ValueError("unknown confirmed value")
+        self._store.save(replace(self._store.load().settings, **{name: value}, **recorded))
 
     def find_zotero(self) -> str | None:
         return self._find_zotero()
 
     def launch_deps(self, core: CoreSetup) -> LaunchDeps:
-        """The calls the launch-time starts make, bound to the setup read at launch. Each runs on the worker."""
-        control = self.control(core.python, core.cwd)
+        """The calls the launch-time starts make. They use only the confirmed values, never the current setup.
+
+        With no confirmed Python or checkout, the local start is skipped with a plain line. With no confirmed Zotero
+        program, the Zotero start is skipped the same way. Each call runs on the worker.
+        """
+        control = self.control(core.confirmed_python, core.confirmed_cwd)
         log = self._log()
         probe_zotero = self._probe_zotero
-        find_zotero = self._find_zotero
         start_zotero = self._start_zotero
         probe_local = self._probe_local
         local_url = core.local_url
+        confirmed_exe = core.confirmed_zotero_exe if core.confirmed_zotero_exe.strip() else None
         return LaunchDeps(
             zotero_probe=probe_zotero,
-            zotero_exe=find_zotero,
+            zotero_exe=lambda: confirmed_exe,
             zotero_start=lambda exe: start_zotero(exe, log_path=log),
             local_health=lambda: probe_local(local_url),
             local_status=lambda: control.status(SCOPE_LOCAL),
             local_start=lambda: control.start(SCOPE_LOCAL),
-            core_ready=core.core_ready,
+            core_ready=core.launch_ready,
         )
 
 

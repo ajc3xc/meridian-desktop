@@ -20,7 +20,7 @@ from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton
 
 from _fakes import MemoryKeyring
-from meridian_desktop import local_client, settings_store
+from meridian_desktop import local_client, settings_store, token_store
 from meridian_desktop.data_source import (
     NOT_SIGNED_IN_MESSAGE,
     STATE_NOT_SIGNED_IN,
@@ -592,3 +592,63 @@ def test_the_new_labels_are_plain_selectable_text(qtbot, settings_path):
     for label in (window.mode_description, window.tunnel_status_label, window.tunnel_detail):
         assert label.textInteractionFlags() == SELECTABLE_TEXT
         assert label.textFormat() == Qt.TextFormat.PlainText
+
+
+# ----------------------------------------------------------- the launch mode in the mode bar (owner decision, 2026-10-23)
+
+LAUNCH_TOKEN = "sk_meridian_FAKE-mode-bar-0009"
+
+
+def _launch_window(qtbot, settings_path, *, with_token):
+    """A window started the way app.main starts it: the launch mode is resolved first, from a keychain with one token or none."""
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    if with_token:
+        token_store.set_token(LAUNCH_TOKEN, store=secrets)
+    store = SettingsStore(settings_path)
+    store.resolve_launch_mode(lambda: token_store.has_token(store=secrets))
+    window = MainWindow(
+        store,
+        secret_store=secrets,
+        data_sources=_window_sources(None),
+        tunnel_runner=None,
+    )
+    qtbot.addWidget(window)
+    return window
+
+
+def test_a_file_with_no_mode_and_a_saved_token_starts_and_shows_hosted_in_the_mode_bar(qtbot, settings_path):
+    _write_text(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == "hosted"
+    assert window.mode_description.text() == MODE_DESCRIPTIONS["hosted"]
+
+
+def test_a_file_with_no_mode_and_no_saved_token_starts_and_shows_local(qtbot, settings_path):
+    _write_text(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    window = _launch_window(qtbot, settings_path, with_token=False)
+
+    assert window.mode_selector.currentData() == "local"
+    assert window.mode_description.text() == MODE_DESCRIPTIONS["local"]
+
+
+def test_a_missing_file_with_a_saved_token_starts_and_shows_hosted(qtbot, settings_path):
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == "hosted"
+
+
+@pytest.mark.parametrize("mode", ["local", "tunnel"])
+def test_an_explicit_mode_in_the_file_is_shown_even_with_a_saved_token(qtbot, settings_path, mode):
+    _write_text(settings_path, json.dumps({"mode": mode}))
+
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == mode
+
+
+def _write_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")

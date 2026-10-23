@@ -1,6 +1,7 @@
 # Local-trust contract: desktop tunnel and runner controls
 
 Status: CONFIRMED by the owner in chat on 2026-10-22, with the Amendment at the end of this file.
+Amendment F records an owner decision made on 2026-10-23.
 Written by the desktop maintainer at the owner's request (sprint item 84d8fd28 is not in the
 repository).
 
@@ -20,12 +21,14 @@ repository).
    "not confirmed", and nothing is retried automatically.
 6. The desktop logs each start and stop attempt to a local file in its settings folder: time,
    scope, outcome and the pid if reported. The log holds no secrets.
-7. Status comes from `status --json`. A stopped, unknown or missing state is never displayed as
-   running.
+7. Status is read with `status`, without `--json`, because the core's `status` subcommand takes no
+   such flag (rule 3 names `--json` only where it is used, and the core never uses it). A stopped,
+   unknown or missing state is never displayed as running.
 8. Tunnel tokens and credentials are never read, shown or logged by the desktop.
 9. Restart is a stop followed by a start, and each is confirmed separately.
 10. The controls stay off until the owner confirms this contract. The switch is the settings
-    field `tunnel_control_enabled`, which defaults to `false`.
+    field `tunnel_control_enabled`. It defaulted to `false` until 2026-10-23, and it defaults to
+    `true` from then, by owner decision (Amendment F).
 
 ## Owner confirmation
 
@@ -39,14 +42,30 @@ restart controls may be built to this contract.
 
 A. Zotero at launch. The setting `zotero_autostart` (default false) turns this on. When the
    desktop launches with it on, it checks whether Zotero answers on 127.0.0.1:23119. If nothing
-   answers, it starts Zotero once, as an argument list with no shell, from the path in settings
-   or the standard install folder. The start is logged. The desktop never restarts Zotero on its own.
+   answers, it starts Zotero once, as an argument list with no shell, from the zotero.exe the owner
+   confirmed in Settings. The dialog looks for zotero.exe in the standard install folders only (the
+   Program Files folders, and Programs\Zotero under %LOCALAPPDATA%). The exact path the dialog named is
+   recorded in settings as `confirmed_zotero_exe`. With no confirmed path, the start is skipped and the
+   status line says so. The start is logged. The desktop never restarts Zotero on its own.
 B. Local server at launch. The setting `local_server_autostart` (default false) turns this on.
    When the desktop launches with it on, it runs the fixed `python -m meridian.local_runner start`
-   command for scope `local`, under the same timeouts and log as rule 5 and rule 6.
+   command for scope `local`, under the same timeouts and log as rule 5 and rule 6. It uses the core
+   Python and checkout the owner confirmed, recorded as `confirmed_core_python` and
+   `confirmed_core_checkout`, and never the setup saved later. With neither confirmed, the start is
+   skipped and the status line says so.
 C. Enabling either setting in Settings shows the confirmation dialog from rule 2, naming the exact
-   command and scope. Nothing starts until that dialog is confirmed.
+   command and scope. Nothing starts until that dialog is confirmed. Confirming it records the exact
+   values the dialog showed (the core Python and checkout, or the Zotero path). Saving a core checkout or
+   Python path later turns both launch switches off, and the Settings status line says so. The owner
+   must confirm them again against the new setup.
 D. Tunnel start, stop and restart stay user actions only, and stay behind `tunnel_control_enabled`
-   (default false), as rule 10 says.
+   (default true from 2026-10-23, Amendment F), as rule 10 says.
 E. Every start in A and B is logged to the same local file as rule 6, with the time, the scope or
    program, the outcome and the pid if reported. The log holds no secrets.
+
+F. Owner decision, 2026-10-23. `tunnel_control_enabled` now defaults to `true`, in place of the
+   default `false` of rule 10. The Start, Stop and Restart buttons on the Tunnel tab are on while the
+   switch is true and the Meridian core checkout and its Python are set. Each button still asks the
+   owner first, every time, in the same dialog from rule 2, and Restart still asks before its start
+   (rule 9). Cancel changes nothing. A saved `tunnel_control_enabled: false` turns the buttons off. No
+   other part of the contract changes.

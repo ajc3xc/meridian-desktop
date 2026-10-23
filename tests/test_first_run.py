@@ -270,8 +270,9 @@ def test_closing_the_dialog_without_save_keeps_the_defaults_and_autostart_off(tm
 
     outcome = fr.run_first_run(_store(tmp_path), env=_env(tmp_path), registry=registry)
 
-    assert outcome.settings == Settings()
-    assert _store(tmp_path).load().settings == Settings()
+    # Nothing was chosen, so the mode is not explicit: a later launch may still pick hosted when a token is saved.
+    assert outcome.settings == replace(Settings(), mode_explicit=False)
+    assert _store(tmp_path).load().settings == replace(Settings(), mode_explicit=False)
     assert registry.keys == {}
     assert fr.needs_first_run(_store(tmp_path), smoke=False) is False
 
@@ -317,3 +318,16 @@ def test_a_real_start_without_settings_asks_first(tmp_path, monkeypatch):
     # The dialog runs before the window is built, so the event loop is never reached.
     with pytest.raises(Asked):
         ui_app.main([], settings_path=tmp_path / "settings" / "settings.json")
+
+
+def test_a_mode_chosen_in_the_first_run_dialog_is_explicit_so_a_later_launch_keeps_it(tmp_path):
+    chosen = fr.settings_from_choices(
+        replace(Settings(), mode_explicit=False), mode="local", local_url=DEFAULT_LOCAL_URL, autostart=False,
+    )
+    assert chosen.mode_explicit is True
+
+    store = _store(tmp_path)
+    store.save(chosen)
+
+    # A saved token must not move a file whose owner chose local at the first run.
+    assert SettingsStore(store.path).resolve_launch_mode(lambda: True) == "local"

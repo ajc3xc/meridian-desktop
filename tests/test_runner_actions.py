@@ -122,7 +122,7 @@ def test_core_is_not_ready_when_either_path_is_blank(settings_path):
     core = _actions(settings_path).core()
 
     assert core.core_ready is False
-    assert core.tunnel_control_enabled is False  # the default is off
+    assert core.tunnel_control_enabled is True  # the default is on (contract amendment F)
 
 
 def test_set_flag_saves_one_switch_and_refuses_an_unknown_name(settings_path):
@@ -151,7 +151,10 @@ def test_the_launch_deps_probe_the_saved_local_url(settings_path):
         return HEALTH_NOT_RUNNING
 
     actions = _actions(settings_path, probe_local=probe)
-    deps = actions.launch_deps(CoreSetup(PY, CWD, "http://127.0.0.1:7999", False, True, False))
+    core = CoreSetup(
+        PY, CWD, "http://127.0.0.1:7999", False, True, False, confirmed_python=PY, confirmed_cwd=CWD,
+    )
+    deps = actions.launch_deps(core)
 
     assert deps.local_health() == HEALTH_NOT_RUNNING
     assert seen == ["http://127.0.0.1:7999"]
@@ -211,20 +214,28 @@ class _Reports:
         self.texts.append(text)
 
 
-def _launch_actions(settings_path, *, starts, probe=API_NOT_RUNNING):
-    """Actions whose launch calls are fakes that record into ``starts``. Zotero is found and not running."""
+def _launch_actions(settings_path, *, starts, probe=API_NOT_RUNNING, made=None, find_zotero=lambda: EXE):
+    """Actions whose launch calls are fakes that record into ``starts``. Zotero is found and not running.
+
+    ``made`` collects the (python, folder) each runner control is built with, so a test can see which setup a start used.
+    """
 
     def start_zotero(exe, *, log_path=None):
         starts.append(("zotero", exe, log_path))
         return "Zotero was started"
 
+    def make_control(python, cwd):
+        if made is not None:
+            made.append((python, cwd))
+        return _StatusFake(starts)
+
     return _actions(
         settings_path,
-        find_zotero=lambda: EXE,
+        find_zotero=find_zotero,
         probe_zotero=lambda: ApiCheck(probe, "message"),
         start_zotero=start_zotero,
         probe_local=lambda url: HEALTH_NOT_RUNNING,
-        make_control=lambda python, cwd: _StatusFake(starts),
+        make_control=make_control,
     )
 
 
@@ -259,7 +270,7 @@ def test_with_both_switches_off_the_launch_starts_nothing(qtbot, settings_path):
 
 
 def test_with_zotero_on_it_starts_once_and_reports_the_result(qtbot, settings_path):
-    SettingsStore(settings_path).save(Settings(zotero_autostart=True))
+    SettingsStore(settings_path).save(Settings(zotero_autostart=True, confirmed_zotero_exe=EXE))
     starts, reports = [], _Reports()
     launch = LaunchStarts(_launch_actions(settings_path, starts=starts), report=reports)
 
@@ -271,7 +282,7 @@ def test_with_zotero_on_it_starts_once_and_reports_the_result(qtbot, settings_pa
 
 
 def test_a_second_call_to_start_does_not_run_the_launch_again(qtbot, settings_path):
-    SettingsStore(settings_path).save(Settings(zotero_autostart=True))
+    SettingsStore(settings_path).save(Settings(zotero_autostart=True, confirmed_zotero_exe=EXE))
     starts, reports = [], _Reports()
     launch = LaunchStarts(_launch_actions(settings_path, starts=starts), report=reports)
 
@@ -295,7 +306,10 @@ def test_a_launch_result_with_a_foreign_owner_is_not_reported(qtbot, settings_pa
 
 def test_the_local_start_at_launch_runs_only_when_its_switch_is_on(qtbot, settings_path):
     SettingsStore(settings_path).save(
-        Settings(local_server_autostart=True, core_python=PY, core_checkout=CWD)
+        Settings(
+            local_server_autostart=True, core_python=PY, core_checkout=CWD,
+            confirmed_core_python=PY, confirmed_core_checkout=CWD,
+        )
     )
     starts, reports = [], _Reports()
     launch = LaunchStarts(_launch_actions(settings_path, starts=starts), report=reports)
@@ -305,3 +319,114 @@ def test_the_local_start_at_launch_runs_only_when_its_switch_is_on(qtbot, settin
 
     assert ("local", "local") in starts
     assert "The local server was started once, at launch." in reports.texts[0]
+
+
+# ------------------------------------------------------------------ the confirmed values (contract amendments A and B)
+
+OTHER_PY = "C:/Users/tester/other-env/python.exe"
+OTHER_CWD = "C:/Users/tester/Documents/Meridian/other-checkout"
+OTHER_EXE = "C:/Users/tester/AppData/Local/Programs/Zotero/zotero.exe"
+
+
+def test_a_switch_confirmed_with_values_stores_them_in_the_same_save(settings_path):
+    actions = _actions(settings_path)
+
+    actions.set_flag("zotero_autostart", True, confirmed={"confirmed_zotero_exe": EXE})
+
+    saved = SettingsStore(settings_path).load().settings
+    assert saved.zotero_autostart is True
+    assert saved.confirmed_zotero_exe == EXE
+
+
+def test_set_flag_refuses_a_confirmed_key_it_does_not_know_and_writes_nothing(settings_path):
+    actions = _actions(settings_path)
+
+    with pytest.raises(ValueError):
+        actions.set_flag("local_server_autostart", True, confirmed={"core_python": PY})
+
+    assert not settings_path.exists()
+
+
+def test_the_core_setup_reads_the_confirmed_values_apart_from_the_current_ones(settings_path):
+    SettingsStore(settings_path).save(
+        Settings(core_python=OTHER_PY, core_checkout=OTHER_CWD, confirmed_core_python=PY, confirmed_core_checkout=CWD)
+    )
+
+    core = _actions(settings_path).core()
+
+    assert (core.python, core.cwd) == (OTHER_PY, OTHER_CWD)
+    assert (core.confirmed_python, core.confirmed_cwd) == (PY, CWD)
+    assert core.launch_ready is True
+
+
+def test_the_launch_is_not_ready_without_a_confirmed_setup_even_when_the_setup_is_set(settings_path):
+    SettingsStore(settings_path).save(Settings(core_python=PY, core_checkout=CWD))
+
+    core = _actions(settings_path).core()
+
+    assert core.core_ready is True
+    assert core.launch_ready is False
+
+
+def test_a_launch_start_uses_the_stored_python_and_checkout_not_the_current_ones(qtbot, settings_path):
+    SettingsStore(settings_path).save(
+        Settings(
+            local_server_autostart=True,
+            core_python=OTHER_PY,
+            core_checkout=OTHER_CWD,
+            confirmed_core_python=PY,
+            confirmed_core_checkout=CWD,
+        )
+    )
+    starts, reports, made = [], _Reports(), []
+    launch = LaunchStarts(_launch_actions(settings_path, starts=starts, made=made), report=reports)
+
+    launch.start()
+    qtbot.waitUntil(lambda: bool(reports.texts), timeout=5000)
+
+    assert (PY, CWD) in made
+    assert all(pair != (OTHER_PY, OTHER_CWD) for pair in made)
+    assert ("local", "local") in starts
+    assert "The local server was started once, at launch." in reports.texts[0]
+
+
+def test_a_local_start_with_no_confirmed_setup_is_skipped_with_a_plain_line(qtbot, settings_path):
+    SettingsStore(settings_path).save(Settings(local_server_autostart=True, core_python=PY, core_checkout=CWD))
+    starts, reports = [], _Reports()
+    launch = LaunchStarts(_launch_actions(settings_path, starts=starts), report=reports)
+
+    launch.start()
+    qtbot.waitUntil(lambda: bool(reports.texts), timeout=5000)
+
+    assert starts == []
+    assert "not confirmed in Settings" in reports.texts[0]
+
+
+def test_a_zotero_launch_start_runs_only_the_confirmed_program_and_never_searches_for_one(qtbot, settings_path):
+    SettingsStore(settings_path).save(Settings(zotero_autostart=True, confirmed_zotero_exe=EXE))
+    searched = []
+
+    def find_other():
+        searched.append(OTHER_EXE)
+        return OTHER_EXE
+
+    starts, reports = [], _Reports()
+    launch = LaunchStarts(_launch_actions(settings_path, starts=starts, find_zotero=find_other), report=reports)
+
+    launch.start()
+    qtbot.waitUntil(lambda: bool(reports.texts), timeout=5000)
+
+    assert [start[:2] for start in starts] == [("zotero", EXE)]
+    assert searched == []
+
+
+def test_a_zotero_launch_start_with_no_confirmed_program_is_skipped_with_a_plain_line(qtbot, settings_path):
+    SettingsStore(settings_path).save(Settings(zotero_autostart=True))
+    starts, reports = [], _Reports()
+    launch = LaunchStarts(_launch_actions(settings_path, starts=starts, find_zotero=lambda: EXE), report=reports)
+
+    launch.start()
+    qtbot.waitUntil(lambda: bool(reports.texts), timeout=5000)
+
+    assert starts == []
+    assert "its program path was not confirmed in Settings" in reports.texts[0]

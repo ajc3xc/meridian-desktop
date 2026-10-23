@@ -371,3 +371,72 @@ def test_each_call_is_logged_once_with_no_secret(qtbot, settings_path, tmp_path)
     assert log.read_text(encoding="utf-8").splitlines() == [
         "2026-10-22T17:00:00+00:00 start scope=tunnel outcome=confirmed pid=16",
     ]
+
+
+class SwitchOffAfterStop(Spawn):
+    """A runner fake that turns the tunnel switch off after its first call, as if the owner did so while the stop ran."""
+
+    def __init__(self, settings_path, *replies):
+        super().__init__(*replies)
+        self._settings_path = settings_path
+
+    def __call__(self, argv, **kwargs):
+        result = super().__call__(argv, **kwargs)
+        SettingsStore(self._settings_path).save(Settings(core_python=PY, core_checkout=CWD, tunnel_control_enabled=False))
+        return result
+
+
+class SwitchOffWhileAsked(Confirm):
+    """A dialog fake that turns the tunnel switch off once the restart's start question has been answered."""
+
+    def __init__(self, settings_path, *answers):
+        super().__init__(*answers)
+        self._settings_path = settings_path
+
+    def __call__(self, parent, title, body, confirm_text):
+        answer = super().__call__(parent, title, body, confirm_text)
+        if len(self.asked) == 2:
+            SettingsStore(self._settings_path).save(Settings(core_python=PY, core_checkout=CWD, tunnel_control_enabled=False))
+        return answer
+
+
+def test_a_restart_does_not_ask_to_start_when_the_tunnel_switch_is_turned_off_after_the_stop(qtbot, settings_path, tmp_path):
+    _settings(settings_path)
+    spawn = SwitchOffAfterStop(settings_path, _done(0, _status("tunnel", "stopped", pid=18)))
+    confirm = Confirm(True, True)
+    widget = _widget(qtbot, _actions(settings_path, spawn, confirm, tmp_path / "log.txt"))
+    finished = []
+    widget.actionFinished.connect(lambda: finished.append(True))
+
+    _button(widget, "tunnel-restart").click()
+    qtbot.waitUntil(lambda: bool(finished), timeout=5000)
+
+    assert [question[0] for question in confirm.asked] == ["Restart the tunnel: stop it first?"]
+    assert spawn.verbs == ["stop"]
+    assert "Restart stopped before the start, so nothing was started." in _label(widget, "tunnel-control-result").text()
+    assert _button(widget, "tunnel-start").isEnabled() is False
+    assert _label(widget, "tunnel-control-note").text() == TUNNEL_OFF_TEXT
+
+
+def test_a_restart_does_not_start_when_the_tunnel_switch_is_turned_off_while_the_start_is_asked(qtbot, settings_path, tmp_path):
+    _settings(settings_path)
+    spawn = Spawn(_done(0, _status("tunnel", "stopped", pid=19)))
+    confirm = SwitchOffWhileAsked(settings_path, True, True)
+    widget = _widget(qtbot, _actions(settings_path, spawn, confirm, tmp_path / "log.txt"))
+    finished = []
+    widget.actionFinished.connect(lambda: finished.append(True))
+
+    _button(widget, "tunnel-restart").click()
+    qtbot.waitUntil(lambda: bool(finished), timeout=5000)
+
+    assert len(confirm.asked) == 2  # the start question was asked, then the switch went off before the start ran
+    assert spawn.verbs == ["stop"]
+    assert "Restart stopped before the start, so nothing was started." in _label(widget, "tunnel-control-result").text()
+
+
+def test_the_tunnel_buttons_are_enabled_by_default_once_the_core_is_set(qtbot, settings_path, tmp_path):
+    SettingsStore(settings_path).save(Settings(core_python=PY, core_checkout=CWD))  # no switch key: the default is on
+    widget = _widget(qtbot, _actions(settings_path, Spawn(), Confirm(), tmp_path / "log.txt"))
+
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+        assert _button(widget, name).isEnabled() is True, name

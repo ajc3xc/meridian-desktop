@@ -310,6 +310,62 @@ def test_a_stop_is_not_confirmed_while_the_runner_still_reports_running(tmp_path
     assert "still reports" in result.message
 
 
+UNREADABLE_AFTER_STOP = "Not confirmed: the runner state could not be read. Press Refresh to check again."
+
+
+def test_a_stop_whose_runner_state_is_unknown_says_the_state_could_not_be_read_and_never_running(tmp_path):
+    spawn = FakeSpawn(_done(0, _status_payload("tunnel", "unknown", pid=60)))
+    control, log = _control(tmp_path, spawn)
+
+    result = control.stop("tunnel")
+
+    assert result.outcome == NOT_CONFIRMED
+    assert result.state == UNKNOWN
+    assert result.message == UNREADABLE_AFTER_STOP
+    assert "running" not in result.message
+    assert "still reports" not in result.message
+    assert "outcome=not_confirmed pid=60" in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"scope": "tunnel", "child": {"state": "weird-new-state"}},  # a state the desktop does not know
+        {"scope": "tunnel", "child": "running"},  # child is not an object
+        {"scope": "tunnel", "child": {"state": 7}},  # state is not text
+        {"scope": "tunnel"},  # no child at all
+        {"scope": "local", "child": {"state": "running"}},  # a reply for another scope
+    ],
+)
+def test_a_stop_with_a_malformed_state_reply_is_not_confirmed_and_never_says_running(tmp_path, reply):
+    control, _ = _control(tmp_path, FakeSpawn(_done(0, reply)))
+
+    result = control.stop("tunnel")
+
+    assert result.outcome == NOT_CONFIRMED
+    assert result.state == UNKNOWN
+    assert result.message == UNREADABLE_AFTER_STOP
+    assert "running" not in result.message
+
+
+def test_a_stop_whose_reply_is_not_json_is_failed_and_never_says_running(tmp_path):
+    control, _ = _control(tmp_path, FakeSpawn(_done(0, stdout=b"not json at all")))
+
+    result = control.stop("local")
+
+    assert result.outcome == FAILED
+    assert "running" not in result.message
+
+
+def test_a_stop_the_runner_confirms_stopped_says_so(tmp_path):
+    control, _ = _control(tmp_path, FakeSpawn(_done(0, _status_payload("tunnel", "not_started"))))
+
+    result = control.stop("tunnel")
+
+    assert result.outcome == CONFIRMED
+    assert result.message == "The tunnel is stopped."
+
+
 def test_a_reply_that_is_not_json_is_failed(tmp_path):
     control, _ = _control(tmp_path, FakeSpawn(_done(0, stdout=b"not json at all")))
 

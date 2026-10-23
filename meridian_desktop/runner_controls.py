@@ -19,10 +19,12 @@ and nowhere else, and the only commands it builds are these, run with shell=Fals
   "where it is used", and the core never uses it.
 - Timeouts: start 30 seconds and stop 15 seconds (rule 5). Status gets 10 seconds, the same as the read
   client. A timeout is "not confirmed", and nothing is retried.
-- Each start and stop attempt that reaches the runner appends one line to the control log, in the
-  settings folder (rule 6 and amendment E). The line holds the time, the action, the scope, the outcome
-  and the pid when the runner reports one. It never holds the runner's output, a token or a path. Status
-  is a read, not an attempt, so it is not logged.
+- Each start and stop attempt appends one line to the control log, in the settings folder (rule 6 and
+  amendment E), whatever its outcome: confirmed, failed, not confirmed (a timeout included), already running,
+  or not available (no core Python or folder set, or a process that cannot be started). Only a refused call,
+  one whose subcommand or scope is not allowed, is not logged, because it starts no process. The line holds
+  the time, the action, the scope, the outcome and the pid when the runner reports one. It never holds the
+  runner's output, a token or a path. Status is a read, not an attempt, so it is not logged.
 - A state is running only when the runner reports the child running. A missing, failed, unreadable or
   unknown state is unknown, and unknown is never shown as running (rule 7).
 - The desktop never reads or logs a tunnel token (rule 8). It passes none, and it reads none from the environment.
@@ -91,6 +93,8 @@ NOT_STAYING_MESSAGE = "The {label} did not stay running. The runner reports it {
 ALREADY_RUNNING_MESSAGE = "The {label} is already running, so nothing was started."
 EXIT_MESSAGE = "The runner command exited with code {code}, so the {verb} did not succeed."
 STILL_RUNNING_MESSAGE = "Not confirmed: the runner still reports the {label} as running."
+# A stop whose runner state cannot be read. It is not confirmed, and it never says running.
+STATE_UNREADABLE_MESSAGE = "Not confirmed: the runner state could not be read. Press Refresh to check again."
 STATUS_FAILED_MESSAGE = "The {label} status could not be read. It is not shown as running."
 STATE_MESSAGES = {
     RUNNING: "The {label} is running.",
@@ -259,9 +263,12 @@ def _interpret(subcommand: str, scope: str, completed: Any) -> ControlResult:
         return ControlResult(
             subcommand, scope, FAILED, NOT_STAYING_MESSAGE.format(label=label, state=state), state, pid, code,
         )
-    # stop: confirmed only when the runner no longer reports the child running.
-    if state in (RUNNING, UNKNOWN):
+    # stop: confirmed only when the runner reports the child not running. A state the runner still reports as running
+    # is not confirmed, and a state that cannot be read is not confirmed either. Neither is ever worded as the other.
+    if state == RUNNING:
         return ControlResult(subcommand, scope, NOT_CONFIRMED, STILL_RUNNING_MESSAGE.format(label=label), state, pid, code)
+    if state == UNKNOWN:
+        return ControlResult(subcommand, scope, NOT_CONFIRMED, STATE_UNREADABLE_MESSAGE, state, pid, code)
     return ControlResult(subcommand, scope, CONFIRMED, STOPPED_MESSAGE.format(label=label), NOT_RUNNING, pid, code)
 
 

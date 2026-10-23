@@ -278,3 +278,48 @@ def test_the_runner_block_labels_are_selectable(qtbot, settings_path):
 
     for label in section.findChildren(QLabel):
         assert label.textInteractionFlags() == SELECTABLE_TEXT, label.objectName()
+
+
+# ------------------------------------------------------------------ the confirmed values (contract amendments A and B)
+
+
+def test_confirming_zotero_on_records_the_exact_program_the_dialog_named(qtbot, settings_path):
+    confirm = Confirm(True)
+    section, _spawn = _section(qtbot, settings_path, confirm=confirm)
+
+    _box(section, "settings-zotero-autostart").click()
+
+    body = confirm.asked[0][1]
+    assert command_line(EXE) in body
+    saved = _saved(settings_path)
+    assert saved.confirmed_zotero_exe == EXE
+    assert saved.zotero_autostart is True
+
+
+def test_confirming_the_local_server_on_records_the_python_and_folder_the_dialog_showed(qtbot, settings_path):
+    _core(settings_path)
+    confirm = Confirm(True)
+    section, _spawn = _section(qtbot, settings_path, confirm=confirm)
+
+    _box(section, "settings-local-autostart").click()
+
+    body = confirm.asked[0][1]
+    assert describe_command(PY, "start", "local") in body
+    saved = _saved(settings_path)
+    assert saved.confirmed_core_python == PY
+    assert saved.confirmed_core_checkout == CWD
+    assert saved.local_server_autostart is True
+
+
+def test_cancelling_either_switch_records_no_confirmed_value(qtbot, settings_path):
+    _core(settings_path)
+    confirm = Confirm(False, False)
+    section, _spawn = _section(qtbot, settings_path, confirm=confirm)
+
+    _box(section, "settings-zotero-autostart").click()
+    _box(section, "settings-local-autostart").click()
+
+    saved = _saved(settings_path)
+    assert saved.confirmed_zotero_exe == ""
+    assert saved.confirmed_core_python == ""
+    assert saved.confirmed_core_checkout == ""

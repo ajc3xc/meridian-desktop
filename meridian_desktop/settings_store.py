@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
@@ -34,13 +35,26 @@ CORE_CHECKOUT_KEY = "core_checkout"
 CORE_PYTHON_KEY = "core_python"
 CORE_KEYS = (CORE_CHECKOUT_KEY, CORE_PYTHON_KEY)
 
-# The three owner-confirmed control switches. Each is a real true or false, and an absent key means off.
+# The mode a run starts in when the file names none and a hosted token is saved (owner decision, 2026-10-23).
+HOSTED_MODE = "hosted"
+
+# The three owner-confirmed control switches. Each is a real true or false. An absent key means the default in
+# CONTROL_FLAG_DEFAULTS, which is set once below the Settings class.
 CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+
+# The exact values the owner saw in the confirmation dialog when a launch-time switch was turned on (amendments A and B
+# of docs/local-trust-contract.md). The launch-time starts run only with these, and never with the current core setup.
+# An empty value means the owner has not confirmed one yet.
+CONFIRMED_KEYS = ("confirmed_core_python", "confirmed_core_checkout", "confirmed_zotero_exe")
 
 
 @dataclass(frozen=True)
 class Settings:
     mode: str = DEFAULT_MODE
+    # True when the file names a valid mode, which the owner chose. A missing file, a corrupt file, or a file with no
+    # mode key has no explicit mode: the run then starts in the launch mode (see resolve_launch_mode), and save() does
+    # not write a mode key, so the file keeps none until the owner picks one.
+    mode_explicit: bool = True
     hosted_url: str = DEFAULT_HOSTED_URL
     local_url: str = DEFAULT_LOCAL_URL
     engine_url: str = DEFAULT_ENGINE_URL
@@ -59,13 +73,21 @@ class Settings:
     # JSON and downloads nothing. On by default. save() writes this key only when it is off, so a file that
     # never turned the check off is written exactly as before.
     check_updates: bool = True
-    # The owner-confirmed runner controls (docs/local-trust-contract.md). Each is off by default. save() writes a key
-    # only when it is on, so a file that never turned one on keeps the keys it had before. tunnel_control_enabled
-    # switches the tunnel start, stop and restart buttons. zotero_autostart and local_server_autostart start Zotero
-    # and the local server once at launch, and each is turned on only after the owner confirms the dialog.
-    tunnel_control_enabled: bool = False
+    # The owner-confirmed runner controls (docs/local-trust-contract.md). save() writes a key only when it differs from
+    # its default, so a file that keeps the defaults keeps the keys it had before. tunnel_control_enabled switches the
+    # tunnel start, stop and restart buttons, and defaults to true by owner decision on 2026-10-23 (amendment F). Each
+    # button still asks first. zotero_autostart and local_server_autostart start Zotero and the local server once at
+    # launch, default to off, and are turned on only after the owner confirms the dialog.
+    tunnel_control_enabled: bool = True
     zotero_autostart: bool = False
     local_server_autostart: bool = False
+    confirmed_core_python: str = ""
+    confirmed_core_checkout: str = ""
+    confirmed_zotero_exe: str = ""
+
+
+# The default of each switch, read from Settings so the two can never drift apart.
+CONTROL_FLAG_DEFAULTS = {key: getattr(Settings(), key) for key in CONTROL_FLAG_KEYS}
 
 
 @dataclass(frozen=True)
@@ -120,13 +142,17 @@ def core_path_problem(key: str, value: str) -> str | None:
 
 def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
     problems: list[str] = []
-    values: dict[str, object] = {}
+    values: dict[str, object] = {"mode_explicit": False}
 
-    mode = data.get("mode", DEFAULT_MODE)
-    if mode in VALID_MODES:
-        values["mode"] = mode
-    else:
-        problems.append(f"mode must be one of {VALID_MODES}; using {DEFAULT_MODE!r}")
+    # mode: a valid mode in the file is explicit and always wins. An absent key is not an explicit mode, with no
+    # warning, and neither is an invalid one, which is reported. The launch mode decides for those (see load).
+    if "mode" in data:
+        mode = data["mode"]
+        if mode in VALID_MODES:
+            values["mode"] = mode
+            values["mode_explicit"] = True
+        else:
+            problems.append(f"mode must be one of {VALID_MODES}; the saved value is ignored")
 
     for key in _URL_KEYS:
         if key not in data:
@@ -167,6 +193,17 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append(f"{key} must be a path as text or empty; using empty")
 
+    # The confirmed values: an absent key means not confirmed, with no warning. The text is kept exactly as saved,
+    # because it is what the owner was shown. Only text is accepted.
+    for key in CONFIRMED_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, str):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be a path as text or empty; using empty")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -189,54 +226,90 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
 
 
 class SettingsStore:
-    """Load and save the desktop settings at one path. The path is injectable."""
+    """Load and save the desktop settings at one path. The path is injectable.
+
+    The launch mode is held for this run only. resolve_launch_mode sets it once at launch, and load() then gives it to
+    any settings that name no explicit mode. save() never writes it, so the file stays as the owner left it.
+    """
 
     def __init__(self, path: Path | str | None = None) -> None:
         self._path = Path(path) if path is not None else default_settings_path()
+        self._launch_mode: str | None = None
 
     @property
     def path(self) -> Path:
         return self._path
 
+    def resolve_launch_mode(self, hosted_token_saved: Callable[[], bool]) -> str:
+        """Pick the mode this run starts in, hold it for the run, and return it.
+
+        Call once, at launch, before the window.
+
+        A mode the file names always wins. With no explicit mode, the run starts in hosted mode when a hosted token is
+        saved, and in local mode otherwise. ``hosted_token_saved`` answers only whether a token exists. It is called
+        only when the file has no explicit mode, and the token is never read here.
+        """
+        settings = self.load().settings
+        if settings.mode_explicit:
+            self._launch_mode = None
+            return settings.mode
+        self._launch_mode = HOSTED_MODE if hosted_token_saved() else DEFAULT_MODE
+        return self._launch_mode
+
+    def _for_this_run(self, settings: Settings) -> Settings:
+        """The settings as this run sees them. A file with no explicit mode takes the launch mode, once one is resolved."""
+        if settings.mode_explicit or self._launch_mode is None:
+            return settings
+        return replace(settings, mode=self._launch_mode)
+
     def load(self) -> LoadResult:
+        no_file = replace(Settings(), mode_explicit=False)
         try:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return LoadResult(Settings())
+            return LoadResult(self._for_this_run(no_file))
         except (OSError, ValueError) as exc:
             return LoadResult(
-                Settings(),
+                self._for_this_run(no_file),
                 f"settings file unreadable ({exc.__class__.__name__}); using defaults",
             )
 
         try:
             data = json.loads(raw)
         except ValueError:
-            return LoadResult(Settings(), "settings file is corrupt (not valid JSON); using defaults")
+            return LoadResult(
+                self._for_this_run(no_file), "settings file is corrupt (not valid JSON); using defaults",
+            )
 
         if not isinstance(data, dict):
-            return LoadResult(Settings(), "settings file does not hold a JSON object; using defaults")
+            return LoadResult(
+                self._for_this_run(no_file), "settings file does not hold a JSON object; using defaults",
+            )
 
         settings, problems = _from_mapping(data)
-        return LoadResult(settings, "; ".join(problems) or None)
+        return LoadResult(self._for_this_run(settings), "; ".join(problems) or None)
 
     def save(self, settings: Settings) -> None:
         directory = self._path.parent
         directory.mkdir(parents=True, exist_ok=True)
         data = asdict(settings)
+        del data["mode_explicit"]  # a flag about the file, not a setting
+        if not settings.mode_explicit:
+            # No mode the owner chose: the file keeps no mode key, so a later launch can still pick one.
+            del data["mode"]
         if not settings.autostart:
             # Off is the default, so a file that never opted in is written exactly as before.
             del data["autostart"]
-        for key in CORE_KEYS:
+        for key in CORE_KEYS + CONFIRMED_KEYS:
             if not data[key]:
-                # "Not set" is the default, so a file that never set a core path has no such key.
+                # "Not set" is the default, so a file that never set a core path or a confirmed value has no such key.
                 del data[key]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
         for key in CONTROL_FLAG_KEYS:
-            if not data[key]:
-                # Off is the default, so a file that never turned a runner control on has no such key.
+            if data[key] == CONTROL_FLAG_DEFAULTS[key]:
+                # The default is never written, so a file that keeps the defaults has no such key.
                 del data[key]
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
@@ -256,19 +329,27 @@ class SettingsStore:
     def set_mode(self, mode: str) -> Settings:
         if mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
-        updated = replace(self.load().settings, mode=mode)
+        # The owner chose this mode, so it is explicit from now on and wins over the launch mode.
+        updated = replace(self.load().settings, mode=mode, mode_explicit=True)
         self.save(updated)
         return updated
 
     def set_core_path(self, key: str, value: str) -> Settings:
         """Validate and save one core setting. Raises ValueError with plain words when it is refused.
 
-        A refused value writes nothing. Every other field in the saved file is kept.
+        A refused value writes nothing. Every other field in the saved file is kept, except that a saved core path turns
+        off both launch-time switches (zotero_autostart and local_server_autostart). The owner must confirm them again
+        against the new setup. The caller says so in the Settings status line.
         """
         text = value.strip()
         problem = core_path_problem(key, text)
         if problem is not None:
             raise ValueError(problem)
-        updated = replace(self.load().settings, **{key: text})
+        updated = replace(
+            self.load().settings,
+            **{key: text},
+            zotero_autostart=False,
+            local_server_autostart=False,
+        )
         self.save(updated)
         return updated

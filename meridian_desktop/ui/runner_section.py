@@ -7,8 +7,9 @@ The block has three parts, in this order:
 - Start, Stop and Restart for the local scope (ui/scope_controls.py). They are on when the Meridian core checkout and
   its Python are set, and each one asks the owner first.
 - Two switches, zotero_autostart and local_server_autostart (amendments A to C of the contract). Turning one on shows
-  the same confirmation dialog, and Cancel leaves it off. Turning one off saves at once and asks nothing. Nothing
-  starts at launch until its switch is on and the owner has confirmed it here.
+  the same confirmation dialog, and Cancel leaves it off. Confirming it saves the switch with the exact values the
+  dialog showed (the Zotero program, or the core Python and checkout), and the launch start uses only those. Turning
+  one off saves at once and asks nothing.
 
 The block starts nothing when it is built. The switch states are read from the saved settings, with signals blocked,
 so setting a box never asks the owner by accident.
@@ -167,9 +168,17 @@ class RunnerSection(QWidget):
         box.blockSignals(False)
         self._set_message(text)
 
-    def _save(self, name: str, value: bool, box: QCheckBox, on_text: str) -> None:
+    def _save(
+        self,
+        name: str,
+        value: bool,
+        box: QCheckBox,
+        on_text: str,
+        *,
+        confirmed: dict[str, str] | None = None,
+    ) -> None:
         try:
-            self._actions.set_flag(name, value)
+            self._actions.set_flag(name, value, confirmed=confirmed)
         except (OSError, ValueError):
             self._revert(box, NOT_SAVED_TEXT)
             return
@@ -195,7 +204,11 @@ class RunnerSection(QWidget):
         if not self._actions.ask(self, ZOTERO_QUESTION, body, "Turn on"):
             self._revert(self._zotero_box, ZOTERO_CANCELLED_TEXT)
             return
-        self._save("zotero_autostart", True, self._zotero_box, ZOTERO_ON_TEXT)
+        # The exact path the dialog named is stored, so the launch start runs that program and no other.
+        self._save(
+            "zotero_autostart", True, self._zotero_box, ZOTERO_ON_TEXT,
+            confirmed={"confirmed_zotero_exe": exe},
+        )
 
     @Slot(bool)
     def _on_local_clicked(self, checked: bool) -> None:
@@ -210,7 +223,11 @@ class RunnerSection(QWidget):
         if not self._actions.ask(self, LOCAL_QUESTION, body, "Turn on"):
             self._revert(self._local_box, LOCAL_CANCELLED_TEXT)
             return
-        self._save("local_server_autostart", True, self._local_box, LOCAL_ON_TEXT)
+        # The exact Python and folder the dialog showed are stored. The launch start uses these, not the later setup.
+        self._save(
+            "local_server_autostart", True, self._local_box, LOCAL_ON_TEXT,
+            confirmed={"confirmed_core_python": core.python, "confirmed_core_checkout": core.cwd},
+        )
 
 
 def _folder_of(exe: str) -> str:

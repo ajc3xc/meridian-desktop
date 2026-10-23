@@ -24,7 +24,7 @@ from meridian_desktop.runner_client import (
     RunnerClient,
     RunnerResult,
 )
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tunnel_status import (
     CHECK_FAILED_REASON,
     DEPENDENCY_TEXT,
@@ -57,6 +57,8 @@ TUNNEL_SOURCES = (
 )
 RUN_LABELS = ("tunnel-run-state", "tunnel-run-reason", "tunnel-run-checked", "tunnel-run-dependency", "tunnel-run-start")
 CHECKED = datetime(2026, 10, 21, 10, 15, 0)
+PY = "C:/Users/tester/core-env/python.exe"
+CWD = "C:/Users/tester/Documents/Meridian/repository"
 
 
 def _clock():
@@ -373,14 +375,35 @@ def test_the_tab_has_only_the_three_tunnel_controls_and_no_refresh_button(qtbot)
     assert names == ["tunnel-restart", "tunnel-start", "tunnel-stop"]
 
 
-def test_the_tunnel_controls_are_disabled_when_tunnel_control_is_off(qtbot, settings_path):
-    # The settings file is absent, so tunnel_control_enabled is its default, false.
+def test_the_tunnel_controls_are_disabled_when_tunnel_control_is_turned_off(qtbot, settings_path):
+    # The owner has set tunnel_control_enabled to false, so the buttons are off and the note says why.
+    SettingsStore(settings_path).save(Settings(core_python=PY, core_checkout=CWD, tunnel_control_enabled=False))
     page = _page_with_actions(qtbot, settings_path, Fake(_reply("running")))
     _show_and_wait(qtbot, page, HEADLINES[RUNNING])
 
     for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
         assert page.findChild(QPushButton, name).isEnabled() is False, name
     assert "tunnel_control_enabled" in _label(page, "tunnel-control-note").text()
+
+
+def test_the_tunnel_controls_are_on_by_default_when_the_core_is_set(qtbot, settings_path):
+    # The settings file is absent, so tunnel_control_enabled is its default, true (contract amendment F). The core
+    # is set, so the buttons are on, and each one still asks the owner first.
+    SettingsStore(settings_path).save(Settings(core_python=PY, core_checkout=CWD))
+    page = _page_with_actions(qtbot, settings_path, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+        assert page.findChild(QPushButton, name).isEnabled() is True, name
+
+
+def test_the_tunnel_controls_say_the_core_is_not_set_when_it_is_not_set_by_default(qtbot, settings_path):
+    page = _page_with_actions(qtbot, settings_path, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+        assert page.findChild(QPushButton, name).isEnabled() is False, name
+    assert "core checkout and its Python" in _label(page, "tunnel-control-note").text()
 
 
 def test_a_delivered_result_with_a_foreign_owner_is_not_shown(qtbot):

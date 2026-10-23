@@ -4,8 +4,9 @@ The top of the tab says whether the tunnel is running. That line comes from one 
 status call for the tunnel scope (see meridian_desktop/tunnel_status.py). The call runs on the thread
 pool each time the tab is shown, so the UI thread never waits on it. The page starts no timer and
 makes no request until it is shown. Below the status line are Start, Stop and Restart for the tunnel
-(see meridian_desktop/ui/scope_controls.py). They stay disabled until the tunnel_control_enabled setting
-is true, and each one asks the owner first, in a dialog that names the exact command (docs/local-trust-contract.md).
+(see meridian_desktop/ui/scope_controls.py). They are on while the tunnel_control_enabled setting is true, which is
+its default (owner decision, 2026-10-23), and each one asks the owner first, in a dialog that names the exact command
+(docs/local-trust-contract.md).
 The same top section names the tools that connect through the tunnel, and tells the owner how to start
 the tunnel by hand in a terminal.
 
@@ -113,7 +114,8 @@ class TunnelCheckJob(QRunnable):
 class TunnelPage(QWidget):
     """The Tunnel tab: the tunnel's running state, the Start, Stop and Restart controls, then the slot table.
 
-    The controls are off unless the tunnel_control_enabled setting is true, and each one asks the owner first.
+    The controls are off only when the tunnel_control_enabled setting is false or the core is not set, and each one asks
+    the owner first.
     """
 
     def __init__(
