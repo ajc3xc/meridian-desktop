@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -273,6 +274,26 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
     return replace(Settings(), **values), problems
 
 
+REPLACE_ATTEMPTS = 20
+REPLACE_WAIT_SECONDS = 0.05
+
+
+def _replace_with_retry(source: str, target: Path) -> None:
+    """Replace ``target`` with ``source``, waiting out a brief Windows file lock.
+
+    On Windows a file another thread has open can refuse the replace for a moment. The write is retried for about a
+    second. Any other error, or a lock that outlasts the retries, is raised to the caller unchanged.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_WAIT_SECONDS)
+
+
 class SettingsStore:
     """Load and save the desktop settings at one path. The path is injectable.
 
@@ -382,7 +403,7 @@ class SettingsStore:
                 fh.write(payload)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp_name, self._path)
+            _replace_with_retry(tmp_name, self._path)
         except BaseException:
             try:
                 os.unlink(tmp_name)
