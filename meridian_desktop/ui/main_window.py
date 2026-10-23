@@ -5,8 +5,9 @@ Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
 pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) searches the
 local server's code, outputs and research, and sends queries only to the Local URL. Settings holds the connection
-settings, the RunPod panel, the Zotero library panel, and Diagnostics: the full tools table, the LaTeX engine probe,
-and the desktop, tunnel and runner logs. The Projects and Sessions tabs are read-only.
+settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
+Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
+Sessions tabs are read-only.
 
 Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through settings_store and the
 RunPod key goes through secret_store, and neither imports Qt. The only network calls, apart from the update check
@@ -73,6 +74,7 @@ from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, Settings
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
+from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
@@ -361,6 +363,9 @@ class MainWindow(QMainWindow):
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
         column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
+        # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
+        column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
+        column.addWidget(WritingArea(container))
         column.addStretch(1)
 
         scroll = QScrollArea(self.tabs)
