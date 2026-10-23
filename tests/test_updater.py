@@ -9,6 +9,7 @@ import http.client
 import importlib.util
 import io
 import json
+import lzma
 import stat
 import struct
 import sys
@@ -1258,6 +1259,69 @@ def test_a_zip_exactly_at_both_caps_is_staged(root, frozen, monkeypatch):
     monkeypatch.setattr(u, "MAX_EXTRACT_BYTES", 22)  # 8 + 3 + 11 bytes
     monkeypatch.setattr(u, "MAX_EXTRACT_ENTRIES", 3)
     assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+
+
+def _zip_with_corrupt_member(method: int, data: bytes) -> bytes:
+    """A zip whose one member is compressed with method, with eight bytes of its compressed data flipped in the middle.
+
+    The damage is in the compressed stream itself, so the decompressor fails before the CRC is ever compared.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        archive.writestr(u.EXE_NAME, data)
+    raw = bytearray(buffer.getvalue())
+    name_len, extra_len = struct.unpack_from("<HH", raw, 26)  # the local file header's name and extra lengths
+    compressed_len = struct.unpack_from("<I", raw, 18)[0]  # the local file header's compressed size
+    middle = 30 + name_len + extra_len + compressed_len // 2
+    for index in range(middle, middle + 8):
+        raw[index] ^= 0xFF
+    return bytes(raw)
+
+
+_INCOMPRESSIBLE = bytes(range(256)) * 64
+
+
+@pytest.mark.parametrize(("method", "error"), [(zipfile.ZIP_BZIP2, OSError), (zipfile.ZIP_LZMA, lzma.LZMAError)])
+def test_a_corrupt_bzip2_or_lzma_member_is_refused_and_installs_nothing(root, frozen, method, error):
+    zip_bytes = _zip_with_corrupt_member(method, _INCOMPRESSIBLE)
+    # Precondition: plain zipfile fails inside the decompressor with the error this case is about.
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        with pytest.raises(error):
+            archive.read(u.EXE_NAME)
+    before = tree_state(root)
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert result.reason == u._EXTRACT_FAILED  # the plain refusal, not the disk-fault message
+    assert tree_state(root) == before
+    assert not list(root.glob("update-*"))
+
+
+class _UnreadableSource(io.BytesIO):
+    """A member whose data cannot be decompressed: reading it raises, as a corrupt bzip2 or LZMA stream does."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(b"")
+        self._error = error
+
+    def read(self, *args):
+        raise self._error
+
+
+@pytest.mark.parametrize("error", [OSError("Invalid data stream"), lzma.LZMAError("Corrupt input data")])
+def test_copy_within_refuses_a_member_whose_data_cannot_be_read(error):
+    with pytest.raises(u.Refused) as caught:
+        u._copy_within(_UnreadableSource(error), io.BytesIO(), 10)
+    assert str(caught.value) == u._EXTRACT_FAILED
+
+
+def test_copy_within_leaves_a_disk_error_while_writing_as_an_oserror():
+    class FullDisk(io.BytesIO):
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+    with pytest.raises(OSError) as caught:
+        u._copy_within(io.BytesIO(b"abcd"), FullDisk(), 10)
+    assert not isinstance(caught.value, u.Refused)
 
 
 def test_copy_within_allows_exactly_its_budget_and_refuses_one_byte_more():

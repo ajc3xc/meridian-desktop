@@ -191,6 +191,43 @@ def test_install_over_an_older_copy_replaces_it(tmp_path):
     assert not stale.exists()
 
 
+def test_a_reinstall_leaves_no_renamed_aside_copy_behind(tmp_path):
+    env = _env(tmp_path)
+    inst.install(_bundle(tmp_path, marker="v1"), env, writer=_Recorder())
+
+    inst.install(_bundle(tmp_path / "second", marker="v2"), env, writer=_Recorder())
+
+    assert sorted(p.name for p in (inst.install_dir(env) / "versions").iterdir()) == [__version__]
+
+
+def _tree(folder: Path) -> dict[str, bytes | None]:
+    """Every path under folder with its bytes (None for a folder), so a test can show that nothing changed."""
+    paths = sorted(folder.rglob("*"))
+    return {str(path.relative_to(folder)): (path.read_bytes() if path.is_file() else None) for path in paths}
+
+
+def test_a_locked_existing_copy_is_left_whole_when_it_cannot_be_renamed_aside(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    inst.install(_bundle(tmp_path, marker="v1"), env, writer=_Recorder())
+    installed = _installed(env)
+    before = _tree(installed)
+    real_rename = inst.os.rename
+
+    def refuse_the_existing_copy(source, destination, *args, **kwargs):
+        # A file inside the running copy is in use, so the copy cannot be renamed. Nothing may be deleted instead.
+        if Path(source) == installed:
+            raise PermissionError(13, "Access is denied")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(inst.os, "rename", refuse_the_existing_copy)
+
+    with pytest.raises(inst.InstallError, match="could not copy Meridian Desktop into"):
+        inst.install(_bundle(tmp_path / "second", marker="v2"), env, writer=_Recorder())
+
+    assert _tree(installed) == before
+    assert not installed.with_name(f"{installed.name}.partial").exists()
+
+
 def test_install_refuses_a_source_without_the_exe(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()

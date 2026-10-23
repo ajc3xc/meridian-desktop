@@ -51,6 +51,7 @@ import hashlib
 import http.client
 import io
 import json
+import lzma
 import os
 import re
 import shutil
@@ -434,10 +435,17 @@ def _remove_tree(path: Path, *, strict: bool = False) -> None:
 
 
 def _copy_within(source: BinaryIO, sink: BinaryIO, budget: int) -> int:
-    """Copy source to sink and return the bytes copied. Raises TooLarge before a byte past budget is written."""
+    """Copy source to sink and return the bytes copied. Raises TooLarge before a byte past budget is written.
+
+    A read that fails is a corrupt member: bzip2 data raises OSError and LZMA data raises LZMAError. Both are refused as
+    an unreadable zip. A write that fails is a disk fault and is left as it is.
+    """
     copied = 0
     while True:
-        chunk = source.read(_CHUNK)
+        try:
+            chunk = source.read(_CHUNK)
+        except (OSError, lzma.LZMAError):
+            raise Refused(_EXTRACT_FAILED) from None
         if not chunk:
             return copied
         copied += len(chunk)
