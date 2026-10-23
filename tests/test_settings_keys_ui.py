@@ -7,7 +7,9 @@ checks can search for it.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint
+import threading
+
+from PySide6.QtCore import QPoint, QThreadPool
 from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
 
 from _fakes import MemoryKeyring
@@ -17,7 +19,13 @@ from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, Keyrin
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import keys_section as keys_module
 from meridian_desktop.ui.keys_section import ADDED_TEXT, STATUS_TEXT, KeysSection
-from meridian_desktop.ui.runpod_panel import KEY_MISSING_TEXT, KEY_STORED_TEXT, RunPodPanel
+from meridian_desktop.ui.runpod_panel import (
+    KEY_MISSING_TEXT,
+    KEY_STORED_TEXT,
+    REMOVE_KEY_CANCELLED_TEXT,
+    REMOVE_KEY_TITLE,
+    RunPodPanel,
+)
 from meridian_desktop.ui.settings_group import CollapsibleGroup
 from meridian_desktop.ui.settings_tab import SettingsTab
 
@@ -62,14 +70,50 @@ def _tab(qtbot, settings_path, secrets, **kwargs):
     return tab
 
 
-def _page_and_tab(qtbot, settings_path, secrets):
-    """The main window's arrangement: the RunPod panel is the Settings page, and the tab sits in it."""
+def _say_yes(parent, title, text):
+    return True
+
+
+def _page_and_tab(qtbot, settings_path, secrets, confirm=None):
+    """The main window's arrangement: the RunPod panel is the Settings page, and the tab sits in it.
+
+    The RunPod Remove question is answered Yes unless a test passes its own, so no dialog can open.
+    """
     container = QWidget()
     qtbot.addWidget(container)
-    page = RunPodPanel(SettingsStore(settings_path), secrets, client=FakeClient(), parent=container)
+    answer = _say_yes if confirm is None else confirm
+    page = RunPodPanel(SettingsStore(settings_path), secrets, client=FakeClient(), parent=container, confirm=answer)
     tab = SettingsTab(SettingsStore(settings_path), parent=page, secrets=secrets, list_hosted=_unexpected_list)
     page.layout().insertWidget(0, tab)
     return container, page, tab
+
+
+def _wait_names_loaded(qtbot, section) -> None:
+    """The Keys block reads the saved names on the thread pool, so wait for that read before looking at its cards."""
+    qtbot.waitUntil(lambda: not section.loading, timeout=5000)
+
+
+class GatedKeys:
+    """Wraps the real ApiKeys. Its first entries() call reads the list, then waits on the gate, so a test can change the
+    saved names while that first read is still held. It records each thread that calls it."""
+
+    def __init__(self, inner, gate):
+        self._inner = inner
+        self._gate = gate
+        self.threads = []
+        self.first_read_done = threading.Event()
+
+    def entries(self):
+        first = not self.threads
+        self.threads.append(threading.current_thread())
+        result = self._inner.entries()
+        if first:
+            self.first_read_done.set()
+            self._gate.wait(5)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 def _all_text(widget) -> str:
@@ -157,7 +201,13 @@ def test_the_runpod_card_moves_into_the_keys_group_and_the_page_stays_the_runpod
 def test_the_runpod_entry_still_saves_and_removes_its_key(qtbot, settings_path):
     backend = MemoryKeyring()
     secrets = KeyringSecretStore(backend=backend)
-    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    asked = []
+
+    def ask(parent, title, text):
+        asked.append(title)
+        return True
+
+    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets, confirm=ask)
     key_input = tab.findChild(QLineEdit, "runpod-key-input")
     status = tab.findChild(QLabel, "runpod-key-status")
     # The panel's first keychain read holds its buttons until it answers, so wait for it before the first click.
@@ -174,7 +224,23 @@ def test_the_runpod_entry_still_saves_and_removes_its_key(qtbot, settings_path):
     qtbot.waitUntil(lambda: not page.busy, timeout=5000)
     tab.findChild(QPushButton, "runpod-remove-key").click()
     qtbot.waitUntil(lambda: status.text() == KEY_MISSING_TEXT, timeout=5000)
+    assert asked == [REMOVE_KEY_TITLE], "the RunPod Remove asks first"
     assert backend.snapshot() == {}
+
+
+def test_declining_the_runpod_remove_keeps_the_key_in_the_keychain(qtbot, settings_path):
+    backend = MemoryKeyring()
+    backend.set_password(RUNPOD_SERVICE, RUNPOD_ACCOUNT, FAKE_VALUE)
+    secrets = KeyringSecretStore(backend=backend)
+    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets, confirm=lambda parent, title, text: False)
+    status = tab.findChild(QLabel, "runpod-key-status")
+    qtbot.waitUntil(lambda: status.text() == KEY_STORED_TEXT, timeout=5000)
+
+    tab.findChild(QPushButton, "runpod-remove-key").click()
+
+    assert backend.snapshot() == {(RUNPOD_SERVICE, RUNPOD_ACCOUNT): FAKE_VALUE}
+    assert tab.findChild(QLabel, "runpod-result").text() == REMOVE_KEY_CANCELLED_TEXT
+    assert status.text() == KEY_STORED_TEXT
 
 
 def test_the_keys_block_lists_runpod_once_as_a_named_card(qtbot, settings_path):
@@ -227,6 +293,7 @@ def test_saved_names_show_their_status_from_the_keychain(qtbot, settings_path):
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
 
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
 
     assert tab.findChild(QLabel, "keys-entry-openai-status").text() == STATUS_TEXT[STATUS_SET]
     assert tab.findChild(QLabel, "keys-entry-anthropic-status").text() == STATUS_TEXT[STATUS_NOT_SET]
@@ -282,9 +349,50 @@ def test_the_keys_section_on_its_own_has_no_runpod_card_and_lists_custom_names(q
     keys = ApiKeys(SettingsStore(settings_path), KeyringSecretStore(backend=backend))
     section = KeysSection(keys)
     qtbot.addWidget(section)
+    _wait_names_loaded(qtbot, section)
 
     assert section.findChild(QWidget, "keys-entry-runpod") is None, "no RunPod card without a panel to host"
     assert section.findChild(QLabel, "keys-entry-openai-status").text() == STATUS_TEXT[STATUS_SET]
+
+
+def test_the_names_are_read_on_the_thread_pool_so_building_the_block_does_not_wait_for_the_keychain(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI",), value_for="OpenAI")
+    gate = threading.Event()
+    keys = GatedKeys(ApiKeys(SettingsStore(settings_path), KeyringSecretStore(backend=backend)), gate)
+
+    section = KeysSection(keys)
+    qtbot.addWidget(section)
+
+    # The first read is held at the gate, and the block was still built: construction did not wait for it.
+    assert section.loading is True
+    assert section.findChild(QLabel, "keys-entry-openai-status") is None
+    gate.set()
+    _wait_names_loaded(qtbot, section)
+    assert section.findChild(QLabel, "keys-entry-openai-status").text() == STATUS_TEXT[STATUS_SET]
+    assert keys.threads and all(thread is not threading.main_thread() for thread in keys.threads)
+
+
+def test_a_read_that_a_later_refresh_supersedes_cannot_bring_back_a_name_the_refresh_dropped(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI",), value_for="OpenAI")
+    gate = threading.Event()
+    keys = GatedKeys(ApiKeys(SettingsStore(settings_path), KeyringSecretStore(backend=backend)), gate)
+    section = KeysSection(keys)
+    qtbot.addWidget(section)
+    assert keys.first_read_done.wait(5), "the first read has listed the old name"
+
+    # The name leaves the list while that read is still held. The refresh shows the list as it is now.
+    SettingsStore(settings_path).save(Settings(key_names=()))
+    section.refresh()
+    assert section.findChild(QWidget, "keys-entry-openai") is None
+
+    # The held read now delivers the old list. Its generation is out of date, so it is dropped.
+    gate.set()
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    qtbot.wait(20)
+    assert section.findChild(QWidget, "keys-entry-openai") is None
+    assert section.loading is False
 
 
 # ----------------------------------------------------------- no clipping at 1280 px
@@ -306,6 +414,7 @@ def _show_at_1280(qtbot, container, page, tab) -> None:
     container.show()
     qtbot.waitExposed(container)
     qtbot.waitUntil(lambda: tab.findChild(QWidget, "settings-content").width() >= 600, timeout=5000)
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     qtbot.wait(30)
 
 

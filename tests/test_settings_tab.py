@@ -407,7 +407,7 @@ def test_test_button_is_disabled_while_the_test_runs(qtbot, settings_path, secre
     assert result.text() == TEST_CONNECTED_TEXT.format(url=DEFAULT_HOSTED_URL, count=0)
 
 
-def test_a_test_still_running_when_the_tab_is_deleted_does_not_keep_the_tab(qtbot, settings_path, secrets, monkeypatch):
+def test_a_test_still_running_when_the_tab_is_deleted_does_not_keep_the_tab(qtbot, settings_path, secrets):
     """A tab deleted while its connection test still runs is freed on the GUI thread, because the test holds no tab.
 
     The test used to hold the tab through its bound run method and its signal emit. When the pool ended the test on a
@@ -421,14 +421,6 @@ def test_a_test_still_running_when_the_tab_is_deleted_does_not_keep_the_tab(qtbo
         entered.set()
         gate.wait(5)
         return VALID_ROWS
-
-    delivered = []
-
-    def spy(self, item):
-        if getattr(item, "owner", None) is self._owner:  # only this tab's results count
-            delivered.append(item)
-
-    monkeypatch.setattr(SettingsTab, "_on_delivered", spy, raising=False)
 
     gc.disable()
     try:
@@ -448,8 +440,9 @@ def test_a_test_still_running_when_the_tab_is_deleted_does_not_keep_the_tab(qtbo
         assert ref() is None
         gate.set()
         assert QThreadPool.globalInstance().waitForDone(5000)
-        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
-        assert delivered == []
+        # The late result reaches the event loop. The tab's own handler is left in place: a call to it on the freed tab
+        # would crash here and fail the test. A test-only handler is connected another way, so it is not used.
+        qtbot.wait(50)
     finally:
         gate.set()
         gc.enable()

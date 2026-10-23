@@ -33,6 +33,7 @@ from meridian_desktop import local_client
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
@@ -46,6 +47,12 @@ PODS_MAX_HEIGHT = 160
 
 KEY_STORED_TEXT = "A RunPod key is stored in the keychain."
 KEY_MISSING_TEXT = "No RunPod key is stored."
+REMOVE_KEY_TITLE = "Remove the RunPod key?"
+REMOVE_KEY_BODY = "The RunPod key is deleted from the keychain. This cannot be undone."
+REMOVE_KEY_CANCELLED_TEXT = "Not removed. The RunPod key is still saved."
+# A removal that failed on the disk. The message names no path and no system text.
+REMOVE_KEY_FAILED_TEXT = "Not removed. The RunPod key could not be deleted from the keychain. Try again."
+NOTHING_HERE_TEXT = "Nothing here yet."
 SERVER_UNCHECKED_TEXT = "Local Meridian server: not checked yet"
 
 
@@ -188,7 +195,11 @@ class _Work:
         return self._secrets.set_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT, value)
 
     def delete_key(self) -> Any:
-        return self._secrets.delete_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT)
+        try:
+            return self._secrets.delete_secret(RUNPOD_SERVICE, RUNPOD_ACCOUNT)
+        except OSError:
+            # Reduced to the plain line here, on the worker, so no path or system text reaches the panel.
+            raise SecretStoreError(REMOVE_KEY_FAILED_TEXT) from None
 
     def local(self, fetch: Callable[[str, float], dict[str, Any]] | None) -> _Outcome:
         """Probe the local server, then run ``fetch`` only when it is running. Runs on a worker."""
@@ -261,10 +272,14 @@ class RunPodPanel(QWidget):
         secret_store: SecretStore,
         client: Any = local_client,
         parent: QWidget | None = None,
+        *,
+        confirm: Callable[[QWidget, str, str], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("runpod-panel")
         self._client = client
+        # The Yes or No before the RunPod key is removed. Tests pass a fake; the app uses the plain dialog.
+        self._confirm = confirm if confirm is not None else ask_yes_no
         self._work = _Work(settings_store, secret_store, client)
         # Identifies this panel's jobs. A plain object, so a job can hold it without holding the panel.
         self._owner = object()
@@ -323,8 +338,13 @@ class RunPodPanel(QWidget):
         self._result.setVisible(False)
         layout.addWidget(self._result)
 
+        # With no pods the grid is hidden and one plain line says so, so an empty box never shows.
+        self._pods_empty = make_selectable(QLabel(NOTHING_HERE_TEXT, self))
+        self._pods_empty.setObjectName("runpod-pods-empty")
+        layout.addWidget(self._pods_empty)
         self._pods = QTableWidget(0, len(POD_COLUMNS), self)
         self._pods.setObjectName("runpod-pods")
+        self._pods.setVisible(False)
         self._pods.setMinimumHeight(PODS_MIN_HEIGHT)
         self._pods.setMaximumHeight(PODS_MAX_HEIGHT)
         self._pods.setHorizontalHeaderLabels(list(POD_COLUMNS))
@@ -413,6 +433,10 @@ class RunPodPanel(QWidget):
 
     @Slot()
     def _on_remove_clicked(self) -> None:
+        # Removing the key takes the owner's yes first. No, or Escape, changes nothing.
+        if not self._confirm(self, REMOVE_KEY_TITLE, REMOVE_KEY_BODY):
+            self._set_result(REMOVE_KEY_CANCELLED_TEXT)
+            return
         self._submit(self._work.delete_key, RunPodPanel._on_remove_done)
 
     def _on_remove_done(self, result: Any, error: str | None) -> None:
@@ -474,9 +498,16 @@ class RunPodPanel(QWidget):
         for row, pod in enumerate(pods):
             for column, cell in enumerate(pod_row(pod)):
                 self._pods.setItem(row, column, QTableWidgetItem(cell))
+        self._show_pod_rows(bool(pods))
 
     def _clear_pods(self) -> None:
         self._pods.setRowCount(0)
+        self._show_pod_rows(False)
+
+    def _show_pod_rows(self, has_rows: bool) -> None:
+        """The grid shows when there are rows. Otherwise the one plain 'nothing here yet' line shows."""
+        self._pods.setVisible(has_rows)
+        self._pods_empty.setVisible(not has_rows)
 
     # ----------------------------------------------------------- first show
 

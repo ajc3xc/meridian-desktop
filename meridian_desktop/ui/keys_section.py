@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
@@ -20,7 +21,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -37,6 +37,9 @@ from meridian_desktop.api_keys import (
     slug,
 )
 from meridian_desktop.secret_store import SecretStoreError
+from meridian_desktop.ui.confirm import ask_yes_no
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.runner_actions import submit
 from meridian_desktop.ui.text import make_selectable
 
 INTRO_TEXT = (
@@ -50,8 +53,6 @@ NEW_VALUE_PLACEHOLDER = "New value, to replace the saved one"
 ADD_TEXT = "Add key"
 SAVE_VALUE_TEXT = "Save value"
 REMOVE_TEXT = "Remove"
-YES_TEXT = "Yes"
-NO_TEXT = "No"
 REMOVE_TITLE = "Remove this key?"
 REMOVE_BODY = "The saved value for {name} is deleted from the keychain. {listing} This cannot be undone."
 REMOVE_LISTING = "The name also leaves the list."
@@ -67,6 +68,9 @@ NO_VALUE_TEXT = "Type the new value first, then press Save value."
 REMOVED_TEXT = "Removed {name} and its saved value."
 REMOVED_NO_VALUE_TEXT = "Removed {name} from the list. No value was saved for it."
 NOT_REMOVED_TEXT = "Not removed. {detail}"
+# A removal that failed on the disk or in the keychain. The message names no path and no value.
+NOT_REMOVED_OS_TEXT = "Not removed. The key could not be deleted or its name could not be written. Try again."
+NAMES_NOT_READ_TEXT = "The saved key names could not be read. Reopen Settings to try again."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written."
 RUNPOD_HEADING_TEXT = RUNPOD_NAME
 
@@ -90,18 +94,8 @@ def _bold(label: QLabel) -> QLabel:
 
 
 def _ask_remove(parent: QWidget, title: str, text: str) -> bool:
-    """A modal Yes or No. No is the default and Escape, and only a click on Yes returns True."""
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Icon.Question)
-    box.setWindowTitle(title)
-    box.setTextFormat(Qt.TextFormat.PlainText)
-    box.setText(text)
-    yes = box.addButton(YES_TEXT, QMessageBox.ButtonRole.YesRole)
-    no = box.addButton(NO_TEXT, QMessageBox.ButtonRole.NoRole)
-    box.setDefaultButton(no)
-    box.setEscapeButton(no)
-    box.exec()
-    return box.clickedButton() is yes
+    """The Yes or No question before a key is removed. No is the default."""
+    return ask_yes_no(parent, title, text)
 
 
 @dataclass
@@ -131,8 +125,40 @@ class KeysSection(QWidget):
         # None means the Yes/No dialog. It is looked up when Remove is pressed, not here, so a test can swap it.
         self._confirm = confirm
         self._cards: dict[str, _Card] = {}
+        # The first read of the listed names runs on the thread pool, so building this block never reads the keychain.
+        self._owner = object()
+        self._load_generation = 0
+        self._loading = False
+        shared_delivery().delivered.connect(self._on_names_loaded)
         self._build()
-        self.refresh()
+        self._load_names()
+
+    @property
+    def loading(self) -> bool:
+        """True while the listed names are being read from the keychain on the thread pool."""
+        return self._loading
+
+    def _load_names(self) -> None:
+        """Read the listed names and whether each one is set, on the thread pool. A read still running is replaced."""
+        self._load_generation += 1
+        self._loading = True
+        # The job holds the key store, never this block, so a block freed while the read runs is never touched off the GUI thread.
+        keys = self._keys
+        submit(self._owner, self._load_generation, lambda: keys.entries())
+
+    @Slot(object)
+    def _on_names_loaded(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another section, or an older read, is dropped here.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        generation, (entries, failure) = item.value
+        if generation != self._load_generation:
+            return
+        self._loading = False
+        if failure is not None:
+            self._show(NAMES_NOT_READ_TEXT)
+            return
+        self._apply_entries(entries)
 
     # ----------------------------------------------------------- layout
 
@@ -214,8 +240,17 @@ class KeysSection(QWidget):
     # ----------------------------------------------------------- state on screen
 
     def refresh(self) -> None:
-        """Re-read which names are listed and whether each one is set. Values are never read into a control."""
-        listed = [entry for entry in self._keys.entries() if not entry.built_in]
+        """Re-read which names are listed and whether each one is set. Values are never read into a control.
+
+        This read runs on the GUI thread. It also supersedes a read still running, so that older read cannot bring back a
+        name this read has already dropped.
+        """
+        self._load_generation += 1
+        self._loading = False
+        self._apply_entries(self._keys.entries())
+
+    def _apply_entries(self, entries: list[Any]) -> None:
+        listed = [entry for entry in entries if not entry.built_in]
         wanted = {entry.name for entry in listed}
         for name in [name for name in self._cards if name not in wanted]:
             card = self._cards.pop(name)
@@ -292,6 +327,9 @@ class KeysSection(QWidget):
             return
         except SecretStoreError as exc:
             self._show(NOT_REMOVED_TEXT.format(detail=exc))
+            return
+        except OSError:
+            self._show(NOT_REMOVED_OS_TEXT)
             return
         self.refresh()
         self._show((REMOVED_TEXT if removed else REMOVED_NO_VALUE_TEXT).format(name=name))
