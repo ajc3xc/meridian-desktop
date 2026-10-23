@@ -46,13 +46,9 @@ def test_every_label_with_text_is_selectable(qtbot, settings_path):
 
 def test_read_only_plain_text_panes_are_selectable(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-    logs_page = window.tabs.widget(names.index("Logs"))
-    logs_panes = [pane for pane in logs_page.findChildren(QPlainTextEdit) if pane.isReadOnly()]
-    assert len(logs_panes) == 3  # the desktop, tunnel and runner log panes on the Logs tab
-    # The Settings tab's Diagnostics group holds the same three panes, so every read-only pane in the window is checked
+    # The one Logs view lives in Settings, Diagnostics. Its three log panes are the only read-only panes in the window.
     panes = [pane for pane in window.findChildren(QPlainTextEdit) if pane.isReadOnly()]
-    assert len(panes) == 6
+    assert sorted(pane.objectName() for pane in panes) == ["logs-desktop-text", "logs-runner-text", "logs-tunnel-text"]
     for pane in panes:
         assert _selectable(pane), pane.objectName()
 

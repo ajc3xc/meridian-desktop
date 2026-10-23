@@ -379,5 +379,6 @@ def test_settings_diagnostics_keeps_the_latex_label_and_places_the_panel_under_i
     labels = [label for label in body.findChildren(QLabel) if label.text() == LATEX_SECTION]
     assert panel is not None
     assert len(labels) == 1
-    layout = body.layout()
+    # The label and its probe sit together, one under the other, in the one Diagnostics group.
+    layout = panel.parentWidget().layout()
     assert layout.indexOf(panel) == layout.indexOf(labels[0]) + 1

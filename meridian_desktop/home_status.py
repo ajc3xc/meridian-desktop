@@ -242,11 +242,6 @@ TUNNEL_NOT_AVAILABLE_DETAIL = (
     "The tunnel cannot be checked until the Meridian core checkout and its Python are set. "
     "Set them in Settings, then press Check now."
 )
-TUNNEL_HOME_NOT_RUNNING = (
-    "The desktop starts or stops the tunnel only when you confirm it with the buttons below. To start it yourself, "
-    "open a terminal in the Meridian core folder and run: {}"
-)
-TUNNEL_HOME_CHECK = "To check it yourself, open a terminal in the Meridian core folder and run: {}"
 TUNNEL_DEPENDS = (
     "Hosted tools reach this computer through the tunnel, so they need it running: "
     "codebase-memory, Serena and the filesystem."
@@ -267,9 +262,9 @@ def tunnel_view(status: TunnelStatus | None, failure: str = "", checked: str = "
     if status.state == RUNNING:
         return CardView(headline="Running", detail=f"{status.reason} {TUNNEL_DEPENDS}", checked=checked, tone=TONE_OK)
     if status.state == NOT_RUNNING:
-        detail = f"{status.reason} {TUNNEL_HOME_NOT_RUNNING.format(tunnel_status.START_COMMAND)}"
+        detail = f"{status.reason} {tunnel_status.START_HINT}"
         return CardView(headline="Not running", detail=detail, checked=checked, tone=TONE_IDLE)
-    detail = f"{status.reason} {TUNNEL_HOME_CHECK.format(tunnel_status.STATUS_COMMAND)}"
+    detail = f"{status.reason} {tunnel_status.CHECK_HINT}"
     return CardView(headline="Unknown", detail=detail, checked=checked, tone=TONE_ATTENTION)
 
 

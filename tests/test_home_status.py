@@ -188,8 +188,9 @@ def test_tunnel_not_running_says_how_to_start_it_by_hand_and_names_the_confirm()
     view = tunnel_view(TunnelStatus(state=NOT_RUNNING, reason="The tunnel is stopped.", checked_at=CLOCK))
     assert view.headline == "Not running"
     assert view.tone == TONE_IDLE
-    assert "buttons below" in view.detail
-    assert "local_runner start --scope tunnel" in view.detail
+    assert "Home tunnel card" in view.detail
+    assert "asks first" in view.detail
+    assert "pixi run" not in view.detail
     _assert_no_old_words(view)
 
 

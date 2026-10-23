@@ -1,4 +1,4 @@
-"""Is the local tunnel running? The Tunnel tab's status line. Pure Python: no Qt import.
+"""Is the local tunnel running? The Home tunnel card's status line. Pure Python: no Qt import.
 
 The tunnel runs as the runner's child process for the scope named ``tunnel``. The check is one
 read-only runner call, ``status --scope tunnel``, made through runner_client.RunnerClient.status.
@@ -14,7 +14,7 @@ Each check result carries the time the check finished and one fixed sentence say
 sentence never copies the runner's own output. This module starts nothing, stops nothing and holds
 no secret. It also holds the words that name the tools which connect through the tunnel, and the
 plain-words instructions for starting the tunnel by hand. The desktop starts and stops the tunnel only
-from the Tunnel tab's buttons, after the owner confirms each one, and only when tunnel_control_enabled is
+from the Home tunnel card's buttons, after the owner confirms each one, and only when tunnel_control_enabled is
 true (docs/local-trust-contract.md). This module itself still starts nothing.
 """
 
@@ -69,21 +69,13 @@ DEPENDENCY_TEXT = (
     "While the tunnel is not running, they are unavailable."
 )
 
-# The commands the owner runs by hand, in the Meridian core folder. The desktop runs neither.
-START_COMMAND = "pixi run python -m meridian.local_runner start --scope tunnel -- python -m meridian --tunnel"
-STATUS_COMMAND = "pixi run python -m meridian.local_runner status --scope tunnel"
-START_TEXT = (
-    "The desktop starts or stops the tunnel only when you confirm it with the buttons on this tab, and "
-    "only when tunnel_control_enabled is on. To start it yourself, open a terminal in the "
-    "Meridian core folder and run this command:\n"
-    f"{START_COMMAND}\n"
-    "Then open this tab again to check. To check from the terminal instead, run this command in the "
-    "same folder:\n"
-    f"{STATUS_COMMAND}"
-)
+# Where the owner starts or checks the tunnel. The buttons are on the Home tunnel card, and Start asks first. No command
+# is typed by hand, so these hints name the card and never a terminal command.
+START_HINT = "To start it, press Start on the Home tunnel card. The desktop asks first and starts nothing without a yes."
+CHECK_HINT = "Press Check now on Home to check it again."
 
-# The top bar's one line and its detail line in Tunnel mode. The Tunnel tab shows the same answers
-# with its own headlines (ui/tunnel_page.py). The check time and "no time" text are shared with it.
+# The top bar's one line and its detail line in Tunnel mode. The Home tunnel card shows the same answers
+# with its own headlines on the Home tunnel card. The check time and "no time" text are shared with it.
 BAR_HEADLINES = {
     RUNNING: "Tunnel running",
     NOT_RUNNING: "Tunnel not running",
@@ -93,13 +85,6 @@ BAR_CHECKING_TEXT = "Tunnel status: checking..."
 CHECKED_TEMPLATE = "Checked at {}."
 NO_TIME_TEXT = "The check did not finish, so no time was recorded."
 NO_FAILURE_NAME = "unknown error"
-BY_HAND_NOT_STARTED = (
-    "The desktop starts or stops the tunnel only when you confirm it on the Tunnel tab. To start it "
-    f"yourself, open a terminal in the Meridian core folder and run: {START_COMMAND}"
-)
-BY_HAND_CHECK = f"To check from a terminal, run this in the Meridian core folder: {STATUS_COMMAND}"
-
-
 @dataclass(frozen=True)
 class TunnelStatus:
     """One check's answer. ``state`` is RUNNING, NOT_RUNNING or UNKNOWN. ``reason`` is one fixed sentence."""
@@ -164,21 +149,20 @@ def bar_texts(status: TunnelStatus | None, failure: str | None = None) -> tuple[
     if status is None:
         line = f"{BAR_HEADLINES[UNKNOWN]}. {NO_TIME_TEXT}"
         reason = CHECK_FAILED_REASON.format(failure or NO_FAILURE_NAME)
-        return line, " ".join((reason, DEPENDENCY_TEXT, BY_HAND_CHECK))
+        return line, " ".join((reason, DEPENDENCY_TEXT, CHECK_HINT))
     line = f"{BAR_HEADLINES[status.state]}. {CHECKED_TEMPLATE.format(status.checked_at.strftime(TIME_FORMAT))}"
     parts = [status.reason, DEPENDENCY_TEXT]
     if status.state == NOT_RUNNING:
-        parts.append(BY_HAND_NOT_STARTED)
+        parts.append(START_HINT)
     elif status.state == UNKNOWN:
-        parts.append(BY_HAND_CHECK)
+        parts.append(CHECK_HINT)
     return line, " ".join(parts)
 
 
 __all__ = [
     "BAR_CHECKING_TEXT",
     "BAR_HEADLINES",
-    "BY_HAND_CHECK",
-    "BY_HAND_NOT_STARTED",
+    "CHECK_HINT",
     "CHECKED_TEMPLATE",
     "CHECK_FAILED_REASON",
     "DEPENDENCY_TEXT",
@@ -190,9 +174,7 @@ __all__ = [
     "NO_RESULT_REASON",
     "NO_TIME_TEXT",
     "RUNNING",
-    "START_COMMAND",
-    "START_TEXT",
-    "STATUS_COMMAND",
+    "START_HINT",
     "TIME_FORMAT",
     "TUNNEL_SCOPE",
     "TunnelStatus",

@@ -36,13 +36,11 @@ from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import DEFAULT_MODE, VALID_MODES, Settings, SettingsStore
 from meridian_desktop.tunnel_status import (
     BAR_CHECKING_TEXT,
-    BY_HAND_CHECK,
-    BY_HAND_NOT_STARTED,
+    CHECK_HINT,
+    START_HINT,
     DEPENDENCY_TEXT,
     NOT_RUNNING,
     RUNNING,
-    START_COMMAND,
-    STATUS_COMMAND,
     UNKNOWN,
     TunnelStatus,
     bar_texts,
@@ -322,18 +320,18 @@ def test_the_top_bar_detail_names_the_tools_that_need_the_tunnel(state):
 
 def test_a_tunnel_that_is_not_running_says_how_to_start_it_and_that_the_desktop_does_not():
     detail = bar_texts(_status(NOT_RUNNING))[1]
-    assert BY_HAND_NOT_STARTED in detail
-    assert START_COMMAND in detail
-    assert "The desktop starts or stops the tunnel only when you confirm it" in detail
+    assert START_HINT in detail
+    assert "Home tunnel card" in detail
+    assert "pixi run" not in detail  # no hand-typed terminal command
     # A running tunnel gets no start instructions at all.
-    assert START_COMMAND not in bar_texts(_status(RUNNING))[1]
+    assert START_HINT not in bar_texts(_status(RUNNING))[1]
 
 
 def test_an_unknown_tunnel_offers_the_check_command_and_not_the_start_command():
     detail = bar_texts(_status(UNKNOWN))[1]
-    assert BY_HAND_CHECK in detail
-    assert STATUS_COMMAND in detail
-    assert START_COMMAND not in detail
+    assert CHECK_HINT in detail
+    assert "pixi run" not in detail
+    assert START_HINT not in detail
 
 
 def test_a_failed_check_detail_holds_no_text_from_the_error():
@@ -366,8 +364,8 @@ def test_every_mode_has_one_plain_description_and_the_selector_shows_it(qtbot, s
     "reply, headline, detail_part",
     [
         pytest.param(_status_reply("running"), "Tunnel running", "The runner reports the tunnel process as running.", id="running"),
-        pytest.param(_status_reply("not_started"), "Tunnel not running", START_COMMAND, id="not-running"),
-        pytest.param(_unavailable_reply(), "Tunnel status unknown", STATUS_COMMAND, id="unknown"),
+        pytest.param(_status_reply("not_started"), "Tunnel not running", START_HINT, id="not-running"),
+        pytest.param(_unavailable_reply(), "Tunnel status unknown", CHECK_HINT, id="unknown"),
     ],
 )
 def test_tunnel_mode_shows_each_status_text_with_the_time_checked(qtbot, settings_path, reply, headline, detail_part):
@@ -603,6 +601,8 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     assert buttons  # the window has buttons, so the checks below are not empty
     # The two launch-time switches are check boxes, not push buttons, so they are left out of the start-like list.
     push_buttons = [b for b in buttons if isinstance(b, QPushButton)]
+    # The update bar's Restart button restarts the app into a staged update. It is not a runner control, so it is left out.
+    push_buttons = [b for b in push_buttons if b.objectName() != "update-notice-restart"]
     start_like = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
     # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
     # Settings, and the tunnel scope's three buttons on the Tunnel tab (docs/local-trust-contract.md).

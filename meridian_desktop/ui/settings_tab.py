@@ -55,14 +55,17 @@ from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
 from meridian_desktop.token_store import TokenStoreError
+from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.keys_section import KeysSection
+from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
+from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -76,6 +79,13 @@ LOCAL_SERVER_TITLE = "Local server and startup"
 KEYS_TITLE = "Keys"
 CLIENT_SETUP_TITLE = "Client setup"
 DIAGNOSTICS_TITLE = "Diagnostics (logs)"
+# The one place for diagnostics. The LaTeX section label is the one main_window shows and tests look for.
+LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
+TOOLS_SECTION = "Tools (full table)"
+DIAGNOSTICS_INTRO = (
+    "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
+    "tunnel and runner logs. Nothing here starts a service."
+)
 SETTINGS_FILE_TEXT = "Settings file: {path}"
 LOAD_WARNING_TEXT = "Note from the settings file: {warning}"
 
@@ -210,6 +220,7 @@ class SettingsTab(QWidget):
         secrets: SecretStore | None = None,
         list_hosted: ListHostedFn | None = None,
         actions: RunnerActions | None = None,
+        tools_status: Callable[[], ToolsStatus] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
@@ -218,6 +229,8 @@ class SettingsTab(QWidget):
         self._secrets = secrets if secrets is not None else KeyringSecretStore()
         self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
         self._actions = actions if actions is not None else RunnerActions(settings_store)
+        # The one tools read the full tools table shows. None leaves the table out (a tab built without the window).
+        self._tools_status = tools_status
         self._check = _ConnectionCheck(settings_store, self._secrets, self._list_hosted)
         self._keys_store = ApiKeys(settings_store, self._secrets)
         # The RunPod panel is the parent when the main window builds this tab, so its Settings page stays the RunPod panel
@@ -359,13 +372,14 @@ class SettingsTab(QWidget):
         return group
 
     def _build_keys(self, parent: QWidget, runpod_card: QWidget | None) -> CollapsibleGroup:
-        group = CollapsibleGroup("keys", KEYS_TITLE, parent)
+        group = CollapsibleGroup("keys", KEYS_TITLE, parent, expanded=False)
         self._keys = KeysSection(self._keys_store, runpod_card, group.body())
         group.add_widget(self._keys)
         return group
 
     def _build_client_setup(self, parent: QWidget) -> CollapsibleGroup:
-        group = CollapsibleGroup("client-setup", CLIENT_SETUP_TITLE, parent)
+        group = CollapsibleGroup("client-setup", CLIENT_SETUP_TITLE, parent, expanded=False)
+        self._client_setup_group = group
         # The client setup block has its own heading, which repeats the group title, so the heading is hidden here.
         self._client_setup = ClientSetupSection(self._store, group.body(), actions=self._actions)
         heading = self._client_setup.findChild(QLabel, "client-setup-heading")
@@ -376,11 +390,19 @@ class SettingsTab(QWidget):
 
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
+        group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
         self._settings_file = _label(group.body(), "settings-file-path")
         group.add_widget(self._settings_file)
         self._load_warning = _label(group.body(), "settings-load-warning")
         self._load_warning.setVisible(False)
         group.add_widget(self._load_warning)
+        # The full tools table reads when it is first shown and when its Refresh is pressed.
+        if self._tools_status is not None:
+            group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))
+            group.add_widget(ToolsPanel(self._tools_status, parent=group.body()))
+        # The LaTeX probe sits under its section label. It makes no request until shown.
+        group.add_widget(make_selectable(QLabel(LATEX_SECTION, group.body())))
+        group.add_widget(LatexPanel(self._store, parent=group.body()))
         # The Logs view reads nothing until its own Refresh is pressed, so folding this group costs nothing.
         self._logs = LogsPage(parent=group.body())
         group.add_widget(self._logs)
@@ -398,6 +420,7 @@ class SettingsTab(QWidget):
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
         # A saved core path turns the launch switches off, so the runner block on this tab shows them as saved now.
         self._client_setup.coreChanged.connect(self._runner.refresh_flags)
+        self._actions.coreChanged.connect(self._on_core_changed)
 
     def refresh(self) -> None:
         """Show the saved mode, the database file, whether a hosted token is set, and the keys.
@@ -432,6 +455,15 @@ class SettingsTab(QWidget):
             self._runpod.ensure_probed()
 
     # ----------------------------------------------------------- saving
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """Open Client setup when the Meridian core is not usable, so its Choose and Find buttons are in view.
+
+        Client setup stays folded when the core is set and found. It only opens, never folds itself.
+        """
+        if not self._actions.core().core_ready:
+            self._client_setup_group.set_expanded(True)
 
     @Slot(bool)
     def _on_auto_update_toggled(self, checked: bool) -> None:

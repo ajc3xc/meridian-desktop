@@ -107,19 +107,24 @@ def test_the_five_groups_are_in_the_requested_order(qtbot, settings_path):
     assert tuple(titles) == GROUP_TITLES
 
 
-def test_diagnostics_starts_folded_and_the_others_start_open(qtbot, settings_path):
+def test_keys_client_setup_and_diagnostics_start_folded_and_the_others_start_open(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
 
-    for name in GROUP_ORDER[:-1]:
+    for name in GROUP_ORDER[:2]:
         assert tab.findChild(CollapsibleGroup, name).is_expanded() is True, name
-    assert tab.findChild(CollapsibleGroup, "settings-group-diagnostics").is_expanded() is False
+    for name in GROUP_ORDER[2:]:
+        assert tab.findChild(CollapsibleGroup, name).is_expanded() is False, name
 
 
 def test_a_group_folds_and_unfolds_and_keeps_its_widgets(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
     group = tab.findChild(CollapsibleGroup, "settings-group-keys")
-    keys = tab.findChild(KeysSection, "keys-section")
     toggle = tab.findChild(QAbstractButton, "settings-group-keys-toggle")
+
+    # The Keys group starts folded, so the first press opens it.
+    toggle.click()
+    assert group.is_expanded() is True
+    keys = tab.findChild(KeysSection, "keys-section")
 
     toggle.click()
     assert group.is_expanded() is False

@@ -31,9 +31,8 @@ from meridian_desktop.tunnel_status import (
     NOT_AVAILABLE_REASON,
     NOT_RUNNING,
     RUNNING,
-    START_COMMAND,
-    START_TEXT,
-    STATUS_COMMAND,
+    START_HINT,
+    CHECK_HINT,
     TUNNEL_SCOPE,
     UNKNOWN,
     UNKNOWN_PREFIX,
@@ -42,7 +41,6 @@ from meridian_desktop.tunnel_status import (
     read_tunnel_status,
     tunnel_state_of,
 )
-from meridian_desktop.ui.logs_page import RUNNER_START_COMMAND
 
 CHECKED = datetime(2026, 10, 21, 10, 15, 0)
 MODULE_PATH = Path(tunnel_status.__file__)
@@ -279,20 +277,18 @@ def test_the_dependency_names_the_three_tools_and_says_they_are_unavailable_whil
     assert "While the tunnel is not running" in DEPENDENCY_TEXT
 
 
-def test_the_start_text_tells_the_owner_how_to_start_the_tunnel_by_hand():
-    assert "--scope tunnel" in START_COMMAND
-    assert START_COMMAND in START_TEXT
-    assert STATUS_COMMAND in START_TEXT
-    assert "The desktop starts or stops the tunnel only when you confirm it" in START_TEXT
-    # The same command the Logs tab gives, so the two tabs never disagree.
-    assert START_COMMAND == RUNNER_START_COMMAND
+def test_the_start_hint_points_to_the_home_card_and_names_no_terminal_command():
+    assert "Home tunnel card" in START_HINT
+    assert "asks first" in START_HINT
+    assert "Home" in CHECK_HINT
+    assert "pixi run" not in START_HINT
+    assert "pixi run" not in CHECK_HINT
 
 
 def test_no_text_in_the_module_says_not_built_yet():
     texts = (
         DEPENDENCY_TEXT,
-        START_TEXT,
-        NOT_AVAILABLE_REASON,
+            NOT_AVAILABLE_REASON,
         NO_RESULT_REASON,
         NO_CHILD_REASON,
         UNREAD_REASON,

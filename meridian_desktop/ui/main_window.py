@@ -64,17 +64,14 @@ from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
-from meridian_desktop.ui.latex_panel import LatexPanel
-from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
-from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
+from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
 from meridian_desktop.ui.text import make_selectable
-from meridian_desktop.ui.tools_panel import ToolsPanel
-from meridian_desktop.ui.tunnel_page import TunnelCheckJob
+from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
@@ -90,13 +87,7 @@ TAB_SPECS = (
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
 
-LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
 ZOTERO_SECTION = "Zotero (the Zotero app on this computer, 127.0.0.1:23119)"
-DIAGNOSTICS_SECTION = "Diagnostics"
-DIAGNOSTICS_INTRO = (
-    "Read-only views for finding a fault: the full tools table, the LaTeX engine probe, and the desktop, tunnel "
-    "and runner logs. Nothing here starts a service."
-)
 
 STATUS_MESSAGE = "Home checks each part of Meridian when this window opens, then every five minutes while Home is showing."
 
@@ -354,7 +345,11 @@ class MainWindow(QMainWindow):
         runpod = RunPodPanel(self._store, self._secrets, parent=self.tabs)
         # The connection settings go above the RunPod rows, in the panel's own layout.
         self._settings_tab = SettingsTab(
-            self._store, secrets=self._secrets, parent=runpod, actions=self._runner_actions,
+            self._store,
+            secrets=self._secrets,
+            parent=runpod,
+            actions=self._runner_actions,
+            tools_status=self._tools_status_read,
         )
         runpod.layout().insertWidget(0, self._settings_tab)
 
@@ -364,13 +359,6 @@ class MainWindow(QMainWindow):
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
         column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
-        column.addWidget(make_selectable(QLabel(DIAGNOSTICS_SECTION, container)))
-        column.addWidget(make_selectable(QLabel(DIAGNOSTICS_INTRO, container)))
-        column.addWidget(make_selectable(QLabel("Tools (full table)", container)))
-        column.addWidget(ToolsPanel(self._tools_status_read, parent=container))
-        column.addWidget(make_selectable(QLabel(LATEX_SECTION, container)))
-        column.addWidget(LatexPanel(self._store, parent=container))
-        column.addWidget(LogsPage(parent=container))
         column.addStretch(1)
 
         scroll = QScrollArea(self.tabs)

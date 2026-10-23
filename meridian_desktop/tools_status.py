@@ -403,11 +403,11 @@ def _tunnel_row(status_call: Callable[[str], RunnerResult] | None, clock: Callab
     if result.state == tunnel_status.RUNNING:
         return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, YES, YES, result.reason)
     if result.state == tunnel_status.NOT_RUNNING:
-        detail = " ".join((result.reason, tunnel_status.DEPENDENCY_TEXT, tunnel_status.BY_HAND_NOT_STARTED))
+        detail = " ".join((result.reason, tunnel_status.DEPENDENCY_TEXT, tunnel_status.START_HINT))
         if _reported_child_state(replies) == NOT_STARTED_CHILD:
             return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, NOT_STARTED, NO, detail)
         return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, YES, NO, detail)
-    detail = " ".join((result.reason, tunnel_status.BY_HAND_CHECK))
+    detail = " ".join((result.reason, tunnel_status.CHECK_HINT))
     return ToolRow(THIS_COMPUTER, TUNNEL_TOOL, UNCHECKED, UNCHECKED, detail)
 
 
