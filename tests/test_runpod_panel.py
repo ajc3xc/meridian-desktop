@@ -24,6 +24,8 @@ from meridian_desktop.ui.runpod_panel import (
     RunPodPanel,
 )
 
+from _shared_delivery import emit, recording_deliveries, visible_state
+
 FAKE_KEY = "test-key-not-real"
 LOCAL_URL = "http://127.0.0.1:7878"
 
@@ -522,3 +524,45 @@ def test_a_job_still_running_when_the_panel_is_deleted_does_not_keep_the_panel(q
     finally:
         gate.set()
         gc.enable()
+
+
+# ------------------------------------------------- a result for another owner, or for a job already finished
+
+
+def test_a_result_from_another_owner_or_for_a_job_already_finished_is_dropped(qtbot, make_panel, store):
+    """A sibling panel's answer, and an answer for a job this panel has already finished, show nothing.
+
+    This page has no generation. Each job has its own id, per panel, and the panel keeps a result only for a job id it
+    is still waiting for. Here the panel's first job is held at the gate while the sibling's first job, which has the
+    same job id, finishes. The sibling's answer reaches the panel and must be dropped by owner alone, while the panel
+    still waits for its own job. Then the panel's job finishes, and a second job runs. The first job's answer is replayed:
+    the panel has finished that job id, so it is dropped by job id alone. The second job's result is the control that
+    the panel's own current answer is accepted.
+    """
+    gate = threading.Event()
+    held = FakeClient()
+    held.gate = gate
+    panel = make_panel(store, held)
+    sibling = make_panel(store, FakeClient())
+    try:
+        with recording_deliveries() as emitted:
+            panel.findChild(QPushButton, "runpod-test-key").click()
+            qtbot.waitUntil(lambda: any(call[0] == "probe_health" for call in held.calls), timeout=5000)  # at the gate
+            waiting = visible_state(panel)
+            press(qtbot, sibling, "runpod-test-key")
+            assert len(emitted) == 1
+            assert visible_state(panel) == waiting
+            gate.set()
+            wait_idle(qtbot, panel)
+            assert len(emitted) == 2
+            own_first = emitted[1]
+            shown_first = visible_state(panel)
+            held.state = HEALTH_NOT_MERIDIAN
+            press(qtbot, panel, "runpod-test-key")
+            shown_second = visible_state(panel)
+            assert shown_second != shown_first
+            emit(own_first)  # this panel's answer for a job it has already finished
+            qtbot.wait(20)
+    finally:
+        gate.set()  # a failed assertion must not leave the held job blocked after the test ends
+    assert visible_state(panel) == shown_second

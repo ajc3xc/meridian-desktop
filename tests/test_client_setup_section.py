@@ -48,6 +48,8 @@ from meridian_desktop.ui.client_setup_section import (
 )
 from meridian_desktop.ui.settings_tab import SettingsTab
 
+from _shared_delivery import emit, recording_deliveries, visible_state
+
 FAKE_TOKEN = "sk_meridian_fake-section-0006"
 SELECTABLE_MOUSE = Qt.TextInteractionFlag.TextSelectableByMouse
 SELECTABLE_KEYBOARD = Qt.TextInteractionFlag.TextSelectableByKeyboard
@@ -699,3 +701,39 @@ def test_a_dry_run_still_running_when_the_section_is_deleted_does_not_keep_the_s
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------- a result for another owner, or a superseded check
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_check_is_dropped(qtbot, settings_path, tmp_path):
+    """A sibling section's answer, and an answer from a check that this section's newer check superseded, show nothing.
+
+    Two sections share one saved setup, and each runs its own commands. The section's first check emits its Delivered.
+    The sibling's first check then emits one at the same generation, and it reaches the section too, so the section drops
+    it by owner alone. The section checks again, and its first Delivered is replayed: it carries the section's own owner
+    with a superseded generation, so it is dropped by generation alone. The section's second result is what the user sees
+    throughout, and it is the control that the section's own current Delivered is accepted.
+    """
+    store = configured_store(tmp_path, settings_path)
+    responder = {"current": SCENARIOS["would change and missing"][0](tmp_path)}
+    section = _section(qtbot, store, run=FakeRun(lambda argv: responder["current"](argv)))
+    sibling = _section(qtbot, store, run=FakeRun(SCENARIOS["in place"][0](tmp_path)))
+    with recording_deliveries() as emitted:
+        _button(section, "client-setup-check").click()
+        _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(section)
+        _button(sibling, "client-setup-check").click()
+        _wait_for_state(qtbot, sibling, "claude-desktop", IN_PLACE)
+        assert len(emitted) == 2
+        assert visible_state(section) == shown_first
+        responder["current"] = SCENARIOS["in place"][0](tmp_path)
+        _button(section, "client-setup-check").click()
+        _wait_for_state(qtbot, section, "claude-desktop", IN_PLACE)
+        shown_second = visible_state(section)
+        assert shown_second != shown_first
+        emit(own_first)  # this section's answer from the first check, which the second check superseded
+        qtbot.wait(20)
+    assert visible_state(section) == shown_second

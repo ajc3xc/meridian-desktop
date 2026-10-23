@@ -18,6 +18,7 @@ from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from _fakes import MemoryKeyring
+from _shared_delivery import recording_deliveries, visible_state
 from meridian_desktop import sessions_client, updater
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.local_client import HEALTH_NOT_RUNNING
@@ -29,7 +30,7 @@ from meridian_desktop.ui import sessions_panel
 from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.tools_panel import ToolsPanel
-from meridian_desktop.ui.update_notice import UpdateNoticeBar
+from meridian_desktop.ui.update_notice import UpdateNoticeBar, notice_text
 from meridian_desktop.version import APP_VERSION
 
 EXPECTED_TABS = (
@@ -385,6 +386,31 @@ def test_no_transport_means_no_check_and_no_notice(qtbot, settings_path):
 
     assert not bar.check_finished
     assert bar.isHidden()
+
+
+def test_a_notice_from_another_bar_is_dropped(qtbot):
+    """Another bar's newer-release notice never reaches this bar's label, its button or its release page.
+
+    Both bars listen on the shared delivery object, so the other bar's notice reaches this one too. The bar keeps no
+    generation, because its check runs once, so the owner check is the only guard that applies here. This bar keeps the
+    notice of its own check, and the other bar's notice, for a different release, is dropped.
+    """
+    other_release = "98.0.0"
+    own = UpdateNoticeBar(APP_VERSION, FakeTransport(tag=NEWER_TAG))
+    qtbot.addWidget(own)
+    other = UpdateNoticeBar(APP_VERSION, FakeTransport(tag=f"v{other_release}"))
+    qtbot.addWidget(other)
+    with recording_deliveries() as emitted:
+        own.start(enabled=True)
+        qtbot.waitUntil(lambda: own.check_finished, timeout=5000)
+        assert len(emitted) == 1
+        shown = visible_state(own)
+        other.start(enabled=True)
+        qtbot.waitUntil(lambda: len(emitted) == 2, timeout=5000)  # wait on the emission, not on the other bar's state
+        qtbot.wait(20)  # the other bar's notice has reached every bar that listens on the shared object
+    assert own.release_page_url == updater.release_page_url_for(NEWER)
+    assert own.findChild(QLabel, "update-notice-label").text() == notice_text(NEWER)
+    assert visible_state(own) == shown
 
 
 def test_a_check_still_running_when_its_bar_is_deleted_does_not_keep_the_bar(qtbot):

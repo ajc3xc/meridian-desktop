@@ -58,6 +58,8 @@ from meridian_desktop.ui.code_panel import (
 )
 from meridian_desktop.ui.text import SELECTABLE_TEXT
 
+from _shared_delivery import emit, recording_deliveries, shows, visible_state
+
 BASE = "http://127.0.0.1:7878"
 SNIPPET_ONE = "def search(base_url, query):"
 SNIPPET_TWO = "import pytest\n\nfrom _fakes import QuietServer"
@@ -457,7 +459,9 @@ def test_a_search_still_running_when_its_panel_is_deleted_touches_no_widget(qtbo
     gate = threading.Event()
     transport = FakeTransport(gate=gate)
     applied = []
-    monkeypatch.setattr(CodePanel, "_finish", lambda self, answer: applied.append(answer))
+    # _finish is the update step. It is looked up with raising=False, so the test does not depend
+    # on the panel having that method.
+    monkeypatch.setattr(CodePanel, "_finish", lambda self, answer: applied.append(answer), raising=False)
     gc.disable()
     try:
         container = QWidget()
@@ -475,3 +479,41 @@ def test_a_search_still_running_when_its_panel_is_deleted_touches_no_widget(qtbo
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------------- a result for another owner, or a superseded search
+
+
+def _one_hit(path):
+    return {"results": [{"path": path, "line": 4, "score": 0.5, "snippet": "def read():"}]}
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_search_is_dropped(qtbot):
+    """A sibling panel's answer, and an answer from a search that this panel's newer search superseded, show nothing.
+
+    Two panels share one transport. The panel's first search emits its Delivered. The sibling's first search then emits
+    one at the same generation, and it reaches the panel too, so the panel drops it by owner alone. The panel searches
+    again, and its first Delivered is replayed: it carries the panel's own owner with a superseded generation, so it is
+    dropped by generation alone. The panel's second result is what the user sees throughout, and it is the control that
+    the panel's own current Delivered is accepted.
+    """
+    transport = FakeTransport(reply=_json(_one_hit("panel_first.py")))
+    panel = _panel(qtbot, transport=transport)
+    sibling = _panel(qtbot, transport=transport)
+    with recording_deliveries() as emitted:
+        _search(qtbot, panel, "first")
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(panel)
+        transport.reply = _json(_one_hit("sibling_first.py"))
+        _search(qtbot, sibling, "first")
+        assert shows(visible_state(sibling), "sibling_first.py")
+        assert visible_state(panel) == shown_first
+        transport.reply = _json(_one_hit("panel_second.py"))
+        _search(qtbot, panel, "second")
+        shown_second = visible_state(panel)
+        assert shows(shown_second, "panel_second.py")
+        emit(own_first)  # this panel's answer from the first search, which the second search superseded
+        qtbot.wait(20)
+    assert visible_state(panel) == shown_second
+    assert not shows(visible_state(panel), "panel_first.py")

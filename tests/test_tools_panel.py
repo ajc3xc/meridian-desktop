@@ -13,6 +13,7 @@ import shiboken6
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import QAbstractItemView, QLabel, QPushButton, QTableWidget, QWidget
 
+from _shared_delivery import recording_deliveries, visible_state
 from meridian_desktop.tools_status import (
     ENTRY_IN_PLACE_TEXT,
     SERVER_RUNNING_TEXT,
@@ -244,3 +245,25 @@ def test_a_read_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(
     finally:
         gate.set()
         gc.enable()
+
+
+def test_a_read_from_another_panel_is_dropped(qtbot):
+    """A read that another panel started, and that reaches the shared object, never changes this panel's status.
+
+    Both panels listen on the shared delivery object, so the sibling's status reaches this panel too. The panel keeps no
+    generation, because it runs one read at a time, so the owner check is the only guard that applies here. The stale
+    generation half of a drop test does not apply to this panel. The panel keeps the status of its own read.
+    """
+    panel = _panel(qtbot, lambda: _ready("Own read."))
+    sibling = _panel(qtbot, lambda: _ready("Sibling read."))
+    with recording_deliveries() as emitted:
+        panel.refresh()
+        qtbot.waitUntil(lambda: "Own read." in _status_text(panel), timeout=5000)
+        assert len(emitted) == 1
+        shown = visible_state(panel)
+        sibling.refresh()
+        qtbot.waitUntil(lambda: "Sibling read." in _status_text(sibling), timeout=5000)
+        assert len(emitted) == 2
+        qtbot.wait(20)  # the sibling's result has reached every panel that listens on the shared object
+    assert visible_state(panel) == shown
+    assert "Sibling read." not in _status_text(panel)

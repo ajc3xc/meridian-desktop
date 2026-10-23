@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop.ui.text import SELECTABLE_TEXT
+
+from _shared_delivery import emit, recording_deliveries, visible_state
 from meridian_desktop.ui.zotero_panel import (
     API_NOT_READY_TEXT,
     API_READY_TEXT,
@@ -61,6 +63,7 @@ from meridian_desktop.zotero_client import (
 
 ZOTERO_EXE = r"C:\Program Files\Zotero\zotero.exe"
 READY = ZoteroStatus(exe=ZOTERO_EXE, process_running=False, api=ApiCheck(API_ON, ON_MESSAGE))
+NOT_READY = ZoteroStatus(exe=ZOTERO_EXE, process_running=False, api=ApiCheck(API_NOT_RUNNING, NOT_RUNNING_MESSAGE))
 ITEMS = [
     ZoteroItem(
         key="ABCD1234",
@@ -182,14 +185,14 @@ def test_first_show_checks_zotero_once_off_the_ui_thread(qtbot):
 def test_a_status_check_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(qtbot, monkeypatch):
     """A panel deleted while its status check still runs is freed on the GUI thread, and no widget of it is touched.
 
-    The job used to hold the panel's own signal emit. When the pool ended the job on a worker, the worker dropped the
-    last reference, and the panel's widgets were deleted off the GUI thread. The job now emits to the shared delivery
-    object. The collector is off, so only reference counting can free the panel here.
+    The status job holds the client's bound method, the owner token and the shared delivery object, never the panel. The
+    collector is off, so only reference counting can free the panel here.
     """
     entered = threading.Event()
     gate = threading.Event()
     touched = []
-    monkeypatch.setattr(ZoteroPanel, "_on_status_ready", lambda self, payload: touched.append(self._owner))
+    # The status handler is the update step. The test only records whether it ran, and never reads the panel.
+    monkeypatch.setattr(ZoteroPanel, "_on_status_ready", lambda self, payload: touched.append(payload))
 
     class HeldAtTheGate(FakeZotero):
         def status(self):
@@ -203,7 +206,6 @@ def test_a_status_check_still_running_when_its_panel_is_deleted_does_not_keep_th
         panel = ZoteroPanel(client=HeldAtTheGate(), parent=container)
         _named(panel, QPushButton, "zotero-refresh").click()
         assert entered.wait(5)  # the status check has started and is held at the gate
-        owner = panel._owner
         ref = weakref.ref(panel)
         shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the check still runs
         del panel
@@ -211,7 +213,7 @@ def test_a_status_check_still_running_when_its_panel_is_deleted_does_not_keep_th
         gate.set()
         assert QThreadPool.globalInstance().waitForDone(5000)
         qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
-        assert all(token is not owner for token in touched)  # the deleted panel's widgets are never touched
+        assert touched == []  # the deleted panel's status handler never runs, so its widgets are never touched
     finally:
         gate.set()
         gc.enable()
@@ -447,3 +449,76 @@ def test_no_label_says_not_built_yet(qtbot):
 def test_text_before_any_check_says_not_checked(qtbot):
     panel = _panel(qtbot, FakeZotero())
     assert _text(panel, "zotero-installed") == NOT_CHECKED_TEXT
+
+
+def test_a_search_still_running_when_its_panel_is_deleted_does_not_keep_the_panel(qtbot, monkeypatch):
+    """A panel deleted while its search still runs is freed on the GUI thread, and no widget of it is touched.
+
+    The search job holds the client's bound method, the owner token and the shared delivery object, never the panel. The
+    update step is looked up with raising=False, so the test does not depend on the panel having it. The collector is
+    off, so only reference counting can free the panel here.
+    """
+    entered = threading.Event()
+    gate = threading.Event()
+    touched = []
+    monkeypatch.setattr(ZoteroPanel, "_on_search_ready", lambda self, payload: touched.append(payload), raising=False)
+
+    class HeldAtTheGate(FakeZotero):
+        def search_items(self, query):
+            entered.set()
+            gate.wait(5)
+            return super().search_items(query)
+
+    gc.disable()
+    try:
+        container = QWidget()
+        panel = ZoteroPanel(client=HeldAtTheGate(), parent=container)
+        _named(panel, QLineEdit, "zotero-search-input").setText("deep")
+        _named(panel, QPushButton, "zotero-search-button").click()
+        assert entered.wait(5)  # the search has started and is held at the gate
+        ref = weakref.ref(panel)
+        shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the search still runs
+        del panel
+        assert ref() is None
+        gate.set()
+        assert QThreadPool.globalInstance().waitForDone(5000)
+        qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
+        assert touched == []  # the deleted panel's search handler never runs, so its widgets are never touched
+    finally:
+        gate.set()
+        gc.enable()
+
+
+# ----------------------------------------------------------- a result for another owner, or a superseded status check
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_status_check_is_dropped(qtbot):
+    """A sibling panel's answer, and an answer from a status check that this panel's newer check superseded, show nothing.
+
+    Two panels each read their own status. The panel's first check emits its Delivered. The sibling's first check then
+    emits one at the same generation, and it reaches the panel too, so the panel drops it by owner alone. The panel checks
+    again, and its first Delivered is replayed: it carries the panel's own owner with a superseded generation of the same
+    kind, so it is dropped by generation alone. The panel's second result is what the user sees throughout, and it is the
+    control that the panel's own current Delivered is accepted.
+    """
+    fake = FakeZotero(status=READY)
+    panel = _panel(qtbot, fake)
+    sibling = _panel(qtbot, FakeZotero(status=NOT_READY))
+    with recording_deliveries() as emitted:
+        _named(panel, QPushButton, "zotero-refresh").click()
+        _wait_idle_refresh(qtbot, panel)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(panel)
+        _named(sibling, QPushButton, "zotero-refresh").click()
+        _wait_idle_refresh(qtbot, sibling)
+        assert len(emitted) == 2
+        assert visible_state(panel) == shown_first
+        fake.status_value = NOT_READY
+        _named(panel, QPushButton, "zotero-refresh").click()
+        _wait_idle_refresh(qtbot, panel)
+        shown_second = visible_state(panel)
+        assert shown_second != shown_first
+        emit(own_first)  # this panel's answer from the first check, which the second check superseded
+        qtbot.wait(20)
+    assert visible_state(panel) == shown_second

@@ -64,6 +64,8 @@ from meridian_desktop.ui.services_page import (
 )
 
 LOOPBACK_URL = "http://127.0.0.1:7999"
+from _shared_delivery import emit, recording_deliveries, visible_state
+
 LOCAL_PORT = "7878"  # the default Local URL
 ENGINE_PORT = "8471"  # the default engine address
 FIXED_NOW = datetime(2026, 10, 19, 14, 3, 22)
@@ -785,3 +787,35 @@ def test_a_pass_still_running_when_the_page_is_deleted_does_not_keep_the_page(qt
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------- a result for another owner, or a superseded pass
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_pass_is_dropped(qtbot, settings_path):
+    """A sibling page's answer, and an answer from a pass that this page's newer pass superseded, show nothing.
+
+    Two pages each keep their own checks. The page's first pass emits its Delivered. The sibling's first pass then emits
+    one at the same generation, and it reaches the page too, so the page drops it by owner alone. The page checks again
+    with the local server down, and its first Delivered is replayed: it carries the page's own owner with a superseded
+    generation, so it is dropped by generation alone. The page's second rows are what the user sees throughout, and they
+    are the control that the page's own current Delivered is accepted.
+    """
+    health = Recorder(HealthFacts(state="running"))
+    page = _page(qtbot, settings_path, health=health)
+    sibling = _page(qtbot, settings_path, health=Recorder(HealthFacts(state=local_client.HEALTH_NOT_RUNNING)))
+    with recording_deliveries() as emitted:
+        _press(qtbot, page)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(page)
+        _press(qtbot, sibling)
+        assert len(emitted) == 2
+        assert visible_state(page) == shown_first
+        health.value = HealthFacts(state=local_client.HEALTH_NOT_RUNNING)
+        _press(qtbot, page)
+        shown_second = visible_state(page)
+        assert shown_second != shown_first
+        emit(own_first)  # this page's answer from the first pass, which the second pass superseded
+        qtbot.wait(20)
+    assert visible_state(page) == shown_second

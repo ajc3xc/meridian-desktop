@@ -32,6 +32,8 @@ from meridian_desktop.ui.research_panel import (
 )
 from meridian_desktop.ui.text import SELECTABLE_TEXT
 
+from _shared_delivery import emit, recording_deliveries, shows, visible_state
+
 LOCAL = "http://127.0.0.1:8471"
 
 
@@ -311,7 +313,9 @@ def test_a_read_still_running_when_its_panel_is_deleted_touches_no_widget(qtbot,
     gate = threading.Event()
     fake = _fake(monkeypatch, reply=ok({"runs": [_run()], "count": 1}), release=gate)
     applied = []
-    monkeypatch.setattr(ResearchPanel, "_finish", lambda self, answer: applied.append(answer))
+    # _finish is the update step. It is looked up with raising=False, so the test does not depend
+    # on the panel having that method.
+    monkeypatch.setattr(ResearchPanel, "_finish", lambda self, answer: applied.append(answer), raising=False)
     gc.disable()
     try:
         container = QWidget()
@@ -329,3 +333,43 @@ def test_a_read_still_running_when_its_panel_is_deleted_touches_no_widget(qtbot,
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------------- a result for another owner, or a superseded read
+
+
+def _read_and_wait(qtbot, panel):
+    refresh = _named(panel, QPushButton, "research-refresh")
+    refresh.click()
+    qtbot.waitUntil(lambda: refresh.isEnabled(), timeout=5000)
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_read_is_dropped(qtbot, monkeypatch):
+    """A sibling panel's answer, and an answer from a read that this panel's newer read superseded, show nothing.
+
+    Two panels share one fetch. The panel's first read emits its Delivered. The sibling's first read then emits one at
+    the same generation, and it reaches the panel too, so the panel drops it by owner alone. The panel reads again, and
+    its first Delivered is replayed: it carries the panel's own owner with a superseded generation, so it is dropped by
+    generation alone. The panel's second result is what the user sees throughout, and it is the control that the
+    panel's own current Delivered is accepted.
+    """
+    fake = _fake(monkeypatch, reply=ok({"runs": [_run(id="panel-first")], "count": 1}))
+    panel = _panel(qtbot)
+    sibling = _panel(qtbot)
+    with recording_deliveries() as emitted:
+        _read_and_wait(qtbot, panel)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(panel)
+        fake.reply = ok({"runs": [_run(id="sibling-first")], "count": 1})
+        _read_and_wait(qtbot, sibling)
+        assert shows(visible_state(sibling), "sibling-first")
+        assert visible_state(panel) == shown_first
+        fake.reply = ok({"runs": [_run(id="panel-second")], "count": 1})
+        _read_and_wait(qtbot, panel)
+        shown_second = visible_state(panel)
+        assert shows(shown_second, "panel-second")
+        emit(own_first)  # this panel's answer from the first read, which the second read superseded
+        qtbot.wait(20)
+    assert visible_state(panel) == shown_second
+    assert not shows(visible_state(panel), "panel-first")
