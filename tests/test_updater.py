@@ -3,6 +3,7 @@ no real %LOCALAPPDATA%. The urllib transport test swaps the opener for a fake, s
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
 import io
@@ -16,11 +17,28 @@ from pathlib import Path
 import pytest
 
 import meridian_desktop
+from meridian_desktop import ed25519
 from meridian_desktop import updater as u
 from meridian_desktop.version import APP_VERSION
 
 ZIP_NAME = "MeridianDesktop-0.2.0.zip"
+SIG_NAME = "SHA256SUMS.sig"
 CDN_URL = "https://objects.githubusercontent.com/github-production-release-asset/1/MeridianDesktop-0.2.0.zip"
+# RFC 8032 section 7.1, TEST 1. A test key only: it stands in for the release key, which these tests never touch.
+TEST_SEED = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+TEST_PUBLIC = ed25519.public_key(TEST_SEED)
+OTHER_SEED = bytes.fromhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")  # RFC 8032 TEST 2
+
+
+def sign_sums(sums: bytes, seed: bytes = TEST_SEED) -> bytes:
+    """The SHA256SUMS.sig text for sums: the base64 of the 64-byte signature, as the release publisher writes it."""
+    return base64.b64encode(ed25519.sign(seed, sums)) + b"\n"
+
+
+@pytest.fixture(autouse=True)
+def test_release_key(monkeypatch):
+    """Every test verifies against the test key, so no test depends on the release key on this machine."""
+    monkeypatch.setattr(u, "RELEASE_PUBLIC_KEY", TEST_PUBLIC)
 
 
 def asset_url(version: str, name: str) -> str:
@@ -69,7 +87,7 @@ def bundle_zip(version: str = "0.2.0") -> bytes:
 
 
 def release_body(version="0.2.0", *, names=None, tag=None, draft=False, zip_size=1000) -> bytes:
-    names = names if names is not None else [f"MeridianDesktop-{version}.zip", "SHA256SUMS"]
+    names = names if names is not None else [f"MeridianDesktop-{version}.zip", "SHA256SUMS", SIG_NAME]
     assets = [
         {
             "name": name,
@@ -111,16 +129,20 @@ class FakeGitHub:
         return u.Reply(status, headers, b"")
 
 
-def github(version="0.2.0", *, zip_bytes=None, sums=None, **release_kwargs) -> FakeGitHub:
+def github(version="0.2.0", *, zip_bytes=None, sums=None, signed_by=TEST_SEED, sig=None, **release_kwargs) -> FakeGitHub:
+    """A fake GitHub with one release. SHA256SUMS is signed by signed_by, unless sig gives the .sig text itself."""
     zip_bytes = bundle_zip(version) if zip_bytes is None else zip_bytes
     name = f"MeridianDesktop-{version}.zip"
     sums_text = f"{sha256(zip_bytes)}  {name}\n" if sums is None else sums
+    sums_bytes = sums_text.encode()
+    sig_bytes = sign_sums(sums_bytes, signed_by) if sig is None else sig
     return FakeGitHub(
         {
             u.LATEST_RELEASE_URL: (200, {}, release_body(version, **release_kwargs)),
             asset_url(version, name): (302, {"location": CDN_URL}, b""),
             CDN_URL: (200, {}, zip_bytes),
-            asset_url(version, "SHA256SUMS"): (200, {}, sums_text.encode()),
+            asset_url(version, "SHA256SUMS"): (200, {}, sums_bytes),
+            asset_url(version, SIG_NAME): (200, {}, sig_bytes),
         }
     )
 
@@ -174,6 +196,7 @@ def release_0_2_0() -> u.Release:
         zip_url=asset_url("0.2.0", ZIP_NAME),
         zip_size=1000,
         sums_url=asset_url("0.2.0", "SHA256SUMS"),
+        sig_url=asset_url("0.2.0", SIG_NAME),
     )
 
 
@@ -204,7 +227,7 @@ def test_versions_that_are_not_plain_dotted_integers_are_refused(text):
 
 
 def test_app_version_is_a_plain_version():
-    assert u.parse_version(APP_VERSION) == (0, 1, 0)
+    assert u.parse_version(APP_VERSION) == tuple(int(part) for part in APP_VERSION.split("."))
 
 
 def test_the_package_version_is_the_app_version():
@@ -235,7 +258,7 @@ def test_every_listed_host_is_allowed():
 # --- release and checksum ------------------------------------------------------------------------
 
 
-def test_fetch_latest_reads_the_zip_and_sums_assets():
+def test_fetch_latest_reads_the_zip_sums_and_signature_assets():
     release = u.fetch_latest(github())
     assert release == u.Release(
         version="0.2.0",
@@ -243,14 +266,16 @@ def test_fetch_latest_reads_the_zip_and_sums_assets():
         zip_url=asset_url("0.2.0", ZIP_NAME),
         zip_size=1000,
         sums_url=asset_url("0.2.0", "SHA256SUMS"),
+        sig_url=asset_url("0.2.0", SIG_NAME),
     )
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"names": ["SHA256SUMS"]},  # the zip is missing
-        {"names": [ZIP_NAME]},  # SHA256SUMS is missing
+        {"names": ["SHA256SUMS", SIG_NAME]},  # the zip is missing
+        {"names": [ZIP_NAME, SIG_NAME]},  # SHA256SUMS is missing
+        {"names": [ZIP_NAME, "SHA256SUMS"]},  # SHA256SUMS.sig is missing
         {"tag": "v0.2.0-beta"},  # not plain dotted integers
         {"draft": True},
     ],
@@ -293,385 +318,553 @@ def _with_every_member_marked_encrypted(data: bytes) -> bytes:
     return bytes(raw)
 
 
-class TestInstallWhenEnabled:
-    """The install path, with INSTALL_ENABLED on. The autouse fixture below turns it on for these tests only.
-
-    Every other test runs with the value the build ships with, which is False.
-    """
-
-    @pytest.fixture(autouse=True)
-    def install_enabled(self, monkeypatch):
-        monkeypatch.setattr(u, "INSTALL_ENABLED", True)
-
-    # --- check_and_stage: the install path -------------------------------------------------------------
-
-
-    def test_successful_update_stages_repoints_both_shortcuts_and_prunes_older(self, root, frozen):
-        old = root / "versions" / "0.0.9"
-        old.mkdir()
-        (old / u.EXE_NAME).write_bytes(b"MZ-0.0.9")
-        start, menu = Recorder(), Recorder()
-
-        result = u.check_and_stage("0.1.0", github(), root, [start, menu])
-
-        new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
-        assert result == u.UpdateResult("update_staged", version="0.2.0")
-        assert new_exe.read_bytes() == b"MZ-0.2.0"
-        assert (root / "versions" / "0.2.0" / "_internal" / "base.dll").read_bytes() == b"dll"
-        assert start.targets == [new_exe]
-        assert menu.targets == [new_exe]
-        assert version_names(root) == ["0.1.0", "0.2.0"]
-        assert not list(root.glob("update-*"))
-
-
-    def test_checksum_mismatch_installs_nothing(self, root, frozen):
-        rec = Recorder()
-        result = u.check_and_stage("0.1.0", github(sums=f"{'0' * 64}  {ZIP_NAME}\n"), root, [rec])
-        assert result.status == "refused"
-        assert "does not match SHA256SUMS" in result.reason
-        assert rec.targets == []
-        assert version_names(root) == ["0.1.0"]
-        assert (root / "versions" / "0.1.0" / u.EXE_NAME).read_bytes() == b"MZ-0.1.0"
-
-
-    def test_missing_sums_line_stops_before_the_zip_is_downloaded(self, root, frozen):
-        gh = github(sums="")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "refused"
-        assert CDN_URL not in gh.calls
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_download_over_the_size_cap_installs_nothing(self, root, frozen, monkeypatch):
-        monkeypatch.setattr(u, "MAX_DOWNLOAD_BYTES", 64)
-        result = u.check_and_stage("0.1.0", github(zip_size=10), root, [])
-        assert result.status == "refused"
-        assert "size limit" in result.reason
-        assert version_names(root) == ["0.1.0"]
-        assert not list(root.glob("update-*"))
-
-
-    def test_zip_without_the_exe_is_refused_and_leaves_nothing_behind(self, root, frozen):
-        zip_bytes = make_zip({"_internal/base.dll": b"dll"})
-        result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
-        assert result.status == "refused"
-        assert u.EXE_NAME in result.reason
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_file_that_is_not_a_zip_is_refused(self, root, frozen):
-        result = u.check_and_stage("0.1.0", github(zip_bytes=b"not a zip"), root, [])
-        assert result.status == "refused"
-        assert version_names(root) == ["0.1.0"]
-
-
-    @pytest.mark.parametrize(
-        "entry",
-        [
-            "../evil.txt",
-            "/abs.txt",
-            "C:/evil.txt",
-            "C:evil.txt",
-            "..\\evil.txt",
-            "a/../../evil.txt",
-            "\\\\server\\share\\evil.txt",
-            "a/b:stream.txt",
-        ],
-    )
-    def test_zip_slip_entries_are_refused_and_write_nothing(self, root, frozen, entry, tmp_path):
-        zip_bytes = make_zip({u.EXE_NAME: b"MZ", entry: b"evil"})
-        result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
-        assert result.status == "refused"
-        assert not list(tmp_path.rglob("evil.txt"))
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_symbolic_link_entry_is_refused(self, root, frozen):
-        zip_bytes = make_zip({u.EXE_NAME: b"MZ"}, symlinks={"link": "/etc/passwd"})
-        result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
-        assert result.status == "refused"
-        assert version_names(root) == ["0.1.0"]
-
-
-    @pytest.mark.parametrize(("name", "attributes"), [("linked.txt", 0x0400), ("junction/", 0x0410)])
-    def test_a_windows_reparse_point_entry_is_refused_and_writes_nothing(self, root, frozen, name, attributes):
-        # The Windows attributes sit in the low 16 bits of external_attr. No Unix mode is set, so only the
-        # reparse-point bit can refuse this entry.
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(u.EXE_NAME, b"MZ")
-            info = zipfile.ZipInfo(name)
-            info.external_attr = attributes
-            archive.writestr(info, b"C:/Windows")
-        result = u.check_and_stage("0.1.0", github(zip_bytes=buffer.getvalue()), root, [])
-        assert result.status == "refused"
-        assert version_names(root) == ["0.1.0"]
-        assert not list(root.glob("update-*"))
-
-
-    def test_a_member_with_a_bad_crc_is_refused_and_installs_nothing(self, root, frozen):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
-            archive.writestr(u.EXE_NAME, b"MZ-0.2.0-payload")
-        raw = bytearray(buffer.getvalue())
-        raw[raw.index(b"MZ-0.2.0-payload")] ^= 0xFF  # the stored bytes no longer match the CRC in the archive
-        result = u.check_and_stage("0.1.0", github(zip_bytes=bytes(raw)), root, [])
-        assert result.status == "refused"
-        assert "could not be extracted" in result.reason
-        assert version_names(root) == ["0.1.0"]
-        assert (root / "versions" / "0.1.0" / u.EXE_NAME).read_bytes() == b"MZ-0.1.0"
-        assert not list(root.glob("update-*"))
-
-
-    def test_an_encrypted_member_is_refused_and_installs_nothing(self, root, frozen):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
-            archive.writestr(u.EXE_NAME, b"MZ-0.2.0")
-        zip_bytes = _with_every_member_marked_encrypted(buffer.getvalue())
-        result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
-        assert result.status == "refused"
-        assert "could not be extracted" in result.reason
-        assert version_names(root) == ["0.1.0"]
-        assert not list(root.glob("update-*"))
-
-
-    @pytest.mark.filterwarnings("ignore:Overlapped entries")
-    def test_a_truncated_member_is_refused_and_leaves_the_install_unchanged(self, root, frozen):
-        zip_bytes = truncated_member_zip(u.EXE_NAME, b"MZ-0.2.0-payload", declared=4096 + 17)
-        # Precondition: plain zipfile reads this member to the end of the file and raises EOFError. Without that the
-        # test would prove nothing about the EOFError path.
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
-            with pytest.warns(UserWarning, match="Overlapped entries"):
-                member = archive.open(archive.infolist()[0])
-            with member, pytest.raises(EOFError):
-                member.read()
-        before = tree_state(root)
-        result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root, [])
-        assert result.status == "refused"
-        assert "could not be extracted" in result.reason
-        assert tree_state(root) == before
-        assert not list(root.glob("update-*"))
-
-    def test_an_oversized_version_tag_is_refused_and_never_raises(self, root, frozen):
-        gh = github(tag="v" + "9" * 4301)
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "refused"
-        assert gh.calls == [u.LATEST_RELEASE_URL]
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_failing_shortcut_undoes_the_ones_already_done(self, root, frozen):
-        rec = Recorder()
-        result = u.check_and_stage("0.1.0", github(), root, [rec, Failing()])
-        new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
-        previous = root / "versions" / "0.1.0" / u.EXE_NAME
-        assert result.status == "refused"
-        assert "not changed" in result.reason
-        assert rec.targets == [new_exe, previous]
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_failing_first_shortcut_removes_the_new_version(self, root, frozen):
-        result = u.check_and_stage("0.1.0", github(), root, [Failing()])
-        assert result.status == "refused"
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_failed_undo_keeps_the_new_version_and_says_so(self, tmp_path, frozen):
-        install = tmp_path / "install"  # no previous version, so the undo has nowhere to point
-        rec = Recorder()
-        result = u.check_and_stage("0.1.0", github(), install, [rec, Failing()])
-        assert result.status == "refused"
-        assert "may still point" in result.reason
-        assert (install / "versions" / "0.2.0" / u.EXE_NAME).is_file()
-
-
-    # --- check_and_stage: states and network faults ----------------------------------------------------
-
-
-    def test_a_source_run_returns_refused_and_makes_no_request(self, root, monkeypatch):
-        monkeypatch.setattr(u, "_is_frozen", lambda: False)
-        gh = github()
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result == u.UpdateResult("refused", reason=u.DEV_RUN_REASON)
-        assert gh.calls == []
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_the_same_version_is_up_to_date(self, root, frozen):
-        gh = github("0.1.0")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result == u.UpdateResult("up_to_date", version="0.1.0")
-        assert gh.calls == [u.LATEST_RELEASE_URL]
-
-
-    def test_github_unreachable_is_offline_and_never_raises(self, root, frozen):
-        gh = github()
-        gh.routes[u.LATEST_RELEASE_URL] = OSError("no route")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "offline"
-
-
-    def test_a_timeout_during_download_is_offline_and_leaves_no_partial_files(self, root, frozen):
-        gh = github()
-        gh.routes[CDN_URL] = TimeoutError("slow")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "offline"
-        assert version_names(root) == ["0.1.0"]
-        assert not list(root.glob("update-*"))
-
-
-    @pytest.mark.parametrize(
-        ("status", "expected"), [(404, "refused"), (403, "refused"), (429, "offline"), (503, "offline")]
-    )
-    def test_github_error_statuses_map_to_refused_or_offline(self, root, frozen, status, expected):
-        gh = github()
-        gh.routes[u.LATEST_RELEASE_URL] = (status, {}, b"")
-        assert u.check_and_stage("0.1.0", gh, root, []).status == expected
-
-
-    @pytest.mark.parametrize(
-        "location",
-        [
-            "https://evil.example/MeridianDesktop-0.2.0.zip",
-            "http://objects.githubusercontent.com/MeridianDesktop-0.2.0.zip",
-            "https://objects.githubusercontent.com.evil.example/x.zip",
-        ],
-    )
-    def test_a_redirect_to_a_disallowed_address_is_refused_before_it_is_requested(self, root, frozen, location):
-        gh = github()
-        gh.routes[asset_url("0.2.0", ZIP_NAME)] = (302, {"location": location}, b"")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "refused"
-        assert location not in gh.calls
-        assert version_names(root) == ["0.1.0"]
-
-
-    def test_a_redirect_loop_is_refused(self, root, frozen):
-        gh = github()
-        gh.routes[asset_url("0.2.0", ZIP_NAME)] = (302, {"location": asset_url("0.2.0", ZIP_NAME)}, b"")
-        result = u.check_and_stage("0.1.0", gh, root, [])
-        assert result.status == "refused"
-        assert "too many times" in result.reason
-
-
-    # --- rollback ------------------------------------------------------------------------------------
-
-
-    def test_rollback_points_back_at_the_previous_version(self, root, frozen):
-        assert u.check_and_stage("0.1.0", github(), root, []).status == "update_staged"
-        rec = Recorder()
-        assert u.rollback("0.2.0", root, [rec]) == "0.1.0"
-        assert rec.targets == [root / "versions" / "0.1.0" / u.EXE_NAME]
-
-
-    def test_rollback_picks_the_newest_version_below_current(self, root):
-        for version in ("0.1.5", "0.0.9"):
-            exe = root / "versions" / version / u.EXE_NAME
-            exe.parent.mkdir(parents=True)
-            exe.write_bytes(b"MZ")
-        rec = Recorder()
-        assert u.rollback("0.2.0", root, [rec]) == "0.1.5"
-        assert rec.targets == [root / "versions" / "0.1.5" / u.EXE_NAME]
-
-
-    def test_rollback_refuses_when_no_earlier_version_is_left(self, root):
-        rec = Recorder()
-        with pytest.raises(u.Refused, match="no earlier version"):
-            u.rollback("0.1.0", root, [rec])
-        assert rec.targets == []
-
-
-    def test_a_rollback_holds_the_rolled_back_release_on_every_later_check(self, root, frozen):
-        shortcut = Recorder()
-        assert u.check_and_stage("0.1.0", github(), root, [shortcut]).status == "update_staged"
-        assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
-        targets_after_rollback = list(shortcut.targets)
-        assert (root / "versions" / u.SKIP_MARKER).is_file()
-        for _ in range(2):
-            gh = github()
-            result = u.check_and_stage("0.1.0", gh, root, [shortcut])
-            assert result.status == "refused"
-            assert result.version == "0.2.0"
-            assert "held after rollback" in result.reason
-            assert gh.calls == [u.LATEST_RELEASE_URL]  # the release is held before any download
-            assert shortcut.targets == targets_after_rollback  # the shortcut stays on 0.1.0
-        assert shortcut.targets[-1] == root / "versions" / "0.1.0" / u.EXE_NAME
-
-
-    @pytest.mark.parametrize("latest", ["0.2.0", "0.3.0"])
-    def test_a_release_not_newer_than_the_rolled_back_version_is_held(self, root, frozen, latest):
-        shortcut = Recorder()
-        for version in ("0.2.0", "0.3.0"):
-            exe = root / "versions" / version / u.EXE_NAME
-            exe.parent.mkdir(parents=True)
-            exe.write_bytes(b"MZ")
-        assert u.rollback("0.3.0", root, [shortcut]) == "0.2.0"
-        assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"  # the marker keeps 0.3.0, not 0.2.0
-        gh = github(latest)
-        result = u.check_and_stage("0.1.0", gh, root, [shortcut])
-        assert result.status == "refused"
-        assert "held after rollback" in result.reason
-        assert gh.calls == [u.LATEST_RELEASE_URL]
-
-
-    def test_a_newer_release_after_a_rollback_stages_and_clears_the_marker(self, root, frozen):
-        shortcut = Recorder()
-        assert u.check_and_stage("0.1.0", github(), root, [shortcut]).status == "update_staged"
-        assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
-        result = u.check_and_stage("0.1.0", github("0.3.0"), root, [shortcut])
-        assert result == u.UpdateResult("update_staged", version="0.3.0")
-        assert not (root / "versions" / u.SKIP_MARKER).exists()
-        assert shortcut.targets[-1] == root / "versions" / "0.3.0" / u.EXE_NAME
-        assert version_names(root) == ["0.1.0", "0.3.0"]
-
-
-    def test_an_unreadable_marker_is_ignored_and_holds_nothing(self, root, frozen):
-        (root / "versions" / u.SKIP_MARKER).write_text("{not json", encoding="utf-8")
-        result = u.check_and_stage("0.1.0", github(), root, [])
-        assert result == u.UpdateResult("update_staged", version="0.2.0")
-
-
-    def test_a_rollback_whose_shortcuts_all_fail_leaves_no_marker(self, root):
-        with pytest.raises(u.Refused, match="could not be pointed back"):
-            u.rollback("0.2.0", root, [Failing()])
-        assert not (root / "versions" / u.SKIP_MARKER).exists()
-
-
-# --- installing is off: the value this build ships with ---------------------------------------------
-
-
-def test_installing_is_off_in_the_shipped_build():
-    assert u.INSTALL_ENABLED is False
-
-
-@pytest.mark.parametrize("frozen_build", [True, False])
-def test_check_and_stage_refuses_while_installing_is_off_and_makes_no_request(root, monkeypatch, frozen_build):
-    monkeypatch.setattr(u, "_is_frozen", lambda: frozen_build)
-    rec = Recorder()
-    gh = github()
-    result = u.check_and_stage("0.1.0", gh, root, [rec])
-    assert result == u.UpdateResult("refused", reason="Installing is off until release signing exists.")
-    assert gh.requests == []
-    assert rec.targets == []
+# --- check_and_stage: the signature, the checksum, and the staging -------------------------------------
+
+
+def test_a_newer_release_is_staged_as_pending_and_the_older_copy_is_pruned(root, frozen):
+    old = root / "versions" / "0.0.9"
+    old.mkdir()
+    (old / u.EXE_NAME).write_bytes(b"MZ-0.0.9")
+
+    result = u.check_and_stage("0.1.0", github(), root)
+
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    assert result == u.UpdateResult("update_staged", version="0.2.0")
+    assert new_exe.read_bytes() == b"MZ-0.2.0"
+    assert (root / "versions" / "0.2.0" / "_internal" / "base.dll").read_bytes() == b"dll"
+    assert u.read_pending(root) == "0.2.0"
+    assert version_names(root) == ["0.1.0", "0.2.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_staging_leaves_the_shortcuts_alone_until_the_restart(root, frozen):
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    assert u.read_current(root) is None  # current.json is written only when the new version starts
+    assert (root / "versions" / "0.1.0" / u.EXE_NAME).read_bytes() == b"MZ-0.1.0"
+
+
+def test_the_download_announces_its_version_before_it_starts(root, frozen):
+    announced = []
+    result = u.check_and_stage("0.1.0", github(), root, announce=announced.append)
+    assert result.status == "update_staged"
+    assert announced == ["0.2.0"]
+
+
+def test_a_staged_update_repoints_the_shortcut_only_when_its_version_starts(root, frozen):
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    shortcut = Recorder()
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    previous_exe = root / "versions" / "0.1.0" / u.EXE_NAME
+
+    assert u.finish_update_at_start(root, previous_exe, "0.1.0", [shortcut]) is False
+    assert shortcut.targets == []  # the running version still owns the shortcut
+    assert u.read_pending(root) == "0.2.0"
+
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [shortcut]) is True
+    assert shortcut.targets == [new_exe]
+    assert u.read_current(root) == "0.2.0"
+    assert u.read_pending(root) is None
+
+
+def test_a_start_with_no_pending_update_points_the_shortcuts_at_the_running_version(root):
+    shortcut = Recorder()
+    exe = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, exe, "0.1.0", [shortcut]) is False
+    assert shortcut.targets == [exe]
+    assert u.read_current(root) == "0.1.0"
+    assert u.finish_update_at_start(root, exe, "0.1.0", [shortcut]) is False
+    assert shortcut.targets == [exe]  # already current, so no second repoint
+
+
+def test_a_start_of_an_older_copy_does_not_move_the_shortcuts_back(root):
+    u.write_current(root, "0.2.0")
+    shortcut = Recorder()
+    older = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, older, "0.1.0", [shortcut]) is False
+    assert shortcut.targets == []
+    assert u.read_current(root) == "0.2.0"
+
+
+def test_a_pending_update_for_another_version_is_left_alone_at_start(root):
+    u.write_pending(root, "0.2.0")
+    shortcut = Recorder()
+    exe = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, exe, "0.1.0", [shortcut]) is False
+    assert shortcut.targets == []
+    assert u.read_pending(root) == "0.2.0"
+
+
+def test_a_failed_shortcut_at_the_restart_keeps_the_update_pending(root, frozen):
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [Failing()]) is False
+    assert u.read_pending(root) == "0.2.0"
+    assert u.read_current(root) is None
+
+
+def test_a_failing_shortcut_at_the_restart_undoes_the_ones_already_done(root):
+    u.write_current(root, "0.1.0")
+    u.write_pending(root, "0.2.0")
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    new_exe.parent.mkdir(parents=True)
+    new_exe.write_bytes(b"MZ-0.2.0")
+    previous = root / "versions" / "0.1.0" / u.EXE_NAME
+    shortcut = Recorder()
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [shortcut, Failing()]) is False
+    assert shortcut.targets == [new_exe, previous]
+    assert u.read_pending(root) == "0.2.0"
+    assert u.read_current(root) == "0.1.0"
+
+
+def test_a_checksum_mismatch_installs_nothing(root, frozen):
+    result = u.check_and_stage("0.1.0", github(sums=f"{'0' * 64}  {ZIP_NAME}\n"), root)
+    assert result.status == "refused"
+    assert "does not match SHA256SUMS" in result.reason
     assert version_names(root) == ["0.1.0"]
+    assert u.read_pending(root) is None
 
 
-def test_install_update_raises_install_disabled_and_changes_nothing(root):
+def test_a_release_not_signed_by_the_release_key_is_refused_before_the_zip_is_fetched(root, frozen):
+    gh = github(signed_by=OTHER_SEED)
     before = tree_state(root)
-    rec = Recorder()
-    gh = github()
-    with pytest.raises(u.InstallDisabled, match="Installing is off until release signing exists."):
-        u.install_update(release_0_2_0(), "0.1.0", gh, root, [rec])
-    assert gh.calls == []
-    assert rec.targets == []
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.UNSIGNED_REASON)
+    assert CDN_URL not in gh.calls
     assert tree_state(root) == before
 
 
-def test_install_update_while_installing_is_off_does_not_create_the_install_folder(tmp_path):
+def test_the_reason_for_an_unsigned_release_is_the_plain_sentence():
+    assert u.UNSIGNED_REASON == "The update is not signed by the Meridian release key."
+
+
+def test_a_sums_file_changed_after_signing_fails_its_signature(root, frozen):
+    gh = github()
+    sums_url = asset_url("0.2.0", "SHA256SUMS")
+    gh.routes[sums_url] = (200, {}, gh.routes[sums_url][2] + b"\n")  # one byte more than was signed
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.UNSIGNED_REASON)
+    assert CDN_URL not in gh.calls
+    assert version_names(root) == ["0.1.0"]
+
+
+@pytest.mark.parametrize(
+    "sig",
+    [b"", b"not base64 !!", base64.b64encode(b"x" * 63) + b"\n", base64.b64encode(b"\x00" * 64)],
+)
+def test_a_malformed_signature_is_refused_as_unsigned(root, frozen, sig):
+    gh = github(sig=sig)
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.UNSIGNED_REASON)
+    assert CDN_URL not in gh.calls
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_release_with_no_signature_asset_is_refused_before_any_download(root, frozen):
+    gh = github()
+    gh.routes[u.LATEST_RELEASE_URL] = (200, {}, release_body("0.2.0", names=[ZIP_NAME, "SHA256SUMS"]))
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.UNSIGNED_REASON)
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_a_signature_that_is_not_found_is_refused_as_unsigned(root, frozen):
+    gh = github()
+    gh.routes[asset_url("0.2.0", SIG_NAME)] = (404, {}, b"")
+    assert u.check_and_stage("0.1.0", gh, root) == u.UpdateResult("refused", reason=u.UNSIGNED_REASON)
+    assert CDN_URL not in gh.calls
+
+
+def test_missing_sums_line_stops_before_the_zip_is_downloaded(root, frozen):
+    gh = github(sums="")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "refused"
+    assert CDN_URL not in gh.calls
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_download_over_the_size_cap_installs_nothing(root, frozen, monkeypatch):
+    monkeypatch.setattr(u, "MAX_DOWNLOAD_BYTES", 64)
+    result = u.check_and_stage("0.1.0", github(zip_size=10), root)
+    assert result.status == "refused"
+    assert "size limit" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_zip_without_the_exe_is_refused_and_leaves_nothing_behind(root, frozen):
+    zip_bytes = make_zip({"_internal/base.dll": b"dll"})
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert u.EXE_NAME in result.reason
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_file_that_is_not_a_zip_is_refused(root, frozen):
+    result = u.check_and_stage("0.1.0", github(zip_bytes=b"not a zip"), root)
+    assert result.status == "refused"
+    assert version_names(root) == ["0.1.0"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "../evil.txt",
+        "/abs.txt",
+        "C:/evil.txt",
+        "C:evil.txt",
+        "..\\evil.txt",
+        "a/../../evil.txt",
+        "\\\\server\\share\\evil.txt",
+        "a/b:stream.txt",
+    ],
+)
+def test_zip_slip_entries_are_refused_and_write_nothing(root, frozen, entry, tmp_path):
+    zip_bytes = make_zip({u.EXE_NAME: b"MZ", entry: b"evil"})
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert not list(tmp_path.rglob("evil.txt"))
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_symbolic_link_entry_is_refused(root, frozen):
+    zip_bytes = make_zip({u.EXE_NAME: b"MZ"}, symlinks={"link": "/etc/passwd"})
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert version_names(root) == ["0.1.0"]
+
+
+@pytest.mark.parametrize(("name", "attributes"), [("linked.txt", 0x0400), ("junction/", 0x0410)])
+def test_a_windows_reparse_point_entry_is_refused_and_writes_nothing(root, frozen, name, attributes):
+    # The Windows attributes sit in the low 16 bits of external_attr. No Unix mode is set, so only the
+    # reparse-point bit can refuse this entry.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ")
+        info = zipfile.ZipInfo(name)
+        info.external_attr = attributes
+        archive.writestr(info, b"C:/Windows")
+    result = u.check_and_stage("0.1.0", github(zip_bytes=buffer.getvalue()), root)
+    assert result.status == "refused"
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_a_member_with_a_bad_crc_is_refused_and_installs_nothing(root, frozen):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ-0.2.0-payload")
+    raw = bytearray(buffer.getvalue())
+    raw[raw.index(b"MZ-0.2.0-payload")] ^= 0xFF  # the stored bytes no longer match the CRC in the archive
+    result = u.check_and_stage("0.1.0", github(zip_bytes=bytes(raw)), root)
+    assert result.status == "refused"
+    assert "could not be extracted" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert (root / "versions" / "0.1.0" / u.EXE_NAME).read_bytes() == b"MZ-0.1.0"
+    assert not list(root.glob("update-*"))
+
+
+def test_an_encrypted_member_is_refused_and_installs_nothing(root, frozen):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(u.EXE_NAME, b"MZ-0.2.0")
+    zip_bytes = _with_every_member_marked_encrypted(buffer.getvalue())
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert "could not be extracted" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+@pytest.mark.filterwarnings("ignore:Overlapped entries")
+def test_a_truncated_member_is_refused_and_leaves_the_install_unchanged(root, frozen):
+    zip_bytes = truncated_member_zip(u.EXE_NAME, b"MZ-0.2.0-payload", declared=4096 + 17)
+    # Precondition: plain zipfile reads this member to the end of the file and raises EOFError. Without that the
+    # test would prove nothing about the EOFError path.
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        with pytest.warns(UserWarning, match="Overlapped entries"):
+            member = archive.open(archive.infolist()[0])
+        with member, pytest.raises(EOFError):
+            member.read()
+    before = tree_state(root)
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert "could not be extracted" in result.reason
+    assert tree_state(root) == before
+    assert not list(root.glob("update-*"))
+
+
+def test_an_oversized_version_tag_is_refused_and_never_raises(root, frozen):
+    gh = github(tag="v" + "9" * 4301)
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "refused"
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_staged_version_is_not_downloaded_again(root, frozen):
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    gh = github()
+    assert u.check_and_stage("0.1.0", gh, root) == u.UpdateResult("update_staged", version="0.2.0")
+    assert CDN_URL not in gh.calls
+
+
+def test_a_failure_while_recording_the_pending_update_removes_the_new_version(root, frozen, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(u, "write_pending", refuse)
+    result = u.check_and_stage("0.1.0", github(), root)
+    assert result.status == "refused"
+    assert "could not be recorded" in result.reason
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_source_run_returns_refused_and_makes_no_request(root, monkeypatch):
+    monkeypatch.setattr(u, "_is_frozen", lambda: False)
+    gh = github()
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.DEV_RUN_REASON)
+    assert gh.calls == []
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_the_same_version_is_up_to_date(root, frozen):
+    gh = github("0.1.0")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("up_to_date", version="0.1.0")
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_github_unreachable_is_offline_and_never_raises(root, frozen):
+    gh = github()
+    gh.routes[u.LATEST_RELEASE_URL] = OSError("no route")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "offline"
+
+
+def test_a_timeout_during_download_is_offline_and_leaves_no_partial_files(root, frozen):
+    gh = github()
+    gh.routes[CDN_URL] = TimeoutError("slow")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "offline"
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+    assert u.read_pending(root) is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(404, "refused"), (403, "refused"), (429, "offline"), (503, "offline")]
+)
+def test_github_error_statuses_map_to_refused_or_offline(root, frozen, status, expected):
+    gh = github()
+    gh.routes[u.LATEST_RELEASE_URL] = (status, {}, b"")
+    assert u.check_and_stage("0.1.0", gh, root).status == expected
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/MeridianDesktop-0.2.0.zip",
+        "http://objects.githubusercontent.com/MeridianDesktop-0.2.0.zip",
+        "https://objects.githubusercontent.com.evil.example/x.zip",
+    ],
+)
+def test_a_redirect_to_a_disallowed_address_is_refused_before_it_is_requested(root, frozen, location):
+    gh = github()
+    gh.routes[asset_url("0.2.0", ZIP_NAME)] = (302, {"location": location}, b"")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "refused"
+    assert location not in gh.calls
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_redirect_loop_is_refused(root, frozen):
+    gh = github()
+    gh.routes[asset_url("0.2.0", ZIP_NAME)] = (302, {"location": asset_url("0.2.0", ZIP_NAME)}, b"")
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "refused"
+    assert "too many times" in result.reason
+
+
+# --- the layout pointers and the restart --------------------------------------------------------------
+
+
+def test_the_pointer_files_round_trip_and_ignore_bad_content(root):
+    assert u.read_current(root) is None
+    u.write_current(root, "0.1.0")
+    assert u.read_current(root) == "0.1.0"
+    u.write_pending(root, "0.2.0")
+    assert u.read_pending(root) == "0.2.0"
+    u.clear_pending(root)
+    assert u.read_pending(root) is None
+    (root / u.CURRENT_NAME).write_text('{"version": "not a version"}', encoding="utf-8")
+    assert u.read_current(root) is None
+    with pytest.raises(u.Refused):
+        u.write_current(root, "v0.1.0")
+
+
+def test_a_ready_version_needs_a_newer_pending_version_whose_exe_is_on_disk(root):
+    u.write_pending(root, "0.2.0")
+    assert u.ready_version(root, "0.1.0") is None  # its exe is not there yet
+    exe = u.exe_for(root, "0.2.0")
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ-0.2.0")
+    assert u.ready_version(root, "0.1.0") == "0.2.0"
+    assert u.ready_version(root, "0.2.0") is None  # not newer than the running version
+
+
+def test_restart_starts_the_staged_exe_with_the_old_version_detached_and_without_a_shell(root):
+    import subprocess
+
+    exe = u.exe_for(root, "0.1.0")
+    calls = []
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+
+    u.launch_after_update(exe, "0.0.9", popen=popen)
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [str(exe), "--after-update", "0.0.9"]
+    assert kwargs.get("shell", False) is False
+    assert kwargs["close_fds"] is True
+    assert kwargs["cwd"] == str(exe.parent)
+    expected_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    assert kwargs["creationflags"] == expected_flags
+
+
+def test_a_restart_that_cannot_start_the_exe_is_refused_and_says_so(root):
+    def popen(argv, **kwargs):
+        raise OSError("no such file")
+
+    with pytest.raises(u.Refused, match="could not be started"):
+        u.launch_after_update(u.exe_for(root, "0.1.0"), "0.0.9", popen=popen)
+
+
+def test_a_restart_into_a_missing_exe_starts_nothing(root):
+    calls = []
+    with pytest.raises(u.Refused, match="missing"):
+        u.launch_after_update(u.exe_for(root, "0.9.0"), "0.1.0", popen=lambda argv, **kw: calls.append(argv))
+    assert calls == []
+
+
+# --- rollback ------------------------------------------------------------------------------------------
+
+
+def test_rollback_points_back_at_the_previous_version(root, frozen):
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    rec = Recorder()
+    assert u.rollback("0.2.0", root, [rec]) == "0.1.0"
+    assert rec.targets == [root / "versions" / "0.1.0" / u.EXE_NAME]
+    assert u.read_current(root) == "0.1.0"
+
+
+def test_rollback_picks_the_newest_version_below_current(root):
+    for version in ("0.1.5", "0.0.9"):
+        exe = root / "versions" / version / u.EXE_NAME
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ")
+    rec = Recorder()
+    assert u.rollback("0.2.0", root, [rec]) == "0.1.5"
+    assert rec.targets == [root / "versions" / "0.1.5" / u.EXE_NAME]
+
+
+def test_rollback_refuses_when_no_earlier_version_is_left(root):
+    rec = Recorder()
+    with pytest.raises(u.Refused, match="no earlier version"):
+        u.rollback("0.1.0", root, [rec])
+    assert rec.targets == []
+
+
+def test_a_rollback_holds_the_rolled_back_release_on_every_later_check(root, frozen):
+    shortcut = Recorder()
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
+    targets_after_rollback = list(shortcut.targets)
+    assert (root / "versions" / u.SKIP_MARKER).is_file()
+    for _ in range(2):
+        gh = github()
+        result = u.check_and_stage("0.1.0", gh, root)
+        assert result.status == "refused"
+        assert result.version == "0.2.0"
+        assert "held after rollback" in result.reason
+        assert gh.calls == [u.LATEST_RELEASE_URL]  # the release is held before any download
+        assert shortcut.targets == targets_after_rollback  # the shortcut stays on 0.1.0
+    assert shortcut.targets[-1] == root / "versions" / "0.1.0" / u.EXE_NAME
+
+
+@pytest.mark.parametrize("latest", ["0.2.0", "0.3.0"])
+def test_a_release_not_newer_than_the_rolled_back_version_is_held(root, frozen, latest):
+    shortcut = Recorder()
+    for version in ("0.2.0", "0.3.0"):
+        exe = root / "versions" / version / u.EXE_NAME
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ")
+    assert u.rollback("0.3.0", root, [shortcut]) == "0.2.0"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"  # the marker keeps 0.3.0, not 0.2.0
+    gh = github(latest)
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result.status == "refused"
+    assert "held after rollback" in result.reason
+    assert gh.calls == [u.LATEST_RELEASE_URL]
+
+
+def test_a_newer_release_after_a_rollback_stages_and_clears_the_marker(root, frozen):
+    shortcut = Recorder()
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+    assert u.rollback("0.2.0", root, [shortcut]) == "0.1.0"
+    result = u.check_and_stage("0.1.0", github("0.3.0"), root)
+    assert result == u.UpdateResult("update_staged", version="0.3.0")
+    assert not (root / "versions" / u.SKIP_MARKER).exists()
+    assert u.read_pending(root) == "0.3.0"
+    assert version_names(root) == ["0.1.0", "0.3.0"]
+
+
+def test_an_unreadable_marker_is_ignored_and_holds_nothing(root, frozen):
+    (root / "versions" / u.SKIP_MARKER).write_text("{not json", encoding="utf-8")
+    result = u.check_and_stage("0.1.0", github(), root)
+    assert result == u.UpdateResult("update_staged", version="0.2.0")
+
+
+def test_a_rollback_whose_shortcuts_all_fail_leaves_no_marker(root):
+    with pytest.raises(u.Refused, match="could not be pointed back"):
+        u.rollback("0.2.0", root, [Failing()])
+    assert not (root / "versions" / u.SKIP_MARKER).exists()
+
+
+# --- the kill switch: the value this build ships with is on -------------------------------------------
+
+
+def test_installing_is_on_in_the_shipped_build():
+    assert u.INSTALL_ENABLED is True
+
+
+@pytest.mark.parametrize("frozen_build", [True, False])
+def test_the_kill_switch_refuses_before_any_request_and_changes_nothing(root, monkeypatch, frozen_build):
+    monkeypatch.setattr(u, "INSTALL_ENABLED", False)
+    monkeypatch.setattr(u, "_is_frozen", lambda: frozen_build)
+    gh = github()
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.INSTALL_OFF_REASON)
+    assert gh.requests == []
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_install_update_with_the_kill_switch_raises_and_changes_nothing(root, monkeypatch):
+    monkeypatch.setattr(u, "INSTALL_ENABLED", False)
+    before = tree_state(root)
+    gh = github()
+    with pytest.raises(u.InstallDisabled, match="turned off"):
+        u.install_update(release_0_2_0(), "0.1.0", gh, root)
+    assert gh.calls == []
+    assert tree_state(root) == before
+
+
+def test_install_update_with_the_kill_switch_does_not_create_the_install_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(u, "INSTALL_ENABLED", False)
     install = tmp_path / "never-created"
     with pytest.raises(u.InstallDisabled):
-        u.install_update(release_0_2_0(), "0.1.0", github(), install, [])
+        u.install_update(release_0_2_0(), "0.1.0", github(), install)
     assert not install.exists()
 
 

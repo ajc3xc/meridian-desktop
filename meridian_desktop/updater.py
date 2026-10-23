@@ -1,29 +1,31 @@
-"""Desktop update: a notice when a newer release is published, and the verified install kept for later.
+"""Desktop update: a newer release is downloaded, verified and staged, then started on the owner's restart.
 
-Pure Python, no Qt import. Installing is off until release signing exists. There is no signing key and no signing
-policy yet, so nothing the app downloads could be checked as genuine. check_for_update is the update check. It reads
-only the latest release JSON from GitHub and returns one of four results:
+Pure Python, no Qt import. check_for_update is the notify-only check. It reads only the latest release JSON from
+GitHub and returns one of four results:
 
-    UpdateNotice(version, release_page_url)   a newer release is published. The user opens the release page.
+    UpdateNotice(version, release_page_url)   a newer release is published.
     UpToDate                                  the latest release is not newer than the running app.
     Offline                                   GitHub could not be reached, or it is failing for now.
     Refused(reason)                           the reply could not be read, or it is not allowed.
 
-check_for_update never requests a zip or SHA256SUMS asset, never downloads a file and never extracts anything. It
-returns its result rather than raising it. Nothing on its path reaches check_and_stage or install_update.
+check_and_stage is the background update. It is a job, not a button, and it runs at launch and every six hours
+while the app is open (ui/update_notice.py). Nothing it downloads is trusted before it is verified:
 
-check_and_stage and install_update are kept as code for when signing exists. INSTALL_ENABLED is False until then.
-While it is False, check_and_stage refuses before any request, and install_update raises InstallDisabled before it
-writes anything. When they run, nothing unverified is ever run:
-
-1. fetch_latest reads the latest release from GitHub. It needs two assets, MeridianDesktop-<version>.zip and
-   SHA256SUMS, and the version must be plain dotted integers.
-2. The zip is downloaded into a scratch folder. Its SHA-256 must match its line in SHA256SUMS, and it must be
+1. fetch_latest reads the latest release from GitHub. It needs three assets: MeridianDesktop-<version>.zip,
+   SHA256SUMS and SHA256SUMS.sig. A release with no SHA256SUMS.sig is refused as not signed.
+2. SHA256SUMS.sig is the base64 of a 64-byte Ed25519 signature over the exact bytes of SHA256SUMS. It must verify
+   under RELEASE_PUBLIC_KEY (meridian_desktop/release_key.py). Otherwise nothing else is downloaded.
+3. The zip is downloaded into a scratch folder. Its SHA-256 must match its line in SHA256SUMS, and it must be
    under MAX_DOWNLOAD_BYTES. A failure installs nothing.
-3. install_update extracts the zip into versions/<version>.partial. Entries that are absolute, carry a drive or
+4. install_update extracts the zip into versions/<version>.partial. Entries that are absolute, carry a drive or
    a stream name, contain "..", are symbolic links, or are junctions and other Windows reparse points are
-   refused. A corrupt or encrypted member is refused too. MeridianDesktop.exe must be in the result.
-   The folder is then renamed to versions/<version>, and the shortcuts are pointed at its exe.
+   refused. A corrupt or encrypted member is refused too. MeridianDesktop.exe must be in the result. The folder is
+   then renamed to versions/<version>, and pending.json records the version.
+
+Staging does not touch the shortcuts. They keep pointing at the running version until the owner restarts. Then
+launch_after_update starts versions/<version>/MeridianDesktop.exe with --after-update <old>, and that process calls
+finish_update_at_start, which points the shortcuts at itself, makes it current and clears pending.json. A start with
+no pending update also points the shortcuts at the running version, when it is not older than the current one.
 
 Every request goes through an injectable transport, and urllib never follows a redirect. Each hop is checked
 against the https host allowlist before it is requested. Tests pass a fake transport, so they make no network call.
@@ -34,10 +36,13 @@ Layout under install_root:
     versions/<version>.partial               an extraction in progress. Removed on any failure.
     versions/rolled_back.json                the version rolled back from. Releases at or below it are held
                                              until a newer release is published. Cleared by that update.
+    current.json                             {"version": v}: the version the shortcuts point at.
+    pending.json                             {"version": v}: a staged update that waits for a restart.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
 import io
@@ -46,6 +51,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -58,6 +64,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
+from meridian_desktop import ed25519
+from meridian_desktop.release_key import RELEASE_PUBLIC_KEY_B64
 from meridian_desktop.version import APP_VERSION
 
 REPO = "ajc3xc/meridian-desktop"
@@ -68,8 +76,12 @@ ALLOWED_HOSTS = frozenset(
 EXE_NAME = "MeridianDesktop.exe"
 VERSIONS_DIR = "versions"
 SUMS_NAME = "SHA256SUMS"
+SIG_NAME = "SHA256SUMS.sig"
+CURRENT_NAME = "current.json"
+PENDING_NAME = "pending.json"
+AFTER_UPDATE_FLAG = "--after-update"
 MAX_DOWNLOAD_BYTES = 400 * 1024 * 1024  # the release zip
-MAX_SMALL_BYTES = 1024 * 1024  # the release JSON and SHA256SUMS
+MAX_SMALL_BYTES = 1024 * 1024  # the release JSON, SHA256SUMS and SHA256SUMS.sig
 MAX_REDIRECTS = 5
 TIMEOUT_SECONDS = 30.0
 DEV_RUN_REASON = "dev run: updates are not applied"
@@ -79,16 +91,18 @@ SKIP_MARKER = "rolled_back.json"
 HELD_REASON = (
     "Update {version} is held after rollback. It will not be installed again until a newer release is published."
 )
+UNSIGNED_REASON = "The update is not signed by the Meridian release key."
+RELEASE_PUBLIC_KEY = base64.b64decode(RELEASE_PUBLIC_KEY_B64)
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400  # Windows: a junction, a symbolic link or another reparse point
 _CHUNK = 64 * 1024
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _SUM_LINE = re.compile(r"([0-9a-fA-F]{64})[ \t]+\*?(\S.*)")
 _VERSION_REFUSED = "A version must be plain dotted numbers such as 0.2.0."
 _TAG_REFUSED = "The latest release tag must be v followed by a plain version, such as v0.2.0."
-# Turns on only after release signing exists. While False, check_and_stage refuses before any request is made, and
-# install_update raises InstallDisabled before it writes anything.
-INSTALL_ENABLED = False
-INSTALL_OFF_REASON = "Installing is off until release signing exists."
+# Turned on now that release signing exists. Setting it False is the kill switch: check_and_stage then refuses before
+# any request, and install_update raises InstallDisabled before it writes anything.
+INSTALL_ENABLED = True
+INSTALL_OFF_REASON = "Installing updates is turned off in this build."
 
 
 class UpdateError(Exception):
@@ -113,7 +127,7 @@ class Offline(UpdateError):
 
 
 class InstallDisabled(Refused):
-    """Installing is off in this build, until release signing exists. Nothing was downloaded or written."""
+    """Installing is off in this build. Nothing was downloaded or written."""
 
 
 Status = Literal["up_to_date", "update_staged", "refused", "offline"]
@@ -133,6 +147,7 @@ class Release:
     zip_url: str
     zip_size: int | None
     sums_url: str
+    sig_url: str = ""  # the SHA256SUMS.sig asset. An empty address is refused as not signed.
 
 
 @dataclass(frozen=True)
@@ -150,6 +165,8 @@ class Reply:
 Transport = Callable[[str, int, Path | None], Reply]
 # A shortcut writer repoints one shortcut at the exe it is given. The caller binds the shortcut's own .lnk path.
 ShortcutWriter = Callable[[Path], None]
+# Called with the version just before its download starts, so the window can say what is downloading.
+Announce = Callable[[str], None]
 
 
 class _RepointFailed(Exception):
@@ -229,7 +246,7 @@ def _require_ok(reply: Reply, what: str) -> None:
 
 
 def fetch_latest(transport: Transport) -> Release:
-    """Read the latest published release. Refuse it unless it has the zip and SHA256SUMS assets."""
+    """Read the latest published release. Refuse it unless it has the zip, SHA256SUMS and SHA256SUMS.sig assets."""
     reply = _fetch(transport, LATEST_RELEASE_URL, MAX_SMALL_BYTES)
     _require_ok(reply, "the latest release")
     try:
@@ -259,16 +276,29 @@ def fetch_latest(transport: Transport) -> Release:
         raise Refused(f"The latest release has no {zip_name} asset.")
     if sums_asset is None:
         raise Refused("The latest release has no SHA256SUMS asset.")
+    sig_asset = by_name.get(SIG_NAME)
+    if sig_asset is None:
+        raise Refused(UNSIGNED_REASON)
     zip_url = zip_asset.get("browser_download_url")
     sums_url = sums_asset.get("browser_download_url")
+    sig_url = sig_asset.get("browser_download_url")
     if not isinstance(zip_url, str) or not isinstance(sums_url, str):
         raise Refused("The latest release has an asset with no download address.")
+    if not isinstance(sig_url, str):
+        raise Refused(UNSIGNED_REASON)
     size = zip_asset.get("size")
     if isinstance(size, bool) or not isinstance(size, int):
         size = None
     elif size > MAX_DOWNLOAD_BYTES:
         raise TooLarge("The release zip is over the size limit.")
-    return Release(version=version, zip_name=zip_name, zip_url=zip_url, zip_size=size, sums_url=sums_url)
+    return Release(
+        version=version,
+        zip_name=zip_name,
+        zip_url=zip_url,
+        zip_size=size,
+        sums_url=sums_url,
+        sig_url=sig_url,
+    )
 
 
 # --- verification -----------------------------------------------------------------------------------
@@ -286,6 +316,16 @@ def expected_sha256(sums_text: str, file_name: str) -> str:
     return found[0]
 
 
+def verify_sums_signature(sums: bytes, signature_text: bytes, public_key: bytes) -> None:
+    """Refuse unless signature_text is the base64 of an Ed25519 signature of the exact bytes of sums under public_key."""
+    try:
+        signature = base64.b64decode(signature_text.strip(), validate=True)
+    except (ValueError, TypeError):  # binascii.Error is a ValueError
+        raise Refused(UNSIGNED_REASON) from None
+    if len(signature) != 64 or not ed25519.verify(public_key, sums, signature):
+        raise Refused(UNSIGNED_REASON)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -301,10 +341,20 @@ def _text(body: bytes) -> str:
         raise Refused("SHA256SUMS could not be read.") from None
 
 
-def _download_verified(release: Release, transport: Transport, scratch: Path) -> Path:
-    """Download SHA256SUMS, then the zip into scratch. Refuse unless the zip's SHA-256 matches its line."""
+def _download_verified(release: Release, transport: Transport, scratch: Path, public_key: bytes) -> Path:
+    """Download SHA256SUMS and its signature, verify the signature, then download the zip and check its SHA-256.
+
+    Nothing is downloaded from the zip address until the signature verifies. A failure leaves scratch with no zip.
+    """
+    if not release.sig_url:
+        raise Refused(UNSIGNED_REASON)
     sums_reply = _fetch(transport, release.sums_url, MAX_SMALL_BYTES)
     _require_ok(sums_reply, SUMS_NAME)
+    sig_reply = _fetch(transport, release.sig_url, MAX_SMALL_BYTES)
+    if sig_reply.status == 404:
+        raise Refused(UNSIGNED_REASON)
+    _require_ok(sig_reply, SIG_NAME)
+    verify_sums_signature(sums_reply.body, sig_reply.body, public_key)
     expected = expected_sha256(_text(sums_reply.body), release.zip_name)
     zip_path = scratch / release.zip_name
     zip_reply = _fetch(transport, release.zip_url, MAX_DOWNLOAD_BYTES, zip_path)
@@ -422,28 +472,108 @@ def _prune(versions: Path, keep: set[str]) -> None:
             _remove_tree(entry)
 
 
+# --- the layout pointers: current.json and pending.json ---------------------------------------------------
+
+
+def version_dir(install_root: Path | str, version: str) -> Path:
+    """The folder that holds one installed version."""
+    return Path(install_root) / VERSIONS_DIR / version
+
+
+def exe_for(install_root: Path | str, version: str) -> Path:
+    """The exe of one installed version. The shortcuts point at the one named by current.json."""
+    return version_dir(install_root, version) / EXE_NAME
+
+
+def _read_version_file(path: Path, key: str) -> str | None:
+    """The plain version held under key in a small JSON file, or None when the file is missing or unusable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get(key) if isinstance(data, dict) else None
+    try:
+        parse_version(version)
+    except Refused:
+        return None
+    return version
+
+
+def _write_version_file(path: Path, key: str, version: str) -> None:
+    """Write {key: version} through a temp file and os.replace, so a reader never sees a half-written file."""
+    parse_version(version)
+    temp = path.with_name(f"{path.name}.tmp")
+    try:
+        temp.write_text(json.dumps({key: version}), encoding="utf-8")
+        os.replace(temp, path)
+    except OSError:
+        _remove_file(temp)
+        raise
+
+
+def read_current(install_root: Path | str) -> str | None:
+    """The version the shortcuts point at, or None when current.json is missing or unusable."""
+    return _read_version_file(Path(install_root) / CURRENT_NAME, "version")
+
+
+def write_current(install_root: Path | str, version: str) -> None:
+    """Record the version the shortcuts point at. Raises OSError when the file cannot be written."""
+    _write_version_file(Path(install_root) / CURRENT_NAME, "version", version)
+
+
+def read_pending(install_root: Path | str) -> str | None:
+    """The staged version that waits for a restart, or None when there is none."""
+    return _read_version_file(Path(install_root) / PENDING_NAME, "version")
+
+
+def write_pending(install_root: Path | str, version: str) -> None:
+    """Record a staged version. Raises OSError when the file cannot be written."""
+    _write_version_file(Path(install_root) / PENDING_NAME, "version", version)
+
+
+def clear_pending(install_root: Path | str) -> None:
+    """Remove the staged-update record. Best effort: a record that cannot be removed is only ever a prompt."""
+    _remove_file(Path(install_root) / PENDING_NAME)
+
+
+def ready_version(install_root: Path | str, running_version: str) -> str | None:
+    """The staged version that is newer than running_version and whose exe is on disk, or None."""
+    pending = read_pending(install_root)
+    if pending is None or not is_newer(pending, running_version):
+        return None
+    if not exe_for(install_root, pending).is_file():
+        return None
+    return pending
+
+
 def install_update(
     release: Release,
     current_version: str,
     transport: Transport,
     install_root: Path,
-    shortcut_writers: Sequence[ShortcutWriter],
+    *,
+    public_key: bytes | None = None,
+    announce: Announce | None = None,
 ) -> Path:
-    """Download, verify, extract and install a release, then point the shortcuts at it. Return the version folder.
+    """Download, verify, extract and stage a release, then record it as pending. Return the version folder.
 
-    Keeps the current and the new version folders and deletes the rest. Raises InstallDisabled while INSTALL_ENABLED
+    The shortcuts are not touched. They point at the running version until the owner restarts. Keeps the new
+    version, the running one and the current one, and deletes the rest. Raises InstallDisabled while INSTALL_ENABLED
     is False, before anything is created or requested. Otherwise raises Refused, Offline or OSError. Does not check
-    whether the app is frozen; check_and_stage does that.
+    whether the app is frozen; check_and_stage does that. public_key defaults to RELEASE_PUBLIC_KEY.
     """
     if not INSTALL_ENABLED:
         raise InstallDisabled(INSTALL_OFF_REASON)
+    key = RELEASE_PUBLIC_KEY if public_key is None else public_key
     install_root = Path(install_root)
     versions = install_root / VERSIONS_DIR
     final = versions / release.version
     staging = versions / f"{release.version}.partial"
     install_root.mkdir(parents=True, exist_ok=True)
+    if announce is not None:
+        announce(release.version)
     with tempfile.TemporaryDirectory(dir=install_root, prefix="update-") as scratch:
-        zip_path = _download_verified(release, transport, Path(scratch))
+        zip_path = _download_verified(release, transport, Path(scratch), key)
         _remove_tree(staging, strict=True)
         try:
             _extract_verified(zip_path, staging)
@@ -453,15 +583,12 @@ def install_update(
             _remove_tree(staging)
             raise
     try:
-        _point_shortcuts(shortcut_writers, final / EXE_NAME, versions / current_version / EXE_NAME)
-    except _RepointFailed as failed:
-        if failed.undone:
-            _remove_tree(final)
-            raise Refused("A shortcut could not be pointed at the new version. The installed app was not changed.") from None
-        raise Refused(
-            "A shortcut could not be pointed at the new version, and one may still point at it. Run the update again."
-        ) from None
-    _prune(versions, keep={release.version, current_version})
+        write_pending(install_root, release.version)
+    except OSError:
+        _remove_tree(final)
+        raise Refused("The update could not be recorded. Nothing was changed.") from None
+    keep = {release.version, current_version, read_current(install_root)}
+    _prune(versions, keep={name for name in keep if name})
     return final
 
 
@@ -507,7 +634,7 @@ def rollback(current_version: str, install_root: Path, shortcut_writers: Sequenc
 
     Records current_version in the skip marker first, so check_and_stage does not stage it again. The marker is
     removed again if the shortcuts could not be changed at all. Refuses when no earlier version folder with an exe
-    is left, or when the marker cannot be written.
+    is left, or when the marker cannot be written. current.json then names the version the shortcuts point at.
     """
     install_root = Path(install_root)
     versions = install_root / VERSIONS_DIR
@@ -532,35 +659,49 @@ def rollback(current_version: str, install_root: Path, shortcut_writers: Sequenc
         if failed.undone:
             _clear_skip_marker(versions)  # every shortcut is back on current_version, so nothing was rolled back
         raise Refused("The shortcuts could not be pointed back at the earlier version.") from None
+    try:
+        write_current(install_root, best[1].name)
+    except OSError:
+        pass  # the shortcuts already point at it; the next start that finds current.json stale sorts it out
     return best[1].name
 
 
-# --- top level ----------------------------------------------------------------------------------------
+# --- top level ----------------------------------------------------------------------------------
 
 
 def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def running_frozen() -> bool:
+    """True when this process is the frozen bundle. The update is only applied to a frozen bundle."""
+    return _is_frozen()
+
+
 def check_and_stage(
     current_version: str,
     transport: Transport,
     install_root: Path,
-    shortcut_writers: Sequence[ShortcutWriter],
+    *,
+    public_key: bytes | None = None,
+    announce: Announce | None = None,
 ) -> UpdateResult:
     """Check GitHub for a newer release and stage it. Never raises for a network or download fault.
 
     While INSTALL_ENABLED is False, it returns refused at once with INSTALL_OFF_REASON and makes no request. A source
     run (not frozen) returns refused at once and makes no request. Otherwise the result is up_to_date,
-    update_staged (the new version is installed and the shortcuts point at it), refused (with the plain reason),
-    or offline. After a rollback, a release that is not newer than the rolled-back version is held: it is refused
-    before anything is downloaded, and it stays held until a newer release is staged, which clears the marker.
+    update_staged (the new version is downloaded, verified and recorded as pending, and the shortcuts keep pointing at
+    the running version until the restart), refused (with the plain reason), or offline. A release whose version is
+    already staged is not downloaded again. After a rollback, a release that is not newer than the rolled-back version
+    is held: it is refused before anything is downloaded, and it stays held until a newer release is staged, which
+    clears the marker.
     """
     if not INSTALL_ENABLED:
         return UpdateResult("refused", reason=INSTALL_OFF_REASON)
     if not _is_frozen():
         return UpdateResult("refused", reason=DEV_RUN_REASON)
-    versions = Path(install_root) / VERSIONS_DIR
+    root = Path(install_root)
+    versions = root / VERSIONS_DIR
     try:
         release = fetch_latest(transport)
         if not is_newer(release.version, current_version):
@@ -569,7 +710,9 @@ def check_and_stage(
         if held is not None and not is_newer(release.version, held):
             reason = HELD_REASON.format(version=release.version)
             return UpdateResult("refused", version=release.version, reason=reason)
-        install_update(release, current_version, transport, Path(install_root), shortcut_writers)
+        if read_pending(root) == release.version and exe_for(root, release.version).is_file():
+            return UpdateResult("update_staged", version=release.version)
+        install_update(release, current_version, transport, root, public_key=public_key, announce=announce)
         _clear_skip_marker(versions)
     except Offline as exc:
         return UpdateResult("offline", reason=str(exc))
@@ -581,15 +724,83 @@ def check_and_stage(
     return UpdateResult("update_staged", version=release.version)
 
 
+def launch_after_update(exe: Path, old_version: str, *, popen: Callable[..., object] = subprocess.Popen) -> None:
+    """Start a staged exe with --after-update <old_version>, detached and with no shell. Raises Refused when it cannot.
+
+    The caller then quits this app. The new process finishes the update at its start (finish_update_at_start).
+    """
+    exe = Path(exe)
+    parse_version(old_version)
+    if not exe.is_file():
+        raise Refused("The new version is missing. It will be staged again at the next check.")
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        popen(
+            [str(exe), AFTER_UPDATE_FLAG, old_version],
+            cwd=str(exe.parent),
+            creationflags=flags,
+            close_fds=True,
+            shell=False,
+        )
+    except OSError:
+        raise Refused("The new version could not be started. The update is still ready; try again.") from None
+
+
+def _is_version_exe(install_root: Path, exe: Path, version: str) -> bool:
+    try:
+        return os.path.normcase(str(exe.resolve())) == os.path.normcase(str(exe_for(install_root, version).resolve()))
+    except OSError:
+        return False
+
+
+def finish_update_at_start(
+    install_root: Path | str,
+    running_exe: Path | str,
+    running_version: str,
+    shortcut_writers: Sequence[ShortcutWriter],
+) -> bool:
+    """Run at each real start of an installed exe. Return True when it finished a staged update.
+
+    A start of the staged version (after Restart to update) points the shortcuts at it, makes it current and clears
+    pending.json. A start with no pending update points the shortcuts at the running version, when that version is not
+    older than the current one. A start of any other version changes nothing. A shortcut that cannot be written keeps
+    the pending update for the next start, and nothing is raised.
+    """
+    root = Path(install_root)
+    exe = Path(running_exe)
+    try:
+        parse_version(running_version)
+    except Refused:
+        return False
+    if not _is_version_exe(root, exe, running_version):
+        return False
+    pending = read_pending(root)
+    current = read_current(root)
+    if pending is not None and pending != running_version:
+        return False  # another version is staged; the window offers the restart
+    if pending is None and (current == running_version or (current is not None and is_newer(current, running_version))):
+        return False  # the shortcuts already follow this version, or they point at a newer one that must not be undone
+    fallback = exe_for(root, current) if current is not None else exe
+    try:
+        _point_shortcuts(shortcut_writers, exe, fallback)
+        write_current(root, running_version)
+    except (_RepointFailed, OSError):
+        return False
+    if pending is None:
+        return False
+    clear_pending(root)
+    return True
+
+
 # --- the notify-only check ------------------------------------------------------------------------------
 
-# check_for_update is the update check. Its four results are below. Offline and Refused are the exception classes
+# check_for_update is the notify-only check. Its four results are below. Offline and Refused are the exception classes
 # above, returned rather than raised, so a caller can match them by the same names.
 
 
 @dataclass(frozen=True)
 class UpdateNotice:
-    """A newer release is published. The user opens release_page_url. Nothing has been downloaded."""
+    """A newer release is published. Nothing has been downloaded."""
 
     version: str
     release_page_url: str

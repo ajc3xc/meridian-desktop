@@ -74,6 +74,10 @@ class Settings:
     # JSON and downloads nothing. On by default. save() writes this key only when it is off, so a file that
     # never turned the check off is written exactly as before.
     check_updates: bool = True
+    # Install new releases in the background, and check for them once at launch and every six hours after. On by
+    # default. The Settings tab shows it as a checkbox. save() writes this key only when it is off. A check runs only
+    # when both this and check_updates are on.
+    auto_update: bool = True
     # The owner-confirmed runner controls (docs/local-trust-contract.md). save() writes a key only when it differs from
     # its default, so a file that keeps the defaults keeps the keys it had before. tunnel_control_enabled switches the
     # tunnel start, stop and restart buttons, and defaults to true by owner decision on 2026-10-23 (amendment F). Each
@@ -214,6 +218,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("check_updates must be true or false; using true")
 
+    # auto_update: an absent key means on, with no warning. Only a real true or false is accepted.
+    if "auto_update" in data:
+        value = data["auto_update"]
+        if isinstance(value, bool):
+            values["auto_update"] = value
+        else:
+            problems.append("auto_update must be true or false; using true")
+
     # The runner control switches: an absent key means its default in CONTROL_FLAG_DEFAULTS (tunnel on, the two launch
     # switches off), with no warning. Only a real true or false is accepted. Any other value is read as false, never as
     # the default, so a malformed tunnel switch fails closed instead of turning the tunnel buttons on.
@@ -318,6 +330,9 @@ class SettingsStore:
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
+        if settings.auto_update:
+            # On is the default, so a file that never turned automatic updates off has no such key.
+            del data["auto_update"]
         for key in CONTROL_FLAG_KEYS:
             if data[key] == CONTROL_FLAG_DEFAULTS[key]:
                 # The default is never written, so a file that keeps the defaults has no such key.

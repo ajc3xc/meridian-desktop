@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel
 
 from meridian_desktop import install as inst
+from meridian_desktop import updater
 from meridian_desktop.settings_store import DEFAULT_LOCAL_URL, Settings, SettingsStore
 from meridian_desktop.ui import app as ui_app
 from meridian_desktop.ui import first_run as fr
@@ -148,9 +149,11 @@ def test_a_non_boolean_autostart_loads_as_off_with_a_warning(tmp_path, bad):
 
 def test_a_saved_choice_writes_the_run_entry_for_the_installed_exe(tmp_path):
     env = _env(tmp_path)
-    installed = inst.install_dir(env) / inst.EXE_NAME
+    # The installed copy is the version that current.json names, under versions\ (the layout install.py writes).
+    installed = inst.install_dir(env) / "versions" / "0.2.0" / inst.EXE_NAME
     installed.parent.mkdir(parents=True)
     installed.write_bytes(b"MZ-fake")
+    updater.write_current(inst.install_dir(env), "0.2.0")
     registry = FakeRegistry()
     chosen = Settings(autostart=True, local_url="http://127.0.0.1:7100")
 
