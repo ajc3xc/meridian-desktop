@@ -144,9 +144,13 @@ class RunnerSection(QWidget):
 
     @Slot()
     def _on_core_changed(self) -> None:
-        """The core setup changed. The switches are read again, and the local state too once the search has finished."""
+        """The core setup changed. The switches are read again, and the local state too once the search has finished.
+
+        The state is read whether or not this block is shown. The search at start finishes while Settings is still hidden,
+        so this read is what puts the local server's answer on the line before the owner opens Settings.
+        """
         self.refresh_flags()
-        if not self.isVisible() or self._actions.locating:
+        if self._actions.locating:
             return
         self._reading = False
         self._generation += 1

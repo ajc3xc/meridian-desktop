@@ -13,7 +13,7 @@ from _fakes import MemoryKeyring
 from meridian_desktop import local_client
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
-from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, MainWindow
+from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, STATUS_MESSAGE, MainWindow
 from meridian_desktop.ui.projects_tab import default_sources
 from meridian_desktop.zotero_client import API_NOT_RUNNING, NOT_RUNNING_MESSAGE, ApiCheck, ZoteroStatus
 
@@ -96,6 +96,20 @@ def test_window_cannot_shrink_below_the_tab_bar(qtbot, settings_path):
     bar = window.tabs.tabBar()
     assert bar.sizeHint().width() <= bar.width()
     assert _clipped_tabs(bar) == []
+
+
+def test_the_home_status_line_shows_on_home_and_does_not_stick_on_another_tab(qtbot, settings_path):
+    window = MainWindow(SettingsStore(settings_path), data_sources=_offline_sources())
+    qtbot.addWidget(window)
+    names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    home, settings = names.index("Home"), names.index("Settings")
+    assert window.statusBar().currentMessage() == STATUS_MESSAGE
+
+    window.tabs.setCurrentIndex(settings)
+    assert window.statusBar().currentMessage() == "", "Home's line is cleared on another tab"
+
+    window.tabs.setCurrentIndex(home)
+    assert window.statusBar().currentMessage() == STATUS_MESSAGE
 
 
 def test_home_zotero_card_checks_on_boot_and_keeps_the_window_size(qtbot, settings_path):

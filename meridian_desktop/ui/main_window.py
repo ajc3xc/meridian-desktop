@@ -276,6 +276,7 @@ class MainWindow(QMainWindow):
             if name == "Home":
                 home = HomeTab(self._home_deps(), parent=self.tabs)
                 home.settingsRequested.connect(self._show_settings)
+                self._home_page = home
                 page: QWidget = home
             elif name == "Projects":
                 self._projects = ProjectsTab(self._store, self._sources, parent=self.tabs)
@@ -306,6 +307,7 @@ class MainWindow(QMainWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
@@ -418,6 +420,19 @@ class MainWindow(QMainWindow):
     def _show_settings(self) -> None:
         """Switch to the Settings tab. Home's Settings buttons use this."""
         self.tabs.setCurrentWidget(self._settings_page)
+
+    @Slot(int)
+    def _on_tab_changed(self, index: int) -> None:
+        """Home's checks line is Home's own. It shows while Home is the tab, and any other tab clears it, so it never sticks.
+
+        A line another part of the window set, such as a launch note or an update notice, is left alone when Home is chosen.
+        """
+        status = self.statusBar()
+        if self.tabs.widget(index) is self._home_page:
+            if not status.currentMessage():
+                status.showMessage(STATUS_MESSAGE)
+        elif status.currentMessage() == STATUS_MESSAGE:
+            status.clearMessage()
 
     # ----------------------------------------------------------- mode
 

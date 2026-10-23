@@ -375,6 +375,36 @@ def test_the_local_block_turns_on_when_the_search_finds_the_core(qtbot, settings
     assert SettingsStore(settings_path).load().settings.core_checkout == str(checkout)
 
 
+def test_a_search_at_start_puts_the_local_answer_on_the_line_while_settings_is_hidden(qtbot, settings_path, tmp_path):
+    """The search at start finishes while Settings is hidden. The local line still shows the runner's answer, not the default."""
+    checkout = tmp_path / "Meridian" / "repository"
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"MZ")
+    spawn = Spawn(
+        subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps({"scope": "local", "child": {"state": "running", "pid": 3}}).encode(),
+        ),
+    )
+    actions = RunnerActions(
+        SettingsStore(settings_path),
+        make_control=lambda python_, cwd: RunnerControl(
+            python_, cwd, spawn=spawn, log_path=settings_path.parent / "log.txt", clock=lambda: _when(),
+        ),
+        confirm=Confirm(),
+        locate=lambda store: LocatedCore(FOUND, str(checkout), str(python), SOURCE_SEARCHED),
+    )
+    section = RunnerSection(actions)
+    qtbot.addWidget(section)
+    state = section.findChild(QLabel, "runner-local-state")
+    assert not section.isVisible()
+
+    actions.find_core()
+
+    qtbot.waitUntil(lambda: state.text() not in (NOT_CHECKED_TEXT, CHECKING_TEXT), timeout=5000)
+    assert state.text() == "The local server is running."
+    assert len(spawn.calls) == 1 and spawn.calls[0][3] == "status"
+
+
 def test_a_cancelled_choice_in_the_local_block_leaves_the_controls_off(qtbot, settings_path):
     actions = _core_actions(
         settings_path,
