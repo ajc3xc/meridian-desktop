@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -346,32 +347,40 @@ class ClientSetupSection(QWidget):
         finder_row.addWidget(self._choose_core)
         finder_row.addStretch(1)
         layout.addLayout(finder_row)
+        # The two path rows share one grid: the caption column takes the width of its longest caption, and the path box
+        # takes the rest. A caption never wraps, so "Meridian core checkout:" is always whole.
+        paths = QGridLayout()
+        paths.setContentsMargins(0, 0, 0, 0)
+        paths.setHorizontalSpacing(8)
+        paths.setVerticalSpacing(6)
+        paths.setColumnStretch(1, 1)
 
         self._checkout_input = QLineEdit(self)
         self._checkout_input.setObjectName("client-setup-checkout")
         self._browse_checkout = _button(self, "client-setup-browse-checkout", BROWSE_TEXT)
         self._save_checkout = _button(self, "client-setup-save-checkout", SAVE_TEXT)
-        layout.addLayout(
-            self._path_row(
-                _label(self, "client-setup-checkout-label", CHECKOUT_LABEL),
-                self._checkout_input,
-                self._browse_checkout,
-                self._save_checkout,
-            )
+        self._path_row(
+            paths,
+            0,
+            _label(self, "client-setup-checkout-label", CHECKOUT_LABEL),
+            self._checkout_input,
+            self._browse_checkout,
+            self._save_checkout,
         )
 
         self._python_input = QLineEdit(self)
         self._python_input.setObjectName("client-setup-python")
         self._browse_python = _button(self, "client-setup-browse-python", BROWSE_TEXT)
         self._save_python = _button(self, "client-setup-save-python", SAVE_TEXT)
-        layout.addLayout(
-            self._path_row(
-                _label(self, "client-setup-python-label", PYTHON_LABEL),
-                self._python_input,
-                self._browse_python,
-                self._save_python,
-            )
+        self._path_row(
+            paths,
+            1,
+            _label(self, "client-setup-python-label", PYTHON_LABEL),
+            self._python_input,
+            self._browse_python,
+            self._save_python,
         )
+        layout.addLayout(paths)
 
         self._settings_message = _label(self, "client-setup-settings-message")
         _set_message(self._settings_message, "")
@@ -401,13 +410,15 @@ class ClientSetupSection(QWidget):
         self._find_again.clicked.connect(self._on_find_again_clicked)
         self._choose_core.clicked.connect(self._on_choose_core_clicked)
 
-    def _path_row(self, label: QLabel, line: QLineEdit, browse: QPushButton, save: QPushButton) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.addWidget(label)
-        row.addWidget(line, 1)
-        row.addWidget(browse)
-        row.addWidget(save)
-        return row
+    def _path_row(
+        self, grid: QGridLayout, row: int, label: QLabel, line: QLineEdit, browse: QPushButton, save: QPushButton
+    ) -> None:
+        """One path row in the shared grid: caption, path box, Browse and Save. The caption never wraps."""
+        label.setWordWrap(False)
+        grid.addWidget(label, row, 0)
+        grid.addWidget(line, row, 1)
+        grid.addWidget(browse, row, 2)
+        grid.addWidget(save, row, 3)
 
     def _client_block(self, client: str, label: str) -> QVBoxLayout:
         block = QVBoxLayout()
