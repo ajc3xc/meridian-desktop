@@ -1,95 +1,143 @@
-"""Create the Meridian release signing key once, and print its public key.
+#!/usr/bin/env python3
+"""Create the Meridian Desktop release signing seed once, and print its public key.
 
-The private seed is 32 random bytes, stored as base64 text at
+    python packaging/make_release_key.py                   the default seed path
+    python packaging/make_release_key.py --seed-path FILE  another path (tests, rotation drills)
 
-    %LOCALAPPDATA%\\meridian-release-keys\\release-ed25519.key
-
-outside the repository. It is created only when that file is absent. An existing seed is never replaced, so a
-second run prints the same public key again. Only the public key is printed, on one line, and the seed is never
-printed, logged or written anywhere else. Copy the printed key into meridian_desktop/release_key.py.
-
-Run from the repository root:  python packaging/make_release_key.py
+The seed is 32 random bytes, stored as base64 in %LOCALAPPDATA%\\meridian-release-keys\\release-ed25519.key.
+The file is created only when it does not exist. An existing seed is never overwritten. The seed is never
+printed or logged. The only line on stdout is the base64 public key. Paste it into RELEASE_PUBLIC_KEY_B64 in
+meridian_desktop/release_key.py and commit that file. Keep the seed out of the repository and out of backups
+that other people can read.
 """
 
 from __future__ import annotations
 
+import argparse
 import base64
 import binascii
+import importlib.util
 import os
+import secrets
 import sys
-from collections.abc import Mapping
 from pathlib import Path
+from types import ModuleType
 
 REPO = Path(__file__).resolve().parents[1]
 KEY_DIR_NAME = "meridian-release-keys"
-KEY_FILE_NAME = "release-ed25519.key"
+SEED_FILE_NAME = "release-ed25519.key"
 SEED_BYTES = 32
+_BAD_SEED = "the release signing key is not base64 of 32 bytes. Its contents are not printed."
 
 
-class ReleaseKeyError(Exception):
-    """The release key cannot be read or created. The message names the step and never holds the seed."""
+class SeedError(RuntimeError):
+    """The seed cannot be used. The message never includes the seed."""
 
 
-def key_path(env: Mapping[str, str] | None = None) -> Path:
-    """Where the private seed lives. Only %LOCALAPPDATA% is used, so the seed is never inside the repository."""
-    env = os.environ if env is None else env
-    local_app_data = env.get("LOCALAPPDATA")
-    if not local_app_data:
-        raise ReleaseKeyError("LOCALAPPDATA is not set, so there is no place to keep the release key")
-    return Path(local_app_data) / KEY_DIR_NAME / KEY_FILE_NAME
+def _load_ed25519() -> ModuleType:
+    """Load meridian_desktop/ed25519.py by file path, as the publisher loads its packaging siblings."""
+    name = "_meridian_ed25519"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, REPO / "meridian_desktop" / "ed25519.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _read_seed(path: Path) -> bytes:
+ed25519 = _load_ed25519()
+
+
+def default_seed_path() -> Path:
+    """%LOCALAPPDATA%\\meridian-release-keys\\release-ed25519.key, outside the repository."""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / KEY_DIR_NAME / SEED_FILE_NAME
+
+
+def encode_seed(seed: bytes) -> str:
+    return base64.b64encode(seed).decode("ascii")
+
+
+def decode_seed_text(text: str) -> bytes:
+    """The seed in base64 text. Raises SeedError, without echoing the text, unless it is 32 bytes."""
     try:
-        text = path.read_text(encoding="ascii").strip()
-        seed = base64.b64decode(text, validate=True)
-    except (OSError, UnicodeDecodeError, binascii.Error, ValueError):
-        raise ReleaseKeyError(f"the release key file at {path} cannot be read; it is not replaced") from None
+        seed = base64.b64decode(text.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        raise SeedError(_BAD_SEED) from None
     if len(seed) != SEED_BYTES:
-        raise ReleaseKeyError(f"the release key file at {path} does not hold a 32-byte seed; it is not replaced")
+        raise SeedError(_BAD_SEED)
     return seed
 
 
-def _create_seed(path: Path) -> bytes:
-    """Write a new random seed with exclusive create, so an existing file is never overwritten."""
-    seed = os.urandom(SEED_BYTES)
+def read_seed(path: Path) -> bytes:
+    """The 32-byte seed stored at path. Raises SeedError when it is missing or unusable."""
+    try:
+        text = path.read_text(encoding="ascii")
+    except FileNotFoundError:
+        raise SeedError(
+            "the release signing key is missing: %LOCALAPPDATA%\\meridian-release-keys\\release-ed25519.key. "
+            "Create it once with python packaging/make_release_key.py, then run again."
+        ) from None
+    except (OSError, ValueError):
+        raise SeedError(
+            "the release signing key could not be read. Its contents are not printed. Check the file, then run again."
+        ) from None
+    return decode_seed_text(text)
+
+
+def create_seed(path: Path) -> bool:
+    """Write a new random seed to path only if nothing is there. True when the file was created."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = base64.b64encode(seed).decode("ascii") + "\n"
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        return _read_seed(path)  # created by another run between the check and this write
-    except OSError:
-        raise ReleaseKeyError(f"the release key file at {path} could not be created") from None
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
-        handle.write(text)
-    return seed
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(encode_seed(secrets.token_bytes(SEED_BYTES)) + "\n")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return True
 
 
-def load_or_create_seed(path: Path) -> bytes:
-    """Return the seed at path, creating it first when the file is absent."""
-    if path.exists():
-        return _read_seed(path)
-    return _create_seed(path)
-
-
-def public_key_text(env: Mapping[str, str] | None = None) -> str:
-    """The base64 public key for the release key, creating the seed first if it is absent."""
-    from meridian_desktop import ed25519
-
-    seed = load_or_create_seed(key_path(env))
+def public_key_b64(seed: bytes) -> str:
     return base64.b64encode(ed25519.public_key(seed)).decode("ascii")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Create the release signing seed once, then print its public key. The seed is never printed."
+    )
+    parser.add_argument(
+        "--seed-path",
+        type=Path,
+        default=None,
+        help="seed file to create or read (default: %%LOCALAPPDATA%%\\meridian-release-keys\\release-ed25519.key)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    path = args.seed_path or default_seed_path()
     try:
-        print(public_key_text())
-    except ReleaseKeyError as exc:
-        print(f"make_release_key: {exc}", file=sys.stderr)
+        created = create_seed(path)
+        seed = read_seed(path)
+    except SeedError as exc:
+        print(f"release key: {exc}", file=sys.stderr)
         return 1
+    except OSError:
+        print("release key: the seed file could not be created or read. Its contents are not printed.", file=sys.stderr)
+        return 1
+    if created:
+        print("release key: created a new seed. It is not printed; keep it outside the repository.", file=sys.stderr)
+    else:
+        print("release key: the seed already exists and was not changed.", file=sys.stderr)
+    print(public_key_b64(seed))
     return 0
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(REPO))
     raise SystemExit(main())

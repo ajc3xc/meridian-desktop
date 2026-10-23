@@ -122,10 +122,49 @@ def test_version_comes_from_the_workspace_table_of_pixi_toml(tmp_path):
     assert re.fullmatch(r"\d+\.\d+\.\d+.*", mr.read_version(REPO / "pixi.toml"))
 
 
-@pytest.mark.parametrize("version", ["latest", "1.2", "", "1.2.3 beta"])
+@pytest.mark.parametrize("version", ["latest", "1.2.3-rc1", "1.2.3+build", "v1.2.3", "1.2.3 beta", ""])
 def test_a_version_that_is_not_a_plain_number_is_refused(tmp_path, version):
     with pytest.raises(mr.ReleaseError, match="plain number"):
         mr.read_version(_pixi(tmp_path, version))
+
+
+@pytest.mark.parametrize("version", ["1.2", "7", "10.20.30"])
+def test_plain_dotted_integers_are_accepted_as_the_updater_accepts_them(tmp_path, version):
+    """P8: the same rule as meridian_desktop/updater.py _VERSION: [0-9]+ parts joined by dots."""
+    assert mr.read_version(_pixi(tmp_path, version)) == version
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_a_bundle_holding_a_link_is_refused_before_anything_is_zipped(tmp_path, kind):
+    """P7: a symbolic link inside the bundle could point outside it, so the build stops before zipping."""
+    bundle = _bundle(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = bundle / f"linked-{kind}"
+    try:
+        link.symlink_to(outside / "file.txt" if kind == "file" else outside, target_is_directory=kind == "directory")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symbolic links")
+    out = tmp_path / "release"
+    with pytest.raises(mr.ReleaseError, match=f"holds a link, linked-{kind}") as caught:
+        mr.build_release(bundle, SCRIPTS, out, "0.1.0")
+    assert "Nothing was zipped" in str(caught.value)
+    assert not out.exists()
+
+
+def test_a_link_is_refused_even_where_this_machine_cannot_create_one(tmp_path, monkeypatch):
+    """P7 without a real link: the detection hook reports one, and the build must still stop before zipping."""
+    bundle = _bundle(tmp_path)
+    monkeypatch.setattr(mr, "_is_link", lambda path: path.name == "MeridianDesktop.exe")
+    out = tmp_path / "release"
+    with pytest.raises(mr.ReleaseError, match="holds a link, MeridianDesktop.exe"):
+        mr.build_release(bundle, SCRIPTS, out, "0.1.0")
+    assert not out.exists()
+
+
+def test_a_bundle_without_links_is_still_zipped(tmp_path):
+    result = mr.build_release(_bundle(tmp_path), SCRIPTS, tmp_path / "release", "0.1.0")
+    assert result.path.is_file()
 
 
 def test_main_names_the_zip_after_the_version_in_pixi_toml(tmp_path, capsys):
