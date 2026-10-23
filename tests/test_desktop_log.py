@@ -311,7 +311,9 @@ class _FakeQApp:
 class _FakeWindow:
     events: list[str] = []
 
-    def __init__(self, store, update_transport=None):
+    def __init__(self, store, update_transport=None, update_root=None, record_apps_entry=None, runner_actions=None):
+        # The app passes the update folder, the Apps entry writer and the shared runner controls as well. The fake
+        # takes them and ignores them, so the start-order assertions are unchanged.
         _FakeWindow.events.append("window")
 
     def show(self):
