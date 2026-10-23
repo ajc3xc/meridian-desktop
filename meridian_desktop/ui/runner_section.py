@@ -33,7 +33,7 @@ from meridian_desktop.zotero_client import command_line
 HEADING_TEXT = "Local server and launch-time starts"
 NOT_CHECKED_TEXT = "Local server: not checked yet. It is checked when this tab is shown."
 CHECKING_TEXT = "Local server: checking..."
-NO_CORE_TEXT = "Local server: not checked. " + CORE_NOT_SET_TEXT
+NO_CORE_TEXT = "Local server: not checked, because the Meridian core is not set up on this computer."
 STATUS_FAILED_TEXT = "Local server: could not be checked. It is not shown as running."
 ZOTERO_CHECK_TEXT = "Start Zotero when the desktop opens, only when nothing answers on 127.0.0.1:23119"
 LOCAL_CHECK_TEXT = "Start the local server when the desktop opens, only when the runner reports it not running"
@@ -88,6 +88,7 @@ class RunnerSection(QWidget):
 
         self._controls = ScopeControls(SCOPE_LOCAL, actions, local_gate, prefix="local", parent=self)
         self._controls.actionFinished.connect(self._after_local_action)
+        actions.coreChanged.connect(self._on_core_changed)
         layout.addWidget(self._controls)
 
         self._zotero_box = QCheckBox(ZOTERO_CHECK_TEXT, self)
@@ -139,6 +140,20 @@ class RunnerSection(QWidget):
     def _after_local_action(self) -> None:
         """After a local Start, Stop or Restart finishes, read the state again. An older read's result is dropped."""
         self._reading = False
+        self.refresh_local_state()
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """The core setup changed. The switches are read again, and the local state too once the search has finished.
+
+        The state is read whether or not this block is shown. The search at start finishes while Settings is still hidden,
+        so this read is what puts the local server's answer on the line before the owner opens Settings.
+        """
+        self.refresh_flags()
+        if self._actions.locating:
+            return
+        self._reading = False
+        self._generation += 1
         self.refresh_local_state()
 
     @Slot(object)

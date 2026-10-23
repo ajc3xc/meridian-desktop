@@ -579,7 +579,7 @@ def test_a_stopped_tunnel_is_configured_but_not_live_and_says_how_to_start_it_by
     row = tunnel_row(status)
     assert (row.configured, row.live) == (YES, NO)
     assert row.status == STATUS_NOT_LIVE
-    assert tunnel_status.START_COMMAND in row.detail
+    assert tunnel_status.START_HINT in row.detail
     assert "codebase-memory" in row.detail
 
 
@@ -602,7 +602,7 @@ def test_a_tunnel_the_runner_has_no_record_of_is_not_checked_and_not_running(tmp
     assert (row.configured, row.live) == (NOT_STARTED, NO)
     assert row.cells()[2:5] == (STATUS_NOT_RUNNING, "Not checked", "No")
     assert row.status == "Not running"
-    assert tunnel_status.START_COMMAND in row.detail
+    assert tunnel_status.START_HINT in row.detail
     assert "no record of a tunnel process" in row.detail
 
 

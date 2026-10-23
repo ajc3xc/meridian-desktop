@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -35,6 +37,12 @@ _URL_KEYS = ("hosted_url", "local_url", "engine_url")
 CORE_CHECKOUT_KEY = "core_checkout"
 CORE_PYTHON_KEY = "core_python"
 CORE_KEYS = (CORE_CHECKOUT_KEY, CORE_PYTHON_KEY)
+# True when the locator (meridian_desktop/core_locator.py) found that core path, and the owner did not choose it. The
+# locator may replace an automatically found path, and never a path the owner saved by hand. Absent means false.
+CORE_CHECKOUT_AUTO_KEY = "core_checkout_auto"
+CORE_PYTHON_AUTO_KEY = "core_python_auto"
+CORE_AUTO_FLAGS = {CORE_CHECKOUT_KEY: CORE_CHECKOUT_AUTO_KEY, CORE_PYTHON_KEY: CORE_PYTHON_AUTO_KEY}
+CORE_AUTO_KEYS = tuple(CORE_AUTO_FLAGS.values())
 
 # The mode a run starts in when the file names none and a hosted token is saved (owner decision, 2026-10-23).
 HOSTED_MODE = "hosted"
@@ -74,6 +82,10 @@ class Settings:
     # JSON and downloads nothing. On by default. save() writes this key only when it is off, so a file that
     # never turned the check off is written exactly as before.
     check_updates: bool = True
+    # Install new releases in the background, and check for them once at launch and every six hours after. On by
+    # default. The Settings tab shows it as a checkbox. save() writes this key only when it is off. A check runs only
+    # when both this and check_updates are on.
+    auto_update: bool = True
     # The owner-confirmed runner controls (docs/local-trust-contract.md). save() writes a key only when it differs from
     # its default, so a file that keeps the defaults keeps the keys it had before. tunnel_control_enabled switches the
     # tunnel start, stop and restart buttons, and defaults to true by owner decision on 2026-10-23 (amendment F). Each
@@ -86,6 +98,13 @@ class Settings:
     confirmed_core_python: str = ""
     confirmed_core_checkout: str = ""
     confirmed_zotero_exe: str = ""
+    # Whether the core checkout and Python were found by the locator rather than chosen by the owner. False by default,
+    # and save() writes each one only when it is True.
+    core_checkout_auto: bool = False
+    core_python_auto: bool = False
+    # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
+    # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
+    key_names: tuple[str, ...] = ()
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -206,6 +225,23 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append(f"{key} must be a path as text or empty; using empty")
 
+    # core_checkout_auto and core_python_auto: an absent key means the owner chose the path (false), with no warning.
+    for key in CORE_AUTO_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be true or false; using false")
+    # key_names: an absent key means no saved names, with no warning. Only a list of non-empty text is accepted.
+    if "key_names" in data:
+        value = data["key_names"]
+        if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+            values["key_names"] = tuple(item.strip() for item in value)
+        else:
+            problems.append("key_names must be a list of names; using none")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -213,6 +249,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["check_updates"] = value
         else:
             problems.append("check_updates must be true or false; using true")
+
+    # auto_update: an absent key means on, with no warning. Only a real true or false is accepted.
+    if "auto_update" in data:
+        value = data["auto_update"]
+        if isinstance(value, bool):
+            values["auto_update"] = value
+        else:
+            problems.append("auto_update must be true or false; using true")
 
     # The runner control switches: an absent key means its default in CONTROL_FLAG_DEFAULTS (tunnel on, the two launch
     # switches off), with no warning. Only a real true or false is accepted. Any other value is read as false, never as
@@ -228,6 +272,26 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             problems.append(f"{key} must be true or false; using false")
 
     return replace(Settings(), **values), problems
+
+
+REPLACE_ATTEMPTS = 20
+REPLACE_WAIT_SECONDS = 0.05
+
+
+def _replace_with_retry(source: str, target: Path) -> None:
+    """Replace ``target`` with ``source``, waiting out a brief Windows file lock.
+
+    On Windows a file another thread has open can refuse the replace for a moment. The write is retried for about a
+    second. Any other error, or a lock that outlasts the retries, is raised to the caller unchanged.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_WAIT_SECONDS)
 
 
 class SettingsStore:
@@ -315,9 +379,19 @@ class SettingsStore:
             if not data[key]:
                 # "Not set" is the default, so a file that never set a core path or a confirmed value has no such key.
                 del data[key]
+        for key in CORE_AUTO_KEYS:
+            if not data[key]:
+                # False is the default, so only a path the locator found carries its flag.
+                del data[key]
+        if not settings.key_names:
+            # No saved names is the default, so a file with no API keys has no such key.
+            del data["key_names"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
+        if settings.auto_update:
+            # On is the default, so a file that never turned automatic updates off has no such key.
+            del data["auto_update"]
         for key in CONTROL_FLAG_KEYS:
             if data[key] == CONTROL_FLAG_DEFAULTS[key]:
                 # The default is never written, so a file that keeps the defaults has no such key.
@@ -329,13 +403,27 @@ class SettingsStore:
                 fh.write(payload)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp_name, self._path)
+            _replace_with_retry(tmp_name, self._path)
         except BaseException:
             try:
                 os.unlink(tmp_name)
             except FileNotFoundError:
                 pass
             raise
+
+    def keep_unreadable_copy(self) -> None:
+        """Copy the settings file aside before a write that would replace it, when the file did not load cleanly.
+
+        The copy is <name>.unreadable.bak beside the file. Nothing is copied for a file that loads cleanly or does not
+        exist. Never raises: a failed copy must not stop the write the owner asked for.
+        """
+        if self.load().warning is None:
+            return
+        try:
+            if self._path.is_file():
+                shutil.copyfile(self._path, self._path.with_name(self._path.name + ".unreadable.bak"))
+        except OSError:
+            return
 
     def set_mode(self, mode: str) -> Settings:
         if mode not in VALID_MODES:
@@ -358,7 +446,7 @@ class SettingsStore:
             raise ValueError(problem)
         updated = replace(
             self.load().settings,
-            **{key: text},
+            **{key: text, CORE_AUTO_FLAGS[key]: False},
             zotero_autostart=False,
             local_server_autostart=False,
         )

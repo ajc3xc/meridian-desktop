@@ -627,7 +627,9 @@ def test_the_section_is_wired_into_the_settings_tab(qtbot, settings_path):
     section = tab.findChild(ClientSetupSection, "client-setup-section")
 
     assert section is not None
-    assert section.parent() is tab
+    # The section sits in the Client setup group, which sits on the tab, so it is inside the tab
+    assert tab.isAncestorOf(section)
+    assert tab.findChild(QWidget, "settings-group-client-setup") is not None
 
 
 def test_every_label_in_the_section_is_selectable(qtbot, settings_path, tmp_path):

@@ -21,6 +21,10 @@ from meridian_desktop.ui.runpod_panel import (
     KEY_MISSING_TEXT,
     KEY_STORED_TEXT,
     POD_COLUMNS,
+    REMOVE_KEY_BODY,
+    REMOVE_KEY_CANCELLED_TEXT,
+    REMOVE_KEY_FAILED_TEXT,
+    REMOVE_KEY_TITLE,
     RunPodPanel,
 )
 
@@ -125,6 +129,18 @@ class FakeClient:
         return copy.deepcopy(self.listing)
 
 
+class FakeConfirm:
+    """The Yes or No stand-in. It records each question and returns the answer it was given."""
+
+    def __init__(self, answer=True):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, parent, title, text):
+        self.calls.append((title, text))
+        return self.answer
+
+
 def wait_idle(qtbot, panel):
     qtbot.waitUntil(lambda: not panel.busy, timeout=5000)
 
@@ -178,9 +194,11 @@ def client():
 
 @pytest.fixture
 def make_panel(qtbot, settings_path):
-    def build(store, client):
+    def build(store, client, confirm=None):
         SettingsStore(settings_path).save(Settings(local_url=LOCAL_URL))
-        panel = RunPodPanel(SettingsStore(settings_path), store, client)
+        # Every panel in these tests gets a Yes-answering stand-in unless a test passes its own, so no dialog can open.
+        answer = FakeConfirm() if confirm is None else confirm
+        panel = RunPodPanel(SettingsStore(settings_path), store, client, confirm=answer)
         qtbot.addWidget(panel)
         wait_idle(qtbot, panel)
         return panel
@@ -262,19 +280,61 @@ def test_save_failure_shows_the_store_message_and_keeps_the_field(qtbot, make_pa
 # ----------------------------------------------------------------- remove
 
 
-def test_remove_reports_that_the_key_was_removed(qtbot, make_panel, client):
+def test_remove_asks_first_and_removes_the_key_on_yes(qtbot, make_panel, client):
     store = FakeStore(FAKE_KEY)
-    panel = make_panel(store, client)
+    confirm = FakeConfirm(answer=True)
+    panel = make_panel(store, client, confirm)
     press(qtbot, panel, "runpod-remove-key")
+    assert confirm.calls == [(REMOVE_KEY_TITLE, REMOVE_KEY_BODY)], "the owner is asked once, before anything is deleted"
     assert store.value is None
     assert text_of(panel, "runpod-key-status") == KEY_MISSING_TEXT
     assert text_of(panel, "runpod-result") == "Key removed from the keychain."
+
+
+def test_remove_on_no_changes_nothing_and_makes_no_delete_call(qtbot, make_panel, client):
+    store = FakeStore(FAKE_KEY)
+    confirm = FakeConfirm(answer=False)
+    panel = make_panel(store, client, confirm)
+    press(qtbot, panel, "runpod-remove-key")
+    assert len(confirm.calls) == 1
+    assert "delete" not in store.calls, "the keychain is not touched after a No"
+    assert store.value == FAKE_KEY
+    assert text_of(panel, "runpod-key-status") == KEY_STORED_TEXT
+    assert text_of(panel, "runpod-result") == REMOVE_KEY_CANCELLED_TEXT
+    assert FAKE_KEY not in all_text(panel)
+
+
+def test_remove_failure_from_the_disk_shows_one_plain_line_and_keeps_the_key(qtbot, make_panel, client):
+    store = FakeStore(FAKE_KEY)
+    panel = make_panel(store, client)
+    store.failure = OSError("C:\\Users\\example\\keyring\\secret.db is locked")
+    press(qtbot, panel, "runpod-remove-key")
+    assert text_of(panel, "runpod-result") == REMOVE_KEY_FAILED_TEXT
+    assert store.value == FAKE_KEY
+    assert "C:\\Users" not in all_text(panel), "the system text of the error never reaches the panel"
 
 
 def test_remove_reports_when_nothing_was_stored(qtbot, make_panel, store, client):
     panel = make_panel(store, client)
     press(qtbot, panel, "runpod-remove-key")
     assert text_of(panel, "runpod-result") == "No key was stored, so nothing was removed."
+
+
+def test_an_empty_pod_list_shows_one_plain_line_and_no_empty_grid(qtbot, make_panel, store, client):
+    client.listing = {**client.listing, "pods": [], "pod_count": 0}
+    panel = make_panel(store, client)
+    grid = panel.findChild(QTableWidget, "runpod-pods")
+    assert grid.isHidden() and not panel.findChild(QLabel, "runpod-pods-empty").isHidden(), "before any listing"
+    press(qtbot, panel, "runpod-refresh-pods")
+    assert grid.isHidden()
+    assert text_of(panel, "runpod-pods-empty") == "Nothing here yet."
+
+
+def test_a_listing_with_pods_shows_the_grid_and_hides_the_plain_line(qtbot, make_panel, store, client):
+    panel = make_panel(store, client)
+    press(qtbot, panel, "runpod-refresh-pods")
+    assert not panel.findChild(QTableWidget, "runpod-pods").isHidden()
+    assert panel.findChild(QLabel, "runpod-pods-empty").isHidden()
 
 
 def test_remove_failure_shows_the_store_message(qtbot, make_panel, client):

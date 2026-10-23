@@ -12,11 +12,13 @@ import json
 import subprocess
 from pathlib import Path
 
-from PySide6.QtWidgets import QCheckBox, QLabel
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton
 
+from meridian_desktop.core_locator import FOUND, NOT_FOUND, SOURCE_SEARCHED, LocatedCore
 from meridian_desktop.runner_controls import RunnerControl, describe_command
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.ui.runner_actions import CHOOSE_CANCELLED_TEXT, RunnerActions
 from meridian_desktop.ui.runner_section import (
     CHECKING_TEXT,
     LOCAL_CANCELLED_TEXT,
@@ -323,3 +325,96 @@ def test_cancelling_either_switch_records_no_confirmed_value(qtbot, settings_pat
     assert saved.confirmed_zotero_exe == ""
     assert saved.confirmed_core_python == ""
     assert saved.confirmed_core_checkout == ""
+
+
+# ------------------------------------------------------------------ the local block follows the core search
+
+
+def _core_actions(settings_path, *, locate, choose_folder=lambda parent, start: ""):
+    """RunnerActions with a fake core search and folder chooser. Nothing starts a process or opens a dialog."""
+    return RunnerActions(
+        SettingsStore(settings_path),
+        make_control=lambda python, cwd: RunnerControl(
+            python, cwd, spawn=Spawn(), log_path=settings_path.parent / "log.txt", clock=lambda: _when(),
+        ),
+        confirm=Confirm(),
+        locate=locate,
+        choose_folder=choose_folder,
+    )
+
+
+def test_the_local_block_offers_the_choose_button_while_the_core_is_not_found_and_says_why(qtbot, settings_path):
+    actions = _core_actions(settings_path, locate=lambda store: LocatedCore(NOT_FOUND, reason="No folder."))
+    section = RunnerSection(actions)
+    qtbot.addWidget(section)
+
+    actions.find_core()
+    qtbot.waitUntil(lambda: actions.located is not None, timeout=5000)
+
+    assert section.findChild(QPushButton, "local-start").isEnabled() is False
+    fix = section.findChild(QPushButton, "local-fix")
+    assert fix.isVisibleTo(section) and fix.text() == "Choose the Meridian core folder"
+    assert "not found" in section.findChild(QLabel, "local-control-note").text()
+
+
+def test_the_local_block_turns_on_when_the_search_finds_the_core(qtbot, settings_path, tmp_path):
+    checkout = tmp_path / "Meridian" / "repository"
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"MZ")
+    actions = _core_actions(
+        settings_path,
+        locate=lambda store: LocatedCore(FOUND, str(checkout), str(python), SOURCE_SEARCHED),
+    )
+    section = RunnerSection(actions)
+    qtbot.addWidget(section)
+    assert section.findChild(QPushButton, "local-start").isEnabled() is False
+
+    actions.find_core()
+
+    qtbot.waitUntil(lambda: section.findChild(QPushButton, "local-start").isEnabled(), timeout=5000)
+    assert SettingsStore(settings_path).load().settings.core_checkout == str(checkout)
+
+
+def test_a_search_at_start_puts_the_local_answer_on_the_line_while_settings_is_hidden(qtbot, settings_path, tmp_path):
+    """The search at start finishes while Settings is hidden. The local line still shows the runner's answer, not the default."""
+    checkout = tmp_path / "Meridian" / "repository"
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"MZ")
+    spawn = Spawn(
+        subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps({"scope": "local", "child": {"state": "running", "pid": 3}}).encode(),
+        ),
+    )
+    actions = RunnerActions(
+        SettingsStore(settings_path),
+        make_control=lambda python_, cwd: RunnerControl(
+            python_, cwd, spawn=spawn, log_path=settings_path.parent / "log.txt", clock=lambda: _when(),
+        ),
+        confirm=Confirm(),
+        locate=lambda store: LocatedCore(FOUND, str(checkout), str(python), SOURCE_SEARCHED),
+    )
+    section = RunnerSection(actions)
+    qtbot.addWidget(section)
+    state = section.findChild(QLabel, "runner-local-state")
+    assert not section.isVisible()
+
+    actions.find_core()
+
+    qtbot.waitUntil(lambda: state.text() not in (NOT_CHECKED_TEXT, CHECKING_TEXT), timeout=5000)
+    assert state.text() == "The local server is running."
+    assert len(spawn.calls) == 1 and spawn.calls[0][3] == "status"
+
+
+def test_a_cancelled_choice_in_the_local_block_leaves_the_controls_off(qtbot, settings_path):
+    actions = _core_actions(
+        settings_path,
+        locate=lambda store: LocatedCore(NOT_FOUND, reason="No folder."),
+        choose_folder=lambda parent, start: "",
+    )
+    section = RunnerSection(actions)
+    qtbot.addWidget(section)
+
+    qtbot.mouseClick(section.findChild(QPushButton, "local-fix"), Qt.MouseButton.LeftButton)
+
+    assert section.findChild(QPushButton, "local-start").isEnabled() is False
+    assert section.findChild(QLabel, "local-control-result").text() == CHOOSE_CANCELLED_TEXT

@@ -17,7 +17,7 @@ label is PlainText, so a log line is never read as HTML. Labels and panes can be
 
 When a log is missing or empty, its pane says which process writes it and what to run to produce
 it. The desktop has no setting for the core's interpreter or runner scope, so the runner pane says
-the desktop cannot read the runner from here, and it gives the command to run by hand. It starts
+the desktop cannot read the runner from here, and it says to press Refresh again or check Settings. It starts
 no process.
 """
 
@@ -54,12 +54,10 @@ READING_TEXT = "reading..."
 FAILED_TEXT = "The {} check failed unexpectedly ({})."
 NO_RESULT = "NoResult"
 
-# The commands the user runs by hand, in the Meridian core folder. The desktop starts none of them.
-TUNNEL_COMMAND = "pixi run python -m meridian --tunnel"
-RUNNER_START_COMMAND = (
-    "pixi run python -m meridian.local_runner start --scope tunnel -- python -m meridian --tunnel"
-)
-RUNNER_TAIL_COMMAND = "pixi run python -m meridian.local_runner tail-log --scope tunnel"
+# Nothing here yet. Each pane shows this one plain line while it holds no text.
+NOTHING_HERE_TEXT = "Nothing here yet."
+# The owner starts the tunnel from the Home tunnel card (Start asks first). No terminal command is typed here.
+START_TUNNEL_TEXT = "Start the tunnel from the Home tunnel card, then press Refresh here."
 
 DESKTOP_MISSING_TEXT = (
     "No log yet. The Meridian Desktop app writes this file each time it starts. "
@@ -70,26 +68,15 @@ DESKTOP_EMPTY_TEXT = (
     "Close the app, open it again, then press Refresh."
 )
 DESKTOP_UNREADABLE_TEXT = "The desktop log exists but could not be read."
-TUNNEL_MISSING_TEXT = (
-    "No log yet. The Meridian core's tunnel writes this file while it runs. "
-    f"To create it, run `{TUNNEL_COMMAND}` in the Meridian core folder, then press Refresh."
-)
-EMPTY_TUNNEL_TEXT = (
-    "The tunnel log is empty. The Meridian core's tunnel writes to it while it runs. "
-    f"To fill it, run `{TUNNEL_COMMAND}` in the Meridian core folder, then press Refresh."
-)
+TUNNEL_MISSING_TEXT = f"No log yet. The Meridian core's tunnel writes this file while it runs. {START_TUNNEL_TEXT}"
+EMPTY_TUNNEL_TEXT = f"The tunnel log is empty. The Meridian core's tunnel writes to it while it runs. {START_TUNNEL_TEXT}"
 TUNNEL_UNREADABLE_TEXT = "The tunnel log exists but could not be read."
-RUNNER_EMPTY_TEXT = (
-    "No log yet. The Meridian core's runner writes this log when it starts the tunnel for scope tunnel. "
-    f"To start it, run `{RUNNER_START_COMMAND}` in the Meridian core folder, then press Refresh."
-)
+RUNNER_EMPTY_TEXT = f"No log yet. The Meridian core's runner writes this log when it starts the tunnel. {START_TUNNEL_TEXT}"
 RUNNER_NOT_AVAILABLE_PREFIX = "Runner log not available."
 RUNNER_NOT_CONNECTED_TEXT = (
     "The desktop has no setting for the Meridian core's Python or runner scope, so it cannot read the runner log."
 )
-RUNNER_BY_HAND_TEXT = (
-    f"To read the runner's log by hand, run `{RUNNER_TAIL_COMMAND}` in the Meridian core folder."
-)
+RUNNER_RETRY_TEXT = "Press Refresh to read it again. If it keeps failing, check the Meridian core folder and Python in Settings."
 NO_LOG_TAIL_TEXT = "The runner reply did not include a log tail."
 
 
@@ -137,17 +124,17 @@ def runner_log_text(result: RunnerResult) -> str:
 
     Each line goes through redact_text, the same pass every other pane gets. An empty tail is the
     runner's "no log yet". A failed read or a reply with no text tail says why, and gives the
-    command to read the log by hand.
+    retry text.
     """
     if not result.ok:
         parts = [RUNNER_NOT_AVAILABLE_PREFIX, result.error_message]
         if result.error_code == ERR_NOT_AVAILABLE:
             parts.append(RUNNER_NOT_CONNECTED_TEXT)
-        parts.append(RUNNER_BY_HAND_TEXT)
+        parts.append(RUNNER_RETRY_TEXT)
         return " ".join(parts)
     tail = (result.payload or {}).get("log_tail")
     if not isinstance(tail, str):
-        return f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_BY_HAND_TEXT}"
+        return f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_RETRY_TEXT}"
     if not tail:
         return RUNNER_EMPTY_TEXT
     return "\n".join(redact_text(line) for line in _lines(tail))
@@ -183,6 +170,7 @@ def _heading(parent: QWidget, name: str, text: str) -> QLabel:
 
 def _pane(parent: QWidget, name: str) -> QPlainTextEdit:
     pane = QPlainTextEdit(parent)
+    pane.setPlaceholderText(NOTHING_HERE_TEXT)
     pane.setObjectName(name)
     pane.setReadOnly(True)
     make_selectable(pane)  # after setReadOnly, which otherwise allows mouse selection only
@@ -416,7 +404,7 @@ __all__ = [
     "LogsOutcome",
     "LogsPage",
     "REFRESH_BUTTON_TEXT",
-    "RUNNER_BY_HAND_TEXT",
+    "RUNNER_RETRY_TEXT",
     "RUNNER_EMPTY_TEXT",
     "RUNNER_NOT_AVAILABLE_PREFIX",
     "RUNNER_NOT_CONNECTED_TEXT",

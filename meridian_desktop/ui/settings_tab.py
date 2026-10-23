@@ -1,24 +1,29 @@
-"""Connection settings on the Settings tab: the hosted Meridian URL and token, the local server URL, the database file, and the saved mode.
+"""The Settings tab: five collapsible groups in one scrolling column, in this order.
 
-This is Qt code and sits in ui/, so the boundary check allows it. The main window places it above
-the RunPod panel, in that panel's own layout, so the Settings tab's page stays the RunPod panel.
+1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
+   Save and Remove, the Test connection button, the local URL and the database file.
+2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
+   launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
+3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
+4. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
+5. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
+   It starts folded. The Logs view reads nothing until its Refresh is pressed.
 
-The hosted URL is checked with hosted_client.validate_base_url before anything is written. The
-hosted token is typed into a password field, saved to the keychain through token_store, and never
-written to the settings file. The tab shows only whether a token is set. Test connection makes one
-GET /projects with the saved URL and token, on a worker thread, and shows the result in plain words.
+The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token is typed into
+a password field, saved to the keychain through token_store, and never written to the settings file. The tab shows only
+whether a token is set. Test connection makes one GET /projects with the saved URL and token, on a worker thread, and
+shows the result in plain words.
 
-The local URL is checked with local_client.assert_loopback before anything is written. A value that
-is not an http loopback URL is refused inline, and the settings file is not touched. The database
-file is picked with a file dialog, and only its path is saved.
+The local URL is checked with local_client.assert_loopback before anything is written. A value that is not an http
+loopback URL is refused inline, and the settings file is not touched. The database file is picked with a file dialog, and
+only its path is saved.
 
-The mode is shown, not edited. The top-bar selector is the one control that changes it, and the
-main window calls refresh() after each save, so both always show the same saved mode.
+The mode is shown, not edited. The top-bar selector is the one control that changes it, and the main window calls
+refresh() after each save, so both always show the same saved mode.
 
-The runner block (ui/runner_section.py) sits above the client setup section. It holds the local server's
-state and its Start, Stop and Restart, and the two launch-time switches. Each control asks the owner first.
-The client setup section (ui/client_setup_section.py) is the last block on this tab. It manages the
-Meridian core checkout and its Python, and one row per client. Nothing in it runs until a button is pressed.
+The main window builds this tab with the RunPod panel as its parent, so the Settings page is still the RunPod panel. The
+tab then takes the panel's entry card into the Keys group, so the RunPod panel is shown once. Built with any other
+parent, the tab has no RunPod card, and the Keys group lists only the names the owner adds.
 """
 
 from __future__ import annotations
@@ -29,23 +34,60 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QShowEvent
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from meridian_desktop import hosted_client, token_store
+from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
 from meridian_desktop.token_store import TokenStoreError
+from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
+from meridian_desktop.ui.keys_section import KeysSection
+from meridian_desktop.ui.latex_panel import LatexPanel
+from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
+from meridian_desktop.ui.runpod_panel import RunPodPanel
+from meridian_desktop.ui.settings_group import CollapsibleGroup
+from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
 MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"), ("tunnel", "Tunnel"))
 MODE_LABELS = dict(MODE_ITEMS)
+
+# The width the Settings column never shrinks below, so a label wraps instead of being cut off.
+CONTENT_MIN_WIDTH = 640
+CONNECTION_TITLE = "Connection"
+LOCAL_SERVER_TITLE = "Local server and startup"
+KEYS_TITLE = "Keys"
+CLIENT_SETUP_TITLE = "Client setup"
+DIAGNOSTICS_TITLE = "Diagnostics (logs)"
+# The one place for diagnostics. The LaTeX section label is the one main_window shows and tests look for.
+LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
+TOOLS_SECTION = "Tools (full table)"
+DIAGNOSTICS_INTRO = (
+    "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
+    "tunnel and runner logs. Nothing here starts a service."
+)
+SETTINGS_FILE_TEXT = "Settings file: {path}"
+LOAD_WARNING_TEXT = "Note from the settings file: {warning}"
 
 DB_DIALOG_TITLE = "Choose the Meridian database file"
 DB_FILE_FILTER = "SQLite database (*.db *.sqlite *.sqlite3);;All files (*)"
@@ -97,6 +139,14 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     label.setObjectName(name)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
+    return make_selectable(label)
+
+
+def _caption(parent: QWidget, text: str) -> QLabel:
+    """A short caption at the start of a row. It never wraps, so the column is as wide as the caption."""
+    label = QLabel(text, parent)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(False)
     return make_selectable(label)
 
 
@@ -160,7 +210,7 @@ class _ConnectionTestJob(QRunnable):
 
 
 class SettingsTab(QWidget):
-    """Edit the hosted URL and token, test the hosted connection, edit the local URL and the database file, and show the saved mode."""
+    """The five Settings groups: connection, local server and startup, keys, client setup, and diagnostics."""
 
     def __init__(
         self,
@@ -170,6 +220,7 @@ class SettingsTab(QWidget):
         secrets: SecretStore | None = None,
         list_hosted: ListHostedFn | None = None,
         actions: RunnerActions | None = None,
+        tools_status: Callable[[], ToolsStatus] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
@@ -178,7 +229,13 @@ class SettingsTab(QWidget):
         self._secrets = secrets if secrets is not None else KeyringSecretStore()
         self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
         self._actions = actions if actions is not None else RunnerActions(settings_store)
+        # The one tools read the full tools table shows. None leaves the table out (a tab built without the window).
+        self._tools_status = tools_status
         self._check = _ConnectionCheck(settings_store, self._secrets, self._list_hosted)
+        self._keys_store = ApiKeys(settings_store, self._secrets)
+        # The RunPod panel is the parent when the main window builds this tab, so its Settings page stays the RunPod panel
+        # and the card moves into the Keys group. A tab built with any other parent has no RunPod card.
+        self._runpod: RunPodPanel | None = parent if isinstance(parent, RunPodPanel) else None
         # Identifies this tab's connection tests. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._generation = 0
@@ -189,100 +246,169 @@ class SettingsTab(QWidget):
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("settings-scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
 
-        self._mode = _label(self, "settings-mode")
-        layout.addWidget(self._mode)
+        content = QWidget(scroll)
+        content.setObjectName("settings-content")
+        content.setMinimumWidth(CONTENT_MIN_WIDTH)
+        column = QVBoxLayout(content)
+        column.setContentsMargins(4, 4, 12, 4)
+        column.setSpacing(6)
+        scroll.setWidget(content)
 
+        # The RunPod entry card moves into the Keys group. The page panel stays as the page, empty of rows.
+        runpod_card = self._runpod.take_card() if self._runpod is not None else None
+
+        column.addWidget(self._build_connection(content))
+        column.addWidget(self._build_local_server(content))
+        column.addWidget(self._build_keys(content, runpod_card))
+        column.addWidget(self._build_client_setup(content))
+        column.addWidget(self._build_diagnostics(content))
+        column.addStretch(1)
+
+        self._wire()
+
+    def _build_connection(self, parent: QWidget) -> CollapsibleGroup:
+        group = CollapsibleGroup("connection", CONNECTION_TITLE, parent)
+        body = group.body()
         settings = self._store.load().settings
 
-        # Hosted Meridian: the URL, then the token, then the connection test.
-        hosted_url_row = QHBoxLayout()
-        hosted_url_row.addWidget(make_selectable(QLabel("Hosted URL:", self)))
-        self._hosted_url = QLineEdit(settings.hosted_url, self)
+        self._mode = _label(body, "settings-mode")
+        group.add_widget(self._mode)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+
+        # Hosted URL: the URL, then its message.
+        grid.addWidget(_caption(body, "Hosted URL:"), 0, 0)
+        self._hosted_url = QLineEdit(settings.hosted_url, body)
         self._hosted_url.setObjectName("settings-hosted-url")
         self._hosted_url.setPlaceholderText(DEFAULT_HOSTED_URL)
-        hosted_url_row.addWidget(self._hosted_url, 1)
-        self._save_hosted_url = QPushButton("Save hosted URL", self)
+        grid.addWidget(self._hosted_url, 0, 1)
+        self._save_hosted_url = QPushButton("Save hosted URL", body)
         self._save_hosted_url.setObjectName("settings-save-hosted-url")
-        hosted_url_row.addWidget(self._save_hosted_url)
-        layout.addLayout(hosted_url_row)
-
-        self._hosted_url_message = _label(self, "settings-hosted-url-message")
+        grid.addWidget(self._save_hosted_url, 0, 2)
+        self._hosted_url_message = _label(body, "settings-hosted-url-message")
         self._hosted_url_message.setVisible(False)
-        layout.addWidget(self._hosted_url_message)
+        grid.addWidget(self._hosted_url_message, 1, 0, 1, 3)
 
-        token_row = QHBoxLayout()
-        self._token_status = _label(self, "settings-token-status")
-        token_row.addWidget(self._token_status)
-        self._token_input = QLineEdit(self)
+        # Hosted token: the status line, then the box with Save and Remove. The value is never shown.
+        self._token_status = _label(body, "settings-token-status")
+        grid.addWidget(self._token_status, 2, 0, 1, 4)
+        grid.addWidget(_caption(body, "Token:"), 3, 0)
+        self._token_input = QLineEdit(body)
         self._token_input.setObjectName("settings-token-input")
         self._token_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._token_input.setPlaceholderText("Paste the hosted token")
-        token_row.addWidget(self._token_input, 1)
-        self._save_token = QPushButton("Save token", self)
+        grid.addWidget(self._token_input, 3, 1)
+        self._save_token = QPushButton("Save token", body)
         self._save_token.setObjectName("settings-save-token")
-        token_row.addWidget(self._save_token)
-        self._remove_token = QPushButton("Remove token", self)
+        grid.addWidget(self._save_token, 3, 2)
+        self._remove_token = QPushButton("Remove token", body)
         self._remove_token.setObjectName("settings-remove-token")
-        token_row.addWidget(self._remove_token)
-        layout.addLayout(token_row)
-
-        self._token_message = _label(self, "settings-token-message")
+        grid.addWidget(self._remove_token, 3, 3)
+        self._token_message = _label(body, "settings-token-message")
         self._token_message.setVisible(False)
-        layout.addWidget(self._token_message)
+        grid.addWidget(self._token_message, 4, 0, 1, 4)
 
-        test_row = QHBoxLayout()
-        self._test_button = QPushButton("Test connection", self)
+        # Test connection, and its result.
+        self._test_button = QPushButton("Test connection", body)
         self._test_button.setObjectName("settings-test-connection")
-        test_row.addWidget(self._test_button)
-        test_row.addStretch(1)
-        layout.addLayout(test_row)
-
-        self._test_result = _label(self, "settings-test-result")
+        grid.addWidget(self._test_button, 5, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        self._test_result = _label(body, "settings-test-result")
         self._test_result.setVisible(False)
-        layout.addWidget(self._test_result)
+        grid.addWidget(self._test_result, 6, 0, 1, 4)
 
-        # Local Meridian server and the database file.
-        url_row = QHBoxLayout()
-        url_row.addWidget(make_selectable(QLabel("Local URL:", self)))
-        self._local_url = QLineEdit(settings.local_url, self)
+        # Local URL.
+        grid.addWidget(_caption(body, "Local URL:"), 7, 0)
+        self._local_url = QLineEdit(settings.local_url, body)
         self._local_url.setObjectName("settings-local-url")
         self._local_url.setPlaceholderText(DEFAULT_LOCAL_URL)
-        url_row.addWidget(self._local_url, 1)
-        self._save_url = QPushButton("Save local URL", self)
+        grid.addWidget(self._local_url, 7, 1)
+        self._save_url = QPushButton("Save local URL", body)
         self._save_url.setObjectName("settings-save-local-url")
-        url_row.addWidget(self._save_url)
-        layout.addLayout(url_row)
-
-        self._url_message = _label(self, "settings-local-url-message")
+        grid.addWidget(self._save_url, 7, 2)
+        self._url_message = _label(body, "settings-local-url-message")
         self._url_message.setVisible(False)
-        layout.addWidget(self._url_message)
+        grid.addWidget(self._url_message, 8, 0, 1, 4)
 
-        db_row = QHBoxLayout()
-        db_row.addWidget(make_selectable(QLabel("Database file:", self)))
-        self._db_path = _label(self, "settings-db-path")
-        db_row.addWidget(self._db_path, 1)
-        self._choose_db = QPushButton("Choose database file...", self)
+        # Database file.
+        grid.addWidget(_caption(body, "Database file:"), 9, 0)
+        self._db_path = _label(body, "settings-db-path")
+        grid.addWidget(self._db_path, 9, 1)
+        self._choose_db = QPushButton("Choose database file...", body)
         self._choose_db.setObjectName("settings-choose-db")
-        db_row.addWidget(self._choose_db)
-        layout.addLayout(db_row)
-
-        self._db_message = _label(self, "settings-db-message")
+        grid.addWidget(self._choose_db, 9, 2)
+        self._db_message = _label(body, "settings-db-message")
         self._db_message.setVisible(False)
-        layout.addWidget(self._db_message)
+        grid.addWidget(self._db_message, 10, 0, 1, 4)
 
-        # The runner block: the local server's state and controls, and the two launch-time switches.
-        self._runner = RunnerSection(self._actions, self)
-        layout.addWidget(self._runner)
+        group.add_layout(grid)
+        return group
 
-        # Client setup: the Meridian core checkout, then one row per client with Check, Apply and Remove.
-        self._client_setup = ClientSetupSection(self._store, self)
-        layout.addWidget(self._client_setup)
-        # A saved core path turns the launch switches off, so the runner block shows them as saved now.
-        self._client_setup.coreChanged.connect(self._runner.refresh_flags)
+    def _build_local_server(self, parent: QWidget) -> CollapsibleGroup:
+        group = CollapsibleGroup("local-server", LOCAL_SERVER_TITLE, parent)
+        # The runner block. Its own heading repeats the group title, so the heading is hidden here.
+        self._runner = RunnerSection(self._actions, group.body())
+        heading = self._runner.findChild(QLabel, "runner-heading")
+        if heading is not None:
+            heading.setVisible(False)
+        group.add_widget(self._runner)
+        # Automatic updates: one checkbox. Off stops the checks at launch and every six hours after.
+        self._auto_update = QCheckBox("Check for and install Meridian Desktop updates automatically", group.body())
+        self._auto_update.setObjectName("auto-update-box")
+        self._auto_update.setChecked(self._store.load().settings.auto_update)
+        self._auto_update.toggled.connect(self._on_auto_update_toggled)
+        group.add_widget(self._auto_update)
+        return group
 
+    def _build_keys(self, parent: QWidget, runpod_card: QWidget | None) -> CollapsibleGroup:
+        group = CollapsibleGroup("keys", KEYS_TITLE, parent, expanded=False)
+        self._keys = KeysSection(self._keys_store, runpod_card, group.body())
+        group.add_widget(self._keys)
+        return group
+
+    def _build_client_setup(self, parent: QWidget) -> CollapsibleGroup:
+        group = CollapsibleGroup("client-setup", CLIENT_SETUP_TITLE, parent, expanded=False)
+        self._client_setup_group = group
+        # The client setup block has its own heading, which repeats the group title, so the heading is hidden here.
+        self._client_setup = ClientSetupSection(self._store, group.body(), actions=self._actions)
+        heading = self._client_setup.findChild(QLabel, "client-setup-heading")
+        if heading is not None:
+            heading.setVisible(False)
+        group.add_widget(self._client_setup)
+        return group
+
+    def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
+        group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
+        group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
+        self._settings_file = _label(group.body(), "settings-file-path")
+        group.add_widget(self._settings_file)
+        self._load_warning = _label(group.body(), "settings-load-warning")
+        self._load_warning.setVisible(False)
+        group.add_widget(self._load_warning)
+        # The full tools table reads when it is first shown and when its Refresh is pressed.
+        if self._tools_status is not None:
+            group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))
+            group.add_widget(ToolsPanel(self._tools_status, parent=group.body()))
+        # The LaTeX probe sits under its section label. It makes no request until shown.
+        group.add_widget(make_selectable(QLabel(LATEX_SECTION, group.body())))
+        group.add_widget(LatexPanel(self._store, parent=group.body()))
+        # The Logs view reads nothing until its own Refresh is pressed, so folding this group costs nothing.
+        self._logs = LogsPage(parent=group.body())
+        group.add_widget(self._logs)
+        return group
+
+    def _wire(self) -> None:
         self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
         self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
         self._save_token.clicked.connect(self._on_save_token_clicked)
@@ -292,14 +418,27 @@ class SettingsTab(QWidget):
         self._save_url.clicked.connect(self._on_save_url_clicked)
         self._local_url.returnPressed.connect(self._on_save_url_clicked)
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
+        # A saved core path turns the launch switches off, so the runner block on this tab shows them as saved now.
+        self._client_setup.coreChanged.connect(self._runner.refresh_flags)
+        self._actions.coreChanged.connect(self._on_core_changed)
 
     def refresh(self) -> None:
-        """Show the saved mode, the database file and whether a hosted token is set. The main window calls this after a mode change."""
-        settings = self._store.load().settings
+        """Show the saved mode, the database file, whether a hosted token is set, and the keys.
+
+        The main window calls this after a mode change, so the top bar and this tab always show the same saved mode.
+        """
+        result = self._store.load()
+        settings = result.settings
         self._mode.setText(mode_text(settings.mode))
+        self._auto_update.blockSignals(True)  # showing the saved value must not save it again
+        self._auto_update.setChecked(settings.auto_update)
+        self._auto_update.blockSignals(False)
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
         self._refresh_token_status()
         self._runner.refresh_flags()
+        self._keys.refresh()
+        self._settings_file.setText(SETTINGS_FILE_TEXT.format(path=self._store.path))
+        _set_message(self._load_warning, LOAD_WARNING_TEXT.format(warning=result.warning) if result.warning else "")
 
     def _refresh_token_status(self) -> None:
         """Show only whether a token is saved. The value is read here and never shown.
@@ -309,7 +448,26 @@ class SettingsTab(QWidget):
         stored = bool(token_store.get_token(store=self._secrets))
         self._token_status.setText(TOKEN_SET_TEXT if stored else TOKEN_NOT_SET_TEXT)
 
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        # The RunPod probe runs once, on the first show of this tab, whichever panel holds the card.
+        if self._runpod is not None:
+            self._runpod.ensure_probed()
+
     # ----------------------------------------------------------- saving
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """Open Client setup when the Meridian core is not usable, so its Choose and Find buttons are in view.
+
+        Client setup stays folded when the core is set and found. It only opens, never folds itself.
+        """
+        if not self._actions.core().core_ready:
+            self._client_setup_group.set_expanded(True)
+
+    @Slot(bool)
+    def _on_auto_update_toggled(self, checked: bool) -> None:
+        self._update(auto_update=bool(checked))
 
     def _update(self, **changes: object) -> None:
         """Save changed fields through the store. Every other field in the saved file is kept."""

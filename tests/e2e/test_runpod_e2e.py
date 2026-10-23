@@ -17,13 +17,22 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTableWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTableWidget, QToolButton, QWidget
 
 from _fakes import MemoryKeyring, QuietServer
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
+from meridian_desktop.ui import runpod_panel as runpod_panel_module
 from meridian_desktop.ui.main_window import MainWindow
-from meridian_desktop.ui.runpod_panel import KEY_MISSING_TEXT, KEY_STORED_TEXT, POD_COLUMNS, RunPodPanel
+from meridian_desktop.ui.runpod_panel import (
+    KEY_MISSING_TEXT,
+    KEY_STORED_TEXT,
+    POD_COLUMNS,
+    REMOVE_KEY_BODY,
+    REMOVE_KEY_TITLE,
+    RunPodPanel,
+)
+from meridian_desktop.ui.settings_group import CollapsibleGroup
 
 FAKE_KEY = "test-key-not-real"
 # /projects is the Projects tab's read-only GET on the local server, made when the window first shows.
@@ -134,6 +143,22 @@ def _press(qtbot, panel, name):
     qtbot.waitUntil(lambda: not panel.busy, timeout=10000)
 
 
+def _open_keys_group(qtbot, panel):
+    """Open the Keys group the way a person does: press its header, then wait until the RunPod buttons are on screen.
+
+    The RunPod card lives in the Keys group, and the group starts folded, so its buttons are hidden until then. A press
+    on a hidden button is not a press a person can make, so the test does not make one.
+    """
+    group = panel.findChild(CollapsibleGroup, "settings-group-keys")
+    assert group is not None, "the Keys group is on the Settings page"
+    if not group.is_expanded():
+        toggle = panel.findChild(QToolButton, "settings-group-keys-toggle")
+        QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: group.is_expanded(), timeout=5000)
+    save = _button(panel, "runpod-save-key")
+    qtbot.waitUntil(lambda: save.isVisible() and save.geometry().height() > 0, timeout=5000)
+
+
 def _text(panel, name):
     return panel.findChild(QLabel, name).text()
 
@@ -157,6 +182,21 @@ def _every_text(root: QWidget) -> str:
                 if item is not None:
                     chunks.append(item.text())
     return "\n".join(chunks)
+
+
+class _OwnerSaysYes:
+    """Answers the Yes or No question about removing the key with Yes, the way the owner does, and keeps the question.
+
+    The window builds its RunPod panel without a confirmation of its own, so the test swaps the dialog function the panel
+    uses for this one. The question is still asked, and the test checks its title and text before the key is deleted.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, parent, title: str, text: str) -> bool:
+        self.calls.append((title, text))
+        return True
 
 
 def _use_readable_font(qapp):
@@ -185,12 +225,14 @@ def _screenshot_dir(tmp_path_factory) -> Path:
     return directory
 
 
-def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp):
+def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp, monkeypatch):
     backend = MemoryKeyring()
     stub = MeridianStub(backend)
     stub.start()
     shots = _screenshot_dir(tmp_path_factory)
     restore_font = _use_readable_font(qapp)
+    owner = _OwnerSaysYes()
+    monkeypatch.setattr(runpod_panel_module, "ask_yes_no", owner)
     try:
         settings_file = tmp_path / "settings" / "settings.json"
         SettingsStore(settings_file).save(Settings(local_url=stub.url))
@@ -201,14 +243,18 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp):
         qtbot.waitExposed(window)
 
         names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        panel = window.tabs.widget(names.index("Settings"))
-        assert panel.objectName() == "runpod-panel"
-        window.tabs.setCurrentWidget(panel)
+        page = window.tabs.widget(names.index("Settings"))
+        # The Settings tab scrolls its sections, and the RunPod panel is one of them.
+        panel = page.findChild(RunPodPanel, "runpod-panel")
+        assert panel is not None
+        window.tabs.setCurrentWidget(page)
 
         # Showing the tab probes the server. Wait for the probe and the start-up key read.
         qtbot.waitUntil(lambda: not panel.busy, timeout=10000)
         assert _text(panel, "runpod-server-status") == f"Local Meridian server: running at {stub.url}"
         assert _text(panel, "runpod-key-status") == KEY_MISSING_TEXT
+        # The RunPod card is in the Keys group, which starts folded. A person opens it before using the card.
+        _open_keys_group(qtbot, panel)
         window.grab().save(str(shots / "settings-no-key.png"))
 
         # Save a key by typing it, the way a user does.
@@ -245,6 +291,7 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp):
 
         # Remove the key: the status flips, and Meridian then reports that no key is found.
         _press(qtbot, panel, "runpod-remove-key")
+        assert owner.calls == [(REMOVE_KEY_TITLE, REMOVE_KEY_BODY)], "the owner is asked once, before the key is deleted"
         assert backend.get_password(RUNPOD_SERVICE, RUNPOD_ACCOUNT) is None
         assert _text(panel, "runpod-key-status") == KEY_MISSING_TEXT
         assert _text(panel, "runpod-result") == "Key removed from the keychain."

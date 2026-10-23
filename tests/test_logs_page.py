@@ -57,13 +57,11 @@ from meridian_desktop.ui.logs_page import (
     INTRO_UNREAD_TEXT,
     NO_LOG_TAIL_TEXT,
     REFRESH_BUTTON_TEXT,
-    RUNNER_BY_HAND_TEXT,
+    RUNNER_RETRY_TEXT,
+    START_TUNNEL_TEXT,
     RUNNER_EMPTY_TEXT,
     RUNNER_NOT_AVAILABLE_PREFIX,
     RUNNER_NOT_CONNECTED_TEXT,
-    RUNNER_START_COMMAND,
-    RUNNER_TAIL_COMMAND,
-    TUNNEL_COMMAND,
     TUNNEL_MISSING_TEXT,
     TUNNEL_UNREADABLE_TEXT,
     LogsPage,
@@ -329,7 +327,7 @@ def test_missing_tunnel_log_names_the_tunnel_and_the_command(qtbot, tmp_path):
 
     assert _text(page, "logs-tunnel-text") == TUNNEL_MISSING_TEXT
     assert "The Meridian core's tunnel writes this file while it runs." in TUNNEL_MISSING_TEXT
-    assert TUNNEL_COMMAND in _text(page, "logs-tunnel-text")
+    assert START_TUNNEL_TEXT in _text(page, "logs-tunnel-text")
     assert "not available" not in _text(page, "logs-tunnel-text").lower()
     assert _label(page, "logs-tunnel-heading") == f"Tunnel log: {missing}"
 
@@ -352,7 +350,7 @@ def test_empty_tunnel_log_says_it_is_empty_and_what_to_run(qtbot, tmp_path):
     _press(qtbot, page)
 
     assert _text(page, "logs-tunnel-text") == EMPTY_TUNNEL_TEXT
-    assert TUNNEL_COMMAND in EMPTY_TUNNEL_TEXT
+    assert START_TUNNEL_TEXT in EMPTY_TUNNEL_TEXT
 
 
 def test_tunnel_log_secrets_are_redacted_on_screen(qtbot, tmp_path):
@@ -432,9 +430,9 @@ def test_runner_not_configured_reads_not_available_and_starts_nothing(qtbot):
 
     assert spawned == []
     assert _text(page, "logs-runner-text") == (
-        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NOT_AVAILABLE_MESSAGE} {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_BY_HAND_TEXT}"
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NOT_AVAILABLE_MESSAGE} {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_RETRY_TEXT}"
     )
-    assert RUNNER_TAIL_COMMAND in _text(page, "logs-runner-text")
+    assert RUNNER_RETRY_TEXT in _text(page, "logs-runner-text")
 
 
 def test_default_runner_read_is_not_configured(qtbot):
@@ -477,7 +475,7 @@ def test_runner_empty_tail_names_the_runner_and_the_start_command(qtbot):
 
     assert _text(page, "logs-runner-text") == RUNNER_EMPTY_TEXT
     assert "The Meridian core's runner writes this log" in RUNNER_EMPTY_TEXT
-    assert RUNNER_START_COMMAND in _text(page, "logs-runner-text")
+    assert START_TUNNEL_TEXT in _text(page, "logs-runner-text")
 
 
 def test_each_missing_or_empty_source_names_its_writer_and_its_command(qtbot, tmp_path):
@@ -492,8 +490,8 @@ def test_each_missing_or_empty_source_names_its_writer_and_its_command(qtbot, tm
     _press(qtbot, page)
 
     assert "The Meridian Desktop app writes this file each time it starts." in _text(page, "logs-desktop-text")
-    assert TUNNEL_COMMAND in _text(page, "logs-tunnel-text")
-    assert RUNNER_START_COMMAND in _text(page, "logs-runner-text")
+    assert START_TUNNEL_TEXT in _text(page, "logs-tunnel-text")
+    assert START_TUNNEL_TEXT in _text(page, "logs-runner-text")
 
 
 def test_runner_reply_without_a_log_tail_reads_not_available(qtbot):
@@ -503,7 +501,7 @@ def test_runner_reply_without_a_log_tail_reads_not_available(qtbot):
     _press(qtbot, page)
 
     assert _text(page, "logs-runner-text") == (
-        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_BY_HAND_TEXT}"
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} {NO_LOG_TAIL_TEXT} {RUNNER_RETRY_TEXT}"
     )
 
 
@@ -522,7 +520,7 @@ def test_runner_error_text_is_shown_as_the_runner_client_wrote_it(qtbot):
     _press(qtbot, page)
 
     assert _text(page, "logs-runner-text") == (
-        f"{RUNNER_NOT_AVAILABLE_PREFIX} The runner command exited with code 3. {RUNNER_BY_HAND_TEXT}"
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} The runner command exited with code 3. {RUNNER_RETRY_TEXT}"
     )
 
 
@@ -533,9 +531,9 @@ def test_runner_log_text_for_a_failed_result_uses_its_fixed_message():
     timed_out = RunnerResult(verb="tail-log", ok=False, error_code=ERR_TIMEOUT, error_message="timed out text")
 
     assert runner_log_text(not_available) == (
-        f"{RUNNER_NOT_AVAILABLE_PREFIX} fixed text {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_BY_HAND_TEXT}"
+        f"{RUNNER_NOT_AVAILABLE_PREFIX} fixed text {RUNNER_NOT_CONNECTED_TEXT} {RUNNER_RETRY_TEXT}"
     )
-    assert runner_log_text(timed_out) == f"{RUNNER_NOT_AVAILABLE_PREFIX} timed out text {RUNNER_BY_HAND_TEXT}"
+    assert runner_log_text(timed_out) == f"{RUNNER_NOT_AVAILABLE_PREFIX} timed out text {RUNNER_RETRY_TEXT}"
     assert RUNNER_NOT_CONNECTED_TEXT not in runner_log_text(timed_out)
 
 
