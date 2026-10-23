@@ -17,6 +17,7 @@ import shiboken6
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
+from _shared_delivery import emit, recording_deliveries, visible_state
 from meridian_desktop import hosted_client, sessions_client as sc
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.ui.sessions_panel import (
@@ -629,6 +630,43 @@ def test_a_stale_result_is_dropped_when_a_newer_refresh_has_started(qtbot):
     qtbot.wait(150)
     settle(qtbot, panel)
     assert table_of(panel).item(0, 0).text() == "new-run"
+
+
+def _first_name(panel):
+    table = table_of(panel)
+    return table.item(0, 0).text() if table.rowCount() == 1 else ""
+
+
+def test_a_result_from_another_tab_or_from_a_superseded_read_is_dropped(qtbot):
+    """A sibling tab's answer, and this tab's own answer from a read that a newer read superseded, show nothing.
+
+    Two tabs each read their own sessions. The first read of each carries generation 1. The sibling's answer reaches
+    this tab at that same generation, so this tab drops it by owner alone. This tab then reads again, and its first
+    answer is replayed: it carries this tab's own owner with a superseded generation, so it is dropped by generation
+    alone. The second rows are what the user sees throughout, and they are the control that this tab's own current
+    answer is accepted.
+    """
+    own = ScriptedLocal([body_of([session(name="own-first")]), body_of([session(name="own-second")])])
+    sibling_local = ScriptedLocal([body_of([session(name="sibling-first")])])
+    with recording_deliveries() as emitted:
+        panel, _hosted = make_panel(qtbot, local=own)
+        panel.show()
+        qtbot.waitUntil(lambda: _first_name(panel) == "own-first", timeout=5000)
+        own_first = emitted[0]
+        shown_first = visible_state(panel)
+        sibling, _sibling_hosted = make_panel(qtbot, local=sibling_local)
+        sibling.show()
+        qtbot.waitUntil(lambda: _first_name(sibling) == "sibling-first", timeout=5000)
+        assert len(emitted) == 2
+        qtbot.wait(20)  # the sibling's answer has reached every tab that listens on the shared object
+        assert visible_state(panel) == shown_first
+        panel.refresh()
+        qtbot.waitUntil(lambda: _first_name(panel) == "own-second", timeout=5000)
+        shown_second = visible_state(panel)
+        assert shown_second != shown_first
+        emit(own_first)  # this tab's answer from the first read, which the second read superseded
+        qtbot.wait(20)
+    assert visible_state(panel) == shown_second
 
 
 # ----------------------------------------------------------------- pure helpers

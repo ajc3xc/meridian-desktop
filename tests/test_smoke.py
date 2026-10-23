@@ -621,13 +621,16 @@ def test_projects_tab_falls_back_to_the_file_when_the_server_is_down(qtbot, sett
 def test_a_load_still_running_when_its_projects_tab_is_deleted_does_not_keep_the_tab(qtbot, settings_path, monkeypatch):
     """A Projects tab deleted while its load still runs is freed on the GUI thread, and no widget of it is touched.
 
-    The load holds the settings store, the sources and the shared delivery object, never the tab, and the tab's own
-    token tells its results apart. The collector is off, so only reference counting can free the tab here.
+    The load holds the settings store, the sources, an owner token and the shared delivery object, never the tab. The
+    defect this guards is the one fixed in 687b33a, where the load job held the tab's own bound method. Run on the tree
+    before 687b33a, this test fails at the reference check below. It passes on 687b33a, on a178e29, on the tree before
+    cec4743 and on the current tree. The collector is off, so only reference counting can free the tab here. The update
+    step is looked up with raising=False, so the test does not depend on whether the tab has that method.
     """
     entered = threading.Event()
     gate = threading.Event()
     touched = []
-    monkeypatch.setattr(ProjectsTab, "_show", lambda self, outcome: touched.append(self._owner))
+    monkeypatch.setattr(ProjectsTab, "_show", lambda self, outcome: touched.append(outcome), raising=False)
 
     def held_probe(url):
         entered.set()
@@ -643,7 +646,6 @@ def test_a_load_still_running_when_its_projects_tab_is_deleted_does_not_keep_the
         tab = ProjectsTab(SettingsStore(settings_path), sources, parent=container)
         tab.refresh()
         assert entered.wait(5)  # the load has started and is held at the probe
-        owner = tab._owner
         ref = weakref.ref(tab)
         shiboken6.delete(container)  # the tab's widgets are deleted on the GUI thread while the load still runs
         del tab
@@ -651,10 +653,65 @@ def test_a_load_still_running_when_its_projects_tab_is_deleted_does_not_keep_the
         gate.set()
         assert QThreadPool.globalInstance().waitForDone(5000)
         qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
-        assert all(token is not owner for token in touched)  # the deleted tab's widgets are never touched
+        assert touched == []  # the deleted tab's update step never runs, so its widgets are never touched
     finally:
         gate.set()
         gc.enable()
+
+
+def _project_row(name):
+    return dict(SERVER_PROJECT_ROWS[0], name=name)
+
+
+def _first_name(table):
+    item = table.item(0, 0) if table.rowCount() == 1 else None
+    return "" if item is None else item.text()
+
+
+def test_projects_tab_drops_a_result_from_another_owner_or_from_a_superseded_load(qtbot, settings_path, tmp_path):
+    """A Projects tab keeps only a load of its own that no newer load has superseded.
+
+    Two tabs read the same file. The tab's first load emits its Delivered. The sibling's first load then emits one at the
+    same generation, and it reaches the tab too, so the tab drops it by owner alone. The tab loads again, and its first
+    Delivered is replayed: it carries the tab's own owner with a superseded generation, so it is dropped by generation
+    alone. The tab's second rows are what the user sees throughout, and they are the control that the tab's own current
+    Delivered is accepted. The tab listens on the shared delivery object, so a Delivered emitted there reaches it. On
+    a178e29 and on the tree before cec4743, the shared object exists but the Projects tab does not use it yet, so this
+    test fails there at its first check: the first load's Delivered never reaches the shared object.
+    """
+    # Imported here, not at the top of the module, because the helper needs ui/delivery.py, which the older trees do not
+    # have. The module, and the lifetime test above, must still import on those trees.
+    from _shared_delivery import emit, recording_deliveries, visible_state
+
+    db = tmp_path / "meridian.db"
+    db.write_bytes(b"")  # the resolver reads the file branch only for a file that exists; the rows come from the reader
+    SettingsStore(settings_path).save(Settings(mode="local", db_path=str(db)))
+    rows = {"current": [_project_row("Own first")]}
+    tab = ProjectsTab(SettingsStore(settings_path), _sources(read_file=lambda path: rows["current"]))
+    qtbot.addWidget(tab)
+    sibling = ProjectsTab(SettingsStore(settings_path), _sources(read_file=lambda path: rows["current"]))
+    qtbot.addWidget(sibling)
+    table = tab.findChild(QTableWidget, "projects-table")
+    sibling_table = sibling.findChild(QTableWidget, "projects-table")
+    with recording_deliveries() as emitted:
+        tab.refresh()
+        qtbot.waitUntil(lambda: _first_name(table) == "Own first", timeout=5000)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(tab)
+        rows["current"] = [_project_row("Sibling first")]
+        sibling.refresh()
+        qtbot.waitUntil(lambda: _first_name(sibling_table) == "Sibling first", timeout=5000)
+        assert len(emitted) == 2
+        assert visible_state(tab) == shown_first
+        rows["current"] = [_project_row("Own second")]
+        tab.refresh()
+        qtbot.waitUntil(lambda: _first_name(table) == "Own second", timeout=5000)
+        shown_second = visible_state(tab)
+        assert shown_second != shown_first
+        emit(own_first)  # this tab's answer from the first load, which the second load superseded
+        qtbot.wait(20)
+    assert visible_state(tab) == shown_second
 
 
 def test_hosted_reader_gets_the_stored_token_and_never_shows_it(qtbot, settings_path):

@@ -34,6 +34,8 @@ from meridian_desktop.ui.latex_panel import (
     engine_start_text,
 )
 
+from _shared_delivery import emit, recording_deliveries, visible_state
+
 LOCAL_URL = "http://127.0.0.1:8471"
 CONNECTED_STATUS = EngineStatus(
     ENGINE_CONNECTED, latex_client.CONNECTED_MESSAGE, engine_version="1.4.0", extension_version="0.9.2"
@@ -257,7 +259,8 @@ def test_a_probe_still_running_when_its_panel_is_deleted_does_not_keep_the_panel
     entered = threading.Event()
     gate = threading.Event()
     touched = []
-    monkeypatch.setattr(LatexPanel, "_on_probe_finished", lambda self, payload: touched.append(self._owner))
+    # The probe handler is the update step. The test only records whether it ran, and never reads the panel.
+    monkeypatch.setattr(LatexPanel, "_on_probe_finished", lambda self, payload: touched.append(payload))
 
     class HeldAtTheGate(_FakeEngineClient):
         def probe_engine(self, base_url, timeout):
@@ -271,7 +274,6 @@ def test_a_probe_still_running_when_its_panel_is_deleted_does_not_keep_the_panel
         panel = LatexPanel(SettingsStore(settings_path), client=HeldAtTheGate(CONNECTED_STATUS), parent=container)
         panel.findChild(QPushButton, "latex-check").click()
         assert entered.wait(5)  # the probe has started and is held at the gate
-        owner = panel._owner
         ref = weakref.ref(panel)
         shiboken6.delete(container)  # the panel's widgets are deleted on the GUI thread while the probe still runs
         del panel
@@ -279,7 +281,7 @@ def test_a_probe_still_running_when_its_panel_is_deleted_does_not_keep_the_panel
         gate.set()
         assert QThreadPool.globalInstance().waitForDone(5000)
         qtbot.wait(50)  # the late result reaches the event loop, and nothing raises
-        assert all(token is not owner for token in touched)  # the deleted panel's widgets are never touched
+        assert touched == []  # the deleted panel's probe handler never runs, so its widgets are never touched
     finally:
         gate.set()
         gc.enable()
@@ -291,3 +293,40 @@ def test_panel_makes_no_probe_until_it_is_shown(qtbot, settings_path):
 
     assert client.calls == []
     assert _label(panel, "latex-start").text() == f"How to start: {UNCHECKED_START}"
+
+
+# ----------------------------------------------------------- a result for another owner, or a superseded probe
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_probe_is_dropped(qtbot, settings_path):
+    """A sibling panel's answer, and an answer from a probe that this panel's newer probe superseded, show nothing.
+
+    Two panels each probe their own engine. The panel's first probe emits its Delivered. The sibling's first probe then
+    emits one at the same generation, and it reaches the panel too, so the panel drops it by owner alone. The panel probes
+    again, and its first Delivered is replayed: it carries the panel's own owner with a superseded generation, so it is
+    dropped by generation alone. The panel's second result is what the user sees throughout, and it is the control that
+    the panel's own current Delivered is accepted.
+    """
+    client = _FakeEngineClient(CONNECTED_STATUS)
+    panel = _panel(qtbot, settings_path, client)
+    sibling = _panel(qtbot, settings_path, _FakeEngineClient(NOT_RUNNING_STATUS))
+    check = panel.findChild(QPushButton, "latex-check")
+    sibling_check = sibling.findChild(QPushButton, "latex-check")
+    with recording_deliveries() as emitted:
+        check.click()
+        qtbot.waitUntil(lambda: _settled(panel), timeout=5000)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(panel)
+        sibling_check.click()
+        qtbot.waitUntil(lambda: _settled(sibling), timeout=5000)
+        assert len(emitted) == 2
+        assert visible_state(panel) == shown_first
+        client.status = NOT_RUNNING_STATUS
+        check.click()
+        qtbot.waitUntil(lambda: _settled(panel), timeout=5000)
+        shown_second = visible_state(panel)
+        assert shown_second != shown_first
+        emit(own_first)  # this panel's answer from the first probe, which the second probe superseded
+        qtbot.wait(20)
+    assert visible_state(panel) == shown_second

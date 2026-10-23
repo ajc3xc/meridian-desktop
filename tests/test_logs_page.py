@@ -71,6 +71,8 @@ from meridian_desktop.ui.logs_page import (
     runner_tail_not_configured,
 )
 
+from _shared_delivery import emit, recording_deliveries, visible_state
+
 FAKE_QUERY_TOKEN = "fake-query-0001"
 FAKE_BEARER = "sk_meridian_fake-bearer-0002"
 FAKE_BARE = "sk_meridian_fake-bare-0003"
@@ -749,3 +751,34 @@ def test_a_pass_still_running_when_the_page_is_deleted_does_not_keep_the_page(qt
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------- a result for another owner, or a superseded pass
+
+
+def test_a_result_from_another_owner_or_from_a_superseded_pass_is_dropped(qtbot):
+    """A sibling page's answer, and an answer from a pass that this page's newer pass superseded, show nothing.
+
+    Two pages each read their own log. The page's first pass emits its Delivered. The sibling's first pass then emits one
+    at the same generation, and it reaches the page too, so the page drops it by owner alone. The page reads again, and
+    its first Delivered is replayed: it carries the page's own owner with a superseded generation, so it is dropped by
+    generation alone. The page's second log lines are what the user sees throughout, and they are the control that the
+    page's own current Delivered is accepted.
+    """
+    tunnel = Recorder(values=[_tail_ok(["first pass line"]), _tail_ok(["second pass line"])])
+    page = _page(qtbot, tunnel=tunnel)
+    sibling = _page(qtbot, tunnel=Recorder(values=[_tail_ok(["sibling pass line"])]))
+    with recording_deliveries() as emitted:
+        _press(qtbot, page)
+        assert len(emitted) == 1
+        own_first = emitted[0]
+        shown_first = visible_state(page)
+        _press(qtbot, sibling)
+        assert len(emitted) == 2
+        assert visible_state(page) == shown_first
+        _press(qtbot, page)
+        shown_second = visible_state(page)
+        assert shown_second != shown_first
+        emit(own_first)  # this page's answer from the first pass, which the second pass superseded
+        qtbot.wait(20)
+    assert visible_state(page) == shown_second

@@ -20,6 +20,7 @@ from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import QAbstractButton, QLabel
 
 from _fakes import MemoryKeyring
+from _shared_delivery import emit, recording_deliveries
 from meridian_desktop import local_client, settings_store
 from meridian_desktop.data_source import (
     NOT_SIGNED_IN_MESSAGE,
@@ -498,6 +499,53 @@ def test_a_check_that_finishes_after_the_mode_changed_is_dropped(qtbot, settings
     # The check finished, but the mode is no longer Tunnel, so its answer is not shown.
     assert window.tunnel_status_label.isHidden()
     assert _line(window) == BAR_CHECKING_TEXT
+
+
+def _tunnel_answers(emitted):
+    """The tunnel answers among what reached the shared object: each value is (generation, (status, failure)).
+
+    Other panels, such as the RunPod page, also emit to the shared object while a window is built, so a test
+    picks out only the tunnel answers.
+    """
+    return [
+        item
+        for item in emitted
+        if isinstance(item.value, tuple)
+        and isinstance(item.value[1], tuple)
+        and item.value[1] and isinstance(item.value[1][0], TunnelStatus)
+    ]
+
+
+def test_a_tunnel_answer_from_another_window_or_from_a_superseded_check_is_dropped(qtbot, settings_path):
+    """Another window's tunnel answer, and this window's answer from a superseded check, show nothing.
+
+    Two windows in Tunnel mode each run one check, at generation 1. The other window's answer reaches this window at
+    that same generation, so this window drops it by owner alone. This window then checks again after a mode change, and
+    its first answer is replayed: it carries this window's own owner with a superseded generation, so it is dropped by
+    generation alone. The line of the second check is what the user sees throughout.
+    """
+    own_runner = RecordingRunner(reply=_status_reply("running"))
+    other_runner = RecordingRunner(reply=_status_reply("not_started"))
+    with recording_deliveries() as emitted:
+        window = _window(qtbot, settings_path, mode="tunnel", runner=own_runner)
+        qtbot.waitUntil(lambda: _line(window).startswith("Tunnel running. "), timeout=5000)
+        own_first = _tunnel_answers(emitted)[0]
+        shown_first = (_line(window), _detail(window))
+        other = _window(qtbot, settings_path, runner=other_runner)  # the saved mode is Tunnel, so it checks at once
+        qtbot.waitUntil(lambda: _line(other).startswith("Tunnel not running. "), timeout=5000)
+        assert len(_tunnel_answers(emitted)) == 2
+        qtbot.wait(20)  # the other window's answer has reached every window that listens on the shared object
+        assert (_line(window), _detail(window)) == shown_first
+        own_runner.reply = _status_reply("not_started")
+        combo = window.mode_selector
+        combo.setCurrentIndex(combo.findData("local"))
+        combo.setCurrentIndex(combo.findData("tunnel"))
+        qtbot.waitUntil(lambda: _line(window).startswith("Tunnel not running. "), timeout=5000)
+        shown_second = (_line(window), _detail(window))
+        assert shown_second != shown_first
+        emit(own_first)  # this window's answer from the first check, which the later checks superseded
+        qtbot.wait(20)
+    assert (_line(window), _detail(window)) == shown_second
 
 
 def test_a_tunnel_check_still_running_when_its_window_closes_does_not_keep_the_window(qtbot, settings_path):
