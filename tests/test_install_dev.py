@@ -114,7 +114,7 @@ def test_dev_shortcut_starts_pythonw_with_the_module_from_the_repository(tmp_pat
 
     assert len(recorder.calls) == 1
     spec = recorder.calls[0]
-    assert spec.shortcut == inst.start_menu_shortcut(env)
+    assert spec.shortcut == inst.start_menu_shortcut(env, dev=True)
     assert spec.target == interpreter.with_name("pythonw.exe")
     assert spec.arguments == "-m meridian_desktop"
     assert spec.working_dir == repo
@@ -122,7 +122,7 @@ def test_dev_shortcut_starts_pythonw_with_the_module_from_the_repository(tmp_pat
     assert result == inst.DevInstallResult(
         interpreter=spec.target,
         repo=repo,
-        shortcuts=(inst.start_menu_shortcut(env),),
+        shortcuts=(inst.start_menu_shortcut(env, dev=True),),
     )
 
 
@@ -162,8 +162,8 @@ def test_desktop_flag_adds_the_same_dev_shortcut_to_the_desktop(tmp_path):
 
     result = inst.install_dev(env, desktop=True, writer=recorder, interpreter=_interpreter(tmp_path), repo=repo)
 
-    assert [call.shortcut for call in recorder.calls] == [inst.start_menu_shortcut(env), inst.desktop_shortcut(env)]
-    assert result.shortcuts == (inst.start_menu_shortcut(env), inst.desktop_shortcut(env))
+    assert [call.shortcut for call in recorder.calls] == [inst.start_menu_shortcut(env, dev=True), inst.desktop_shortcut(env, dev=True)]
+    assert result.shortcuts == (inst.start_menu_shortcut(env, dev=True), inst.desktop_shortcut(env, dev=True))
     assert {call.target for call in recorder.calls} == {result.interpreter}
     assert {call.arguments for call in recorder.calls} == {"-m meridian_desktop"}
     assert {call.working_dir for call in recorder.calls} == {repo}
@@ -257,8 +257,8 @@ def test_main_install_dev_reports_the_mode_and_each_shortcut(tmp_path, capsys):
     assert code == 0
     assert "(mode: dev)" in out
     assert f"{interpreter.with_name('pythonw.exe')} -m meridian_desktop from {repo}" in out
-    assert f"shortcut: {inst.start_menu_shortcut(env)}" in out
-    assert f"shortcut: {inst.desktop_shortcut(env)}" in out
+    assert f"shortcut: {inst.start_menu_shortcut(env, dev=True)}" in out
+    assert f"shortcut: {inst.desktop_shortcut(env, dev=True)}" in out
     assert "installed to" not in out
 
 
@@ -279,15 +279,15 @@ def test_uninstall_removes_the_dev_shortcuts_and_never_the_source_tree(tmp_path)
     env = _env(tmp_path)
     repo = _repo(tmp_path)
     inst.install_dev(env, desktop=True, writer=_DevRecorder(), interpreter=_interpreter(tmp_path), repo=repo)
-    assert inst.start_menu_shortcut(env).is_file()
-    assert inst.desktop_shortcut(env).is_file()
+    assert inst.start_menu_shortcut(env, dev=True).is_file()
+    assert inst.desktop_shortcut(env, dev=True).is_file()
 
     lines = inst.uninstall(env, registry=FakeRegistry())
 
-    assert not inst.start_menu_shortcut(env).exists()
-    assert not inst.desktop_shortcut(env).exists()
+    assert not inst.start_menu_shortcut(env, dev=True).exists()
+    assert not inst.desktop_shortcut(env, dev=True).exists()
     assert (repo / "meridian_desktop" / "__main__.py").is_file()
-    assert lines == [f"removed {inst.start_menu_shortcut(env)}", f"removed {inst.desktop_shortcut(env)}"]
+    assert lines == [f"removed {inst.start_menu_shortcut(env, dev=True)}", f"removed {inst.desktop_shortcut(env, dev=True)}"]
 
 
 def test_dev_shortcut_script_sets_arguments_folder_and_icon_from_the_environment():

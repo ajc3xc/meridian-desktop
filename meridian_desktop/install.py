@@ -52,6 +52,8 @@ APP_NAME = "Meridian Desktop"
 EXE_NAME = "MeridianDesktop.exe"
 PUBLISHER = "Meridian"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
+# The dev shortcut has its own name, so it never replaces the launch version's shortcut.
+DEV_SHORTCUT_NAME = f"{APP_NAME} (dev).lnk"
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO / "dist" / "MeridianDesktop"
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\MeridianDesktop"
@@ -207,13 +209,13 @@ def install_dir(env: Mapping[str, str]) -> Path:
     return _base(env, "LOCALAPPDATA", ("AppData", "Local")) / "Programs" / APP_NAME
 
 
-def start_menu_shortcut(env: Mapping[str, str]) -> Path:
+def start_menu_shortcut(env: Mapping[str, str], *, dev: bool = False) -> Path:
     programs = _base(env, "APPDATA", ("AppData", "Roaming")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-    return programs / SHORTCUT_NAME
+    return programs / (DEV_SHORTCUT_NAME if dev else SHORTCUT_NAME)
 
 
-def desktop_shortcut(env: Mapping[str, str]) -> Path:
-    return _base(env, "USERPROFILE", ()) / "Desktop" / SHORTCUT_NAME
+def desktop_shortcut(env: Mapping[str, str], *, dev: bool = False) -> Path:
+    return _base(env, "USERPROFILE", ()) / "Desktop" / (DEV_SHORTCUT_NAME if dev else SHORTCUT_NAME)
 
 
 def _write_lnk(shortcut: Path, script: str, values: Mapping[str, str]) -> None:
@@ -403,9 +405,9 @@ def install_dev(
     tree = REPO if repo is None else Path(repo)
     if not (tree / "meridian_desktop" / "__main__.py").is_file():
         raise InstallError(f"{tree} is not a Meridian Desktop source tree; run --dev from the repository")
-    links = [start_menu_shortcut(env)]
+    links = [start_menu_shortcut(env, dev=True)]
     if desktop:
-        links.append(desktop_shortcut(env))
+        links.append(desktop_shortcut(env, dev=True))
     for link in links:
         writer(
             DevShortcut(
@@ -472,7 +474,12 @@ def uninstall(
     try:
         if backend.delete_value(RUN_KEY, RUN_VALUE):
             done.append(f"removed start-with-Windows entry HKCU\\{RUN_KEY}\\{RUN_VALUE}")
-        for link in (start_menu_shortcut(env), desktop_shortcut(env)):
+        for link in (
+            start_menu_shortcut(env),
+            desktop_shortcut(env),
+            start_menu_shortcut(env, dev=True),
+            desktop_shortcut(env, dev=True),
+        ):
             if link.is_file():
                 link.unlink()
                 done.append(f"removed {link}")
