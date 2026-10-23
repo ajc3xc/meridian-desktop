@@ -17,7 +17,7 @@ from datetime import datetime
 
 import pytest
 from PySide6.QtCore import QThreadPool, Qt
-from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton
+from PySide6.QtWidgets import QAbstractButton, QFrame, QLabel, QPushButton
 
 from _fakes import MemoryKeyring
 from _shared_delivery import emit, recording_deliveries
@@ -617,12 +617,17 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     assert tunnel_buttons
     assert all(not b.isEnabled() for b in tunnel_buttons)
 
-    # The tunnel controls are on the Tunnel tab only. The top bar holds no button, and no other tab holds a tunnel control.
-    tunnel_tab = window.tabs.widget(_tab_index(window, "Tunnel"))
-    assert all(b in _user_buttons(tunnel_tab) for b in tunnel_buttons)
-    for name in ("Projects", "Sessions", "Tools", "Writing", "Zotero", "Services", "Code", "Outputs", "Research", "Logs", "Settings"):
+    # The tunnel controls are on Home's tunnel card only. The top bar holds no button, and no other tab or card holds a tunnel control.
+    tunnel_card = window.findChild(QFrame, "home-card-tunnel")
+    assert tunnel_card is not None
+    assert all(b in _user_buttons(tunnel_card) for b in tunnel_buttons)
+    for name in ("Projects", "Sessions", "Search", "Settings"):
         other = window.tabs.widget(_tab_index(window, name))
         assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other)), name
+    for card in ("local", "services", "zotero", "tools", "updates"):
+        other_card = window.findChild(QFrame, f"home-card-{card}")
+        assert other_card is not None, card
+        assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other_card)), card
     for widget in (window.mode_selector, window.tunnel_status_label, window.tunnel_detail, window.mode_description):
         assert _user_buttons(widget) == []
 

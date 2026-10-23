@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QTableWidget,
@@ -42,11 +41,15 @@ from meridian_desktop.data_source import (
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
+from meridian_desktop.ui.home_tab import HomeTab
 from meridian_desktop.ui.latex_panel import LatexPanel
-from meridian_desktop.ui.logs_page import INTRO_UNREAD_TEXT, LogsPage
-from meridian_desktop.ui.main_window import TAB_NAMES, WRITING_SECTIONS, MainWindow
+from meridian_desktop.ui.logs_page import LogsPage
+from meridian_desktop.ui.main_window import LATEX_SECTION, STATUS_MESSAGE, TAB_NAMES, MainWindow
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
-from meridian_desktop.ui.services_page import NOT_CHECKED, UNCHECKED_TEXT, ServicesPage
+from meridian_desktop.ui.runpod_panel import RunPodPanel
+from meridian_desktop.ui.search_tab import SearchTab
+from meridian_desktop.ui.tools_panel import ToolsPanel
+from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
     LOCAL_URL_SAVED_TEXT,
@@ -55,24 +58,8 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-from meridian_desktop.ui.tunnel_page import NOT_AVAILABLE_TEXT, TunnelPage
-
-EXPECTED_TABS = (
-    "Projects", "Sessions", "Tools", "Writing", "Zotero", "Tunnel", "Services", "Code", "Outputs", "Research", "Logs",
-    "Settings",
-)
-# The tabs that are still placeholders, with what each one says is missing. Only Writing is left:
-# its DOCX and Google Docs sections are not built. Zotero, Code, Outputs and Research are working tabs.
-EXPECTED_PLACEHOLDERS = {
-    "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
-}
-# The wave-3 tabs, each with its page's object name and class.
-WAVE3_PAGES = {
-    "Tunnel": ("tunnel-page", TunnelPage),
-    "Services": ("services-page", ServicesPage),
-    "Logs": ("logs-page", LogsPage),
-}
-STATUS = "No services checked yet. Press Check services on the Services tab."
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
 
@@ -133,9 +120,11 @@ def _window(qtbot, settings_path, sources=None):
 
 
 def _shown_window(qtbot, settings_path, sources=None):
+    """A shown window with the Projects tab in front. Home is the first tab, and its checks are tested in test_home_tab."""
     window = _window(qtbot, settings_path, sources)
     window.show()
     qtbot.waitExposed(window)
+    window.tabs.setCurrentWidget(_page(window, "Projects"))
     return window
 
 
@@ -193,82 +182,45 @@ def test_tab_names_and_order(qtbot, settings_path):
     assert entry.TAB_NAMES == EXPECTED_TABS
 
 
-def test_placeholders_say_what_is_missing(qtbot, settings_path):
+def test_no_tab_is_a_placeholder_and_no_old_tab_is_left(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    for name, text in EXPECTED_PLACEHOLDERS.items():
-        assert text in _label_texts(_page(window, name)), name
-        assert not any("Not built yet" in label for label in _label_texts(_page(window, name))), name
+    for name in EXPECTED_TABS:
+        texts = _label_texts(_page(window, name))
+        assert not any("Not built yet" in text for text in texts), name
+        assert not _page(window, name).objectName().startswith("placeholder-"), name
 
 
-def test_wave3_tabs_replace_placeholders_and_keep_others(qtbot, settings_path, monkeypatch):
-    # The health probe records its calls, so the test can show that showing the window makes none.
-    health_calls = []
-
-    def recording_probe(url, timeout=None):
-        health_calls.append(url)
-        return local_client.HEALTH_NOT_RUNNING
-
-    monkeypatch.setattr(local_client, "probe_health", recording_probe)
+def test_home_search_and_settings_are_built_pages(qtbot, settings_path):
     window = _shown_window(qtbot, settings_path)
     assert _tab_names(window) == EXPECTED_TABS
 
-    # Tunnel, Services and Logs host their own pages. No placeholder and no wave-3 text is left on them.
-    for name, (object_name, page_type) in WAVE3_PAGES.items():
-        page = _page(window, name)
-        assert isinstance(page, page_type), name
-        assert page.objectName() == object_name, name
-        assert "Not built yet (wave 3)" not in _all_text(page), name
-        assert not any("Not built yet" in text for text in _label_texts(page)), name
-
-    # Tunnel says the slot states are not available, and shows no rows. This build has no slot-state source.
-    tunnel = _page(window, "Tunnel")
-    assert tunnel.findChild(QLabel, "tunnel-status").text() == NOT_AVAILABLE_TEXT
-    assert tunnel.findChild(QTableWidget, "tunnel-slot-table").rowCount() == 0
-
-    # Services and Logs show their unchecked state. Showing the window made no health request and checked no port.
-    services = _page(window, "Services")
-    assert services.findChild(QLabel, "services-intro").text() == UNCHECKED_TEXT
-    assert f"Local server health: {NOT_CHECKED}" in _label_texts(services)
-    assert services.findChild(QLabel, "services-ports-status").text() == f"Slot ports: {NOT_CHECKED}"
-    assert services.findChild(QTableWidget, "services-ports-table").rowCount() == 0
-    assert health_calls == []
-
-    logs = _page(window, "Logs")
-    assert logs.findChild(QLabel, "logs-intro").text() == INTRO_UNREAD_TEXT
-    assert logs.findChild(QPlainTextEdit, "logs-tunnel-text").toPlainText() == ""
-    assert logs.findChild(QPlainTextEdit, "logs-runner-text").toPlainText() == ""
-
-    # The other tabs keep their state. Projects and Settings are built, Zotero is a working panel,
-    # Writing keeps its LaTeX section, and Code is still a placeholder that says what is missing.
+    assert isinstance(_page(window, "Home"), HomeTab)
+    assert _page(window, "Home").objectName() == "home-tab"
+    assert isinstance(_page(window, "Search"), SearchTab)
+    assert _page(window, "Search").objectName() == "search-tab"
     assert _page(window, "Projects").objectName() == "projects-tab"
-    assert _page(window, "Settings").objectName() == "runpod-panel"
-    writing = _page(window, "Writing")
-    assert writing.findChild(LatexPanel) is not None
-    for section in WRITING_SECTIONS:
-        assert section in _label_texts(writing)
-    for name, text in EXPECTED_PLACEHOLDERS.items():
-        page = _page(window, name)
-        assert page.objectName() == f"placeholder-{name.lower()}", name
-        assert text in _label_texts(page), name
 
 
-def test_settings_tab_holds_runpod_panel_not_placeholder(qtbot, settings_path):
+def test_settings_page_holds_runpod_zotero_and_diagnostics(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     page = _page(window, "Settings")
-    assert page.objectName() == "runpod-panel"
-    assert not any("Not built yet" in text for text in _label_texts(page))
+    assert page.objectName() == "settings-scroll"
+    body = page.findChild(QWidget, "settings-page")
+    assert body is not None
+    assert body.findChild(RunPodPanel, "runpod-panel") is not None
+    assert body.findChild(ZoteroPanel, "zotero-panel") is not None
+    # Diagnostics: the full tools table, the LaTeX engine probe, and the logs (Logs moved here from its own tab).
+    assert body.findChild(ToolsPanel, "tools-panel") is not None
+    assert body.findChild(LatexPanel) is not None
+    assert body.findChild(LogsPage, "logs-page") is not None
+    assert LATEX_SECTION in _label_texts(body)
 
 
-def test_writing_lists_three_named_sections(qtbot, settings_path):
+def test_settings_page_is_scrollable_and_keeps_the_runpod_page(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    assert WRITING_SECTIONS == (
-        "DOCX (meridian-docs)",
-        "LaTeX (local engine on 127.0.0.1:8471)",
-        "Google Docs (approach not decided)",
-    )
-    texts = _label_texts(_page(window, "Writing"))
-    for section in WRITING_SECTIONS:
-        assert section in texts
+    page = _page(window, "Settings")
+    assert page.widgetResizable()
+    assert not any("Not built yet" in text for text in _label_texts(page))
 
 
 def test_mode_selector_offers_hosted_local_and_tunnel(qtbot, settings_path):

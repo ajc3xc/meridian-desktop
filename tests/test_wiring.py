@@ -15,7 +15,7 @@ from datetime import datetime
 import pytest
 import shiboken6
 from PySide6.QtCore import QThreadPool
-from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QPushButton, QTableWidget, QWidget
 
 from _fakes import MemoryKeyring
 from _shared_delivery import recording_deliveries, visible_state
@@ -33,10 +33,7 @@ from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text, ready_text
 from meridian_desktop.version import APP_VERSION
 
-EXPECTED_TABS = (
-    "Projects", "Sessions", "Tools", "Writing", "Zotero", "Tunnel", "Services", "Code", "Outputs", "Research", "Logs",
-    "Settings",
-)
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
 LOCAL = "http://127.0.0.1:7999"
 HOSTED = "https://usemeridian.us"
 PID = "5787cc92-ba7d-4788-b17c-28ab7938b839"
@@ -156,21 +153,16 @@ def _bar(window):
 # ----------------------------------------------------------- tabs
 
 
-def test_sessions_and_tools_tabs_sit_after_projects(qtbot, settings_path):
+def test_sessions_sits_after_projects_and_tools_is_no_longer_a_tab(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     assert _tab_names(window) == EXPECTED_TABS
 
     sessions = _page(window, "Sessions")
-    tools = _page(window, "Tools")
     assert isinstance(sessions, SessionsPanel)
-    assert isinstance(tools, ToolsPanel)
     assert sessions.objectName() == "sessions-panel"
-    assert tools.objectName() == "tools-panel"
-    for page in (sessions, tools):
-        assert not any("Not built yet" in text for text in _label_texts(page))
-
-
-# ----------------------------------------------------------- Sessions
+    assert not any("Not built yet" in text for text in _label_texts(sessions))
+    # The Tools panel is no longer a tab. Home's AI clients card shows its rows, and Settings has the full table.
+    assert "Tools" not in _tab_names(window)
 
 
 def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settings_path, tmp_path, monkeypatch):
@@ -275,7 +267,7 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
 # ----------------------------------------------------------- Tools
 
 
-def test_tools_tab_shows_rows_from_a_fake_status(qtbot, settings_path):
+def test_home_tools_card_shows_rows_from_a_fake_status_after_boot(qtbot, settings_path):
     rows = (
         ToolRow("Codex", "meridian-docs", YES, UNCHECKED, ENTRY_IN_PLACE_TEXT),
         ToolRow(
@@ -293,17 +285,14 @@ def test_tools_tab_shows_rows_from_a_fake_status(qtbot, settings_path):
         return ToolsStatus(rows=rows, message="Checked. No tool is started or stopped.", checked_at=CLOCK)
 
     window = _window(qtbot, settings_path, tools=fake_status, shown=True)
-    assert reads == []  # showing the window does not read the tools
-
-    _select(window, "Tools")
-    page = _page(window, "Tools")
-    table = page.findChild(QTableWidget, "tools-table")
-    qtbot.waitUntil(lambda: table.rowCount() == len(rows), timeout=5000)
-    for index, row in enumerate(rows):
-        cells = tuple(table.item(index, column).text() for column in range(table.columnCount()))
-        assert cells == row.cells()
+    # Showing the window runs the tools check once, on its own. No tab has to be opened for it.
+    qtbot.waitUntil(lambda: reads == [1], timeout=5000)
+    card = window.findChild(QFrame, "home-card-tools")
+    assert card is not None
+    qtbot.waitUntil(lambda: "Codex: meridian-docs." in _all_text(card), timeout=5000)
+    assert "Checking the tools" not in _all_text(card)
+    assert "This computer: Local Meridian server. Live." in _all_text(card)
     assert reads == [1]
-    assert "Checked. No tool is started or stopped." in page.findChild(QLabel, "tools-status").text()
 
 
 # ----------------------------------------------------------- update bar

@@ -1,23 +1,22 @@
-"""Main window: a mode selector on top, then one tab per area.
+"""Main window: a mode selector on top, then five tabs: Home, Projects, Sessions, Search and Settings.
 
-The Projects tab is read-only (wave 2). The Settings tab holds the RunPod panel
-(wave 2), with the connection settings (local URL, database file, saved mode) above
-its rows. The Writing tab holds the LaTeX engine probe under its section label (wave 2).
-The Tunnel, Services and Logs tabs are built in wave 3 and are read-only. The Zotero tab
-(wave 4) checks the local Zotero app and searches its library over 127.0.0.1:23119, and
-starts Zotero only after the owner confirms. Writing and Code are still placeholders. Qt code
-lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through
-settings_store and the RunPod key goes through secret_store, and neither imports Qt. The
-only network calls, apart from the update check below, are loopback calls: to the local Meridian
-server at the local_url setting, to the local LaTeX engine at the engine_url setting, to the local
-Zotero API on 127.0.0.1:23119,
-and to 127.0.0.1 slot ports for a connect-only check. The panels and the Projects tab make them
-when a tab is first shown and when a button is pressed, except for the Sessions timer described below.
-The Services check and the Logs read run only when their button is pressed, and the Tunnel tab runs one
-read-only tunnel status call each time it is shown. Hosted mode calls only the hosted URL the owner sets:
-on the Projects tab, on the Sessions tab when it is first shown or its Refresh is pressed (for the project
-list, and for the sessions when no local server answers and a hosted token is saved), and on the Test
-connection button in Settings.
+Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
+(the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
+part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
+pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) searches the
+local server's code, outputs and research, and sends queries only to the Local URL. Settings holds the connection
+settings, the RunPod panel, the Zotero library panel, and Diagnostics: the full tools table, the LaTeX engine probe,
+and the desktop, tunnel and runner logs. The Projects and Sessions tabs are read-only.
+
+Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through settings_store and the
+RunPod key goes through secret_store, and neither imports Qt. The only network calls, apart from the update check
+below, are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
+engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
+A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
+its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
+only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
+pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
+on the Test connection button in Settings.
 
 The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
 and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
@@ -25,15 +24,12 @@ chosen in the mode selector. While the tab stays visible, a 5-second timer reads
 in local mode, for the picked project. The timer never reads the project list and never calls the hosted host,
 and when the local server does not answer it changes nothing on screen. Changing the picked project reads the
 local server the same way, in local mode only; in any other mode it clears the table and says to press Refresh.
-The Tools tab (read-only) shows which Meridian tools each AI client has set up, and whether the local server
-and the tunnel are live. It reads when it is first shown and when its Refresh button is pressed. Neither tab
-starts, stops or installs anything.
 
 At a real start, one update check runs on the thread pool, and again every six hours while the app runs. It asks GitHub
 for the latest release and its signed checksum list, downloads a newer release only after the signature verifies, and
-stages it for the next restart. The status bar shows the download and the staged release. It is off when the
-auto_update or check_updates setting is false, and the app passes no transport under --smoke, so a smoke run makes
-no request.
+stages it for the next restart. The status bar shows the download and the staged release, and the Updates card on Home
+reads that same one result without asking GitHub again. It is off when the auto_update or check_updates setting is
+false, and the app passes no transport under --smoke, so a smoke run makes no request.
 
 Tunnel mode reads projects the same way Hosted does. Its top bar shows one line with the tunnel's
 state (from one read-only status call, made when the mode is switched to Tunnel and at start in
@@ -53,6 +49,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -65,56 +62,43 @@ from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
-from meridian_desktop.ui.code_panel import CodePanel
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
-from meridian_desktop.ui.outputs_panel import OutputsPanel
-from meridian_desktop.ui.research_panel import ResearchPanel
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runpod_panel import RunPodPanel
-from meridian_desktop.ui.services_page import ServicesPage
+from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import MODE_ITEMS, SettingsTab
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tools_panel import ToolsPanel
-from meridian_desktop.ui.tunnel_page import TunnelCheckJob, TunnelPage
+from meridian_desktop.ui.tunnel_page import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
-# (tab name, wave that builds it). Display order is the tuple order. Sessions and Tools read the local
-# server and the tunnel status, so they sit with the wave-3 services work.
+# (tab name, wave that built it). Display order is the tuple order. Five tabs, no more: the rest of the
+# areas are cards on Home, the Search tab's kinds, or sections of Settings.
 TAB_SPECS = (
+    ("Home", 7),
     ("Projects", 2),
     ("Sessions", 3),
-    ("Tools", 3),
-    ("Writing", 5),
-    ("Zotero", 4),
-    ("Tunnel", 3),
-    ("Services", 3),
-    ("Code", 6),
-    ("Outputs", 6),
-    ("Research", 6),
-    ("Logs", 3),
+    ("Search", 6),
     ("Settings", 2),
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
 
 LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
-WRITING_SECTIONS = (
-    "DOCX (meridian-docs)",
-    LATEX_SECTION,
-    "Google Docs (approach not decided)",
+ZOTERO_SECTION = "Zotero (the Zotero app on this computer, 127.0.0.1:23119)"
+DIAGNOSTICS_SECTION = "Diagnostics"
+DIAGNOSTICS_INTRO = (
+    "Read-only views for finding a fault: the full tools table, the LaTeX engine probe, and the desktop, tunnel "
+    "and runner logs. Nothing here starts a service."
 )
 
-# What a placeholder tab says is missing, in plain words. Nothing here says "not built yet".
-PLACEHOLDER_REASONS = {
-    "Writing": "DOCX and Google Docs writing are not in this build yet. The LaTeX section below works.",
-}
-
-STATUS_MESSAGE = "No services checked yet. Press Check services on the Services tab."
+STATUS_MESSAGE = "Home checks each part of Meridian when this window opens, then every five minutes while Home is showing."
 
 TUNNEL_MODE = "tunnel"
 # One plain sentence per mode. The one for the chosen mode shows under the selector.
@@ -124,9 +108,9 @@ MODE_DESCRIPTIONS = {
     TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
-# The window opens at this size (width, height). It fits the full tab bar, which holds twelve labels now
-# that Sessions and Tools are tabs, and gives the Settings panel room for its key row and pods table.
-DEFAULT_WINDOW_SIZE = (1280, 640)
+# The window opens at this size (width, height). The five tab labels fit at 1280 px, and Home scrolls its cards
+# below that height, so no card is cut off on a short window.
+DEFAULT_WINDOW_SIZE = (1280, 780)
 
 
 def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
@@ -140,33 +124,13 @@ def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
     return allowed
 
 
-def _placeholder_page(
-    name: str,
-    parent: QWidget,
-    section_widgets: dict[str, QWidget] | None = None,
-) -> QWidget:
-    """A tab that is not built in this release. It says what is missing. ``section_widgets`` maps a
-    Writing section label to a widget placed directly below that label, so a built section keeps its label."""
-    page = QWidget(parent)
-    page.setObjectName(f"placeholder-{name.lower()}")
-    layout = QVBoxLayout(page)
-    layout.addWidget(make_selectable(QLabel(PLACEHOLDER_REASONS[name], page)))
-    if name == "Writing":
-        for section in WRITING_SECTIONS:
-            layout.addWidget(make_selectable(QLabel(section, page)))
-            if section_widgets and section in section_widgets:
-                layout.addWidget(section_widgets[section])
-    layout.addStretch(1)
-    return page
-
-
 class ProjectsUnavailable(Exception):
     """The Projects resolver found no source to read. The Sessions tab then says the projects could not be read,
     in plain words that name no class and no path."""
 
 
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
-    """The provider the Code, Outputs and Research panels call: the local URL as saved now.
+    """The local URL as saved now, read by the Search tab when a search runs.
 
     It holds the store, not the window. A bound method of the window kept the window in a reference
     cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
@@ -260,7 +224,7 @@ class _ConfiguredRunner:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above one tab per area. Projects is read-only. Settings holds the RunPod panel."""
+    """Mode selector above five tabs: Home, Projects, Sessions, Search and Settings."""
 
     def __init__(
         self,
@@ -280,15 +244,15 @@ class MainWindow(QMainWindow):
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
         # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
-        # The Zotero tab calls this object. Tests pass a fake. The app uses the zotero_client module.
+        # The Zotero cards and panel call this object. Tests pass a fake. The app uses the zotero_client module.
         self._zotero = zotero if zotero is not None else zotero_client
         # The tunnel status call (a status(scope) method). Tests pass a fake. The app builds the client
         # from the core Python and folder in Settings. The status call never starts or stops anything. The
         # Start, Stop and Restart controls use runner_actions instead, and they stay off until the owner turns them on.
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
-        # The runner controls (Tunnel tab and the Settings runner block). Tests pass fakes. The app reads Settings.
+        # The runner controls (the Home tunnel card and the Settings runner block). Tests pass fakes. The app reads Settings.
         self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
-        # The Tools tab's read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
+        # The tools read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
         self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
         # Each tunnel check takes the next number. A result with an older number is dropped.
@@ -302,19 +266,29 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addLayout(self._build_mode_bar(central))
 
+        # The status-bar notice holds the one update check of this window, and Home's Updates card reads its result, so
+        # it is built before the tabs and added to the status bar below. The bar is hidden unless a release is downloading
+        # or staged. A check runs at start and every six hours after, only while auto_update and check_updates are on. No
+        # transport means no request is made, and no update_root means nothing is staged or restarted.
+        self._update_notice = UpdateNoticeBar(
+            APP_VERSION,
+            update_transport,
+            install_root=update_root,
+            enabled=_updates_allowed_reader(self._store),
+            report=self.statusBar().showMessage,
+            parent=self,
+            record_apps_entry=record_apps_entry,
+        )
+
         self.tabs = QTabWidget(central)
-        for name, wave in TAB_SPECS:
-            if name == "Projects":
+        for name, _wave in TAB_SPECS:
+            if name == "Home":
+                home = HomeTab(self._home_deps(), parent=self.tabs)
+                home.settingsRequested.connect(self._show_settings)
+                page: QWidget = home
+            elif name == "Projects":
                 self._projects = ProjectsTab(self._store, self._sources, parent=self.tabs)
-                page: QWidget = self._projects
-            elif name == "Settings":
-                page = RunPodPanel(self._store, self._secrets, parent=self.tabs)
-                # The connection settings go above the RunPod rows, in the panel's own layout,
-                # so the Settings page is still the RunPod panel.
-                self._settings_tab = SettingsTab(
-                    self._store, secrets=self._secrets, parent=page, actions=self._runner_actions,
-                )
-                page.layout().insertWidget(0, self._settings_tab)
+                page = self._projects
             elif name == "Sessions":
                 # Nothing is read on build. The first show and the Refresh button read the project list and the
                 # sessions. While the tab stays visible, a 5-second timer reads only the local server, and only in
@@ -326,36 +300,12 @@ class MainWindow(QMainWindow):
                     _saved_mode(self._store),
                     parent=self.tabs,
                 )
-            elif name == "Tools":
-                # The read runs when the tab is first shown and when Refresh is pressed. No tool is started or stopped.
-                page = ToolsPanel(self._tools_status_read, parent=self.tabs)
-            elif name == "Writing":
-                # The LaTeX probe sits under its section label. Makes no request until shown.
-                latex = LatexPanel(self._store, parent=self.tabs)
-                page = _placeholder_page(name, self.tabs, {LATEX_SECTION: latex})
-            elif name == "Tunnel":
-                # The same read-only status call as the top bar. The page says whether the tunnel
-                # runs, and the slot states are not available in this build.
-                page = TunnelPage(self.tabs, status=self._tunnel_runner.status, actions=self._runner_actions)
-            elif name == "Services":
-                # The checks run only when Check services is pressed. Nothing is probed on build or show.
-                page = ServicesPage(self._store, parent=self.tabs)
-            elif name == "Logs":
-                # The reads run only when Refresh is pressed. Nothing is read on build or show.
-                page = LogsPage(parent=self.tabs)
-            elif name == "Zotero":
-                # The status check runs when the tab is first shown and when Refresh is pressed.
-                # Zotero starts only after the owner confirms in the dialog.
-                page = ZoteroPanel(client=self._zotero, parent=self.tabs)
-            elif name == "Code":
-                # Search runs only when the owner presses Search. The local URL is read at that moment.
-                page = CodePanel(_saved_local_url(self._store), parent=self.tabs)
-            elif name == "Outputs":
-                page = OutputsPanel(_saved_local_url(self._store), parent=self.tabs)
-            elif name == "Research":
-                page = ResearchPanel(_saved_local_url(self._store), parent=self.tabs)
+            elif name == "Search":
+                # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
+                page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
             else:
-                page = _placeholder_page(name, self.tabs)
+                page = self._build_settings_page()
+                self._settings_page = page
             self.tabs.addTab(page, name)
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
@@ -365,18 +315,6 @@ class MainWindow(QMainWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
-        # The update bar sits at the right of the status bar. It is hidden unless a release is downloading or staged.
-        # A check runs at start and every six hours after, only while auto_update and check_updates are on. No
-        # transport means no request is made, and no update_root means nothing is staged or restarted.
-        self._update_notice = UpdateNoticeBar(
-            APP_VERSION,
-            update_transport,
-            install_root=update_root,
-            enabled=_updates_allowed_reader(self._store),
-            report=self.statusBar().showMessage,
-            parent=self,
-            record_apps_entry=record_apps_entry,
-        )
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
@@ -391,6 +329,55 @@ class MainWindow(QMainWindow):
         if self._runner_actions.locating or self._saved_mode != TUNNEL_MODE:
             return
         self._start_tunnel_check()
+
+    # ----------------------------------------------------------- building
+
+    def _home_deps(self) -> HomeDeps:
+        """What the Home cards read and do. Each one is the window's own call, so tests and the app use the same wiring."""
+        return HomeDeps(
+            store=self._store,
+            probe=self._sources.probe,
+            tunnel=self._tunnel_runner.status,
+            actions=self._runner_actions,
+            zotero=self._zotero,
+            tools=self._tools_status_read,
+            updates=self._update_notice,
+            current_version=APP_VERSION,
+        )
+
+    def _build_settings_page(self) -> QWidget:
+        """Settings: the connection settings and RunPod panel, the Zotero panel, then Diagnostics.
+
+        The page scrolls, so the longest section never hides the others. The RunPod panel stays the page's
+        RunPod widget (object name runpod-panel), with the connection settings above its rows.
+        """
+        runpod = RunPodPanel(self._store, self._secrets, parent=self.tabs)
+        # The connection settings go above the RunPod rows, in the panel's own layout.
+        self._settings_tab = SettingsTab(
+            self._store, secrets=self._secrets, parent=runpod, actions=self._runner_actions,
+        )
+        runpod.layout().insertWidget(0, self._settings_tab)
+
+        container = QWidget(self.tabs)
+        container.setObjectName("settings-page")
+        column = QVBoxLayout(container)
+        column.addWidget(runpod)
+        column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
+        column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
+        column.addWidget(make_selectable(QLabel(DIAGNOSTICS_SECTION, container)))
+        column.addWidget(make_selectable(QLabel(DIAGNOSTICS_INTRO, container)))
+        column.addWidget(make_selectable(QLabel("Tools (full table)", container)))
+        column.addWidget(ToolsPanel(self._tools_status_read, parent=container))
+        column.addWidget(make_selectable(QLabel(LATEX_SECTION, container)))
+        column.addWidget(LatexPanel(self._store, parent=container))
+        column.addWidget(LogsPage(parent=container))
+        column.addStretch(1)
+
+        scroll = QScrollArea(self.tabs)
+        scroll.setObjectName("settings-scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(container)
+        return scroll
 
     def _build_mode_bar(self, parent: QWidget) -> QVBoxLayout:
         result = self._store.load()
@@ -437,6 +424,14 @@ class MainWindow(QMainWindow):
         column.addWidget(self.mode_description)
         column.addWidget(self.tunnel_detail)
         return column
+
+    # ----------------------------------------------------------- tabs
+
+    def _show_settings(self) -> None:
+        """Switch to the Settings tab. Home's Settings buttons use this."""
+        self.tabs.setCurrentWidget(self._settings_page)
+
+    # ----------------------------------------------------------- mode
 
     def _on_mode_changed(self, index: int) -> None:
         mode = self.mode_selector.itemData(index)

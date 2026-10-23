@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QRunnable, QThreadPool, Slot
+from PySide6.QtCore import QRunnable, QThreadPool, QTimer, Slot
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -40,6 +40,13 @@ REFRESH_TEXT = "Refresh"
 WAITING_TEXT = "Press Refresh to read the tools. No tool is started or stopped."
 CHECKING_TEXT = "Checking the tools. No tool is started or stopped."
 NO_RESULT_TEXT = "The tools check gave no result."
+# A read that has not finished after this many seconds stops holding Refresh. The read is not cancelled: if it
+# finishes, its answer still shows, unless a newer Refresh has replaced it. Nothing else changes.
+STALL_SECONDS = 60
+STALLED_TEXT = (
+    "The tools check has taken more than {} seconds. It may be waiting on the Meridian core. "
+    "Press Refresh to check again. No tool is started or stopped."
+).format(STALL_SECONDS)
 COLUMNS = ("Client", "Tool", "Status", "Configured", "Live", "What to do")
 
 
@@ -73,8 +80,15 @@ class ToolsPanel(QWidget):
         self._provider = status_provider
         self._busy = False
         self._read_once = False
+        # Each read takes the next number. A result with an older number is dropped, so a stalled read cannot
+        # overwrite the answer of a newer Refresh.
+        self._generation = 0
         # Identifies this panel's reads. A plain object, so a job can hold it without holding the panel.
         self._owner = object()
+        self._stall = QTimer(self)
+        self._stall.setSingleShot(True)
+        self._stall.setInterval(int(STALL_SECONDS * 1000))
+        self._stall.timeout.connect(self._on_stalled)
 
         heading = make_selectable(QLabel(HEADING_TEXT))
         heading.setObjectName("tools-heading")
@@ -118,23 +132,43 @@ class ToolsPanel(QWidget):
         if self._busy:
             return
         self._busy = True
+        self._generation += 1
+        generation = self._generation
         self._refresh.setEnabled(False)
         self._status.setText(CHECKING_TEXT)
+        self._stall.start()
         # The job holds the provider, the owner token and the shared delivery object. It never holds this panel.
         owner = self._owner
         delivery = shared_delivery()
         QThreadPool.globalInstance().start(
-            _RefreshJob(self._provider, lambda status: delivery.delivered.emit(Delivered(owner, status)))
+            _RefreshJob(
+                self._provider,
+                lambda status: delivery.delivered.emit(Delivered(owner, (generation, status))),
+            )
         )
 
-    @Slot(object)
-    def _on_delivered(self, item: object) -> None:
-        # Runs on the GUI thread. A result for another panel is dropped here.
-        if not isinstance(item, Delivered) or item.owner is not self._owner:
+    @Slot()
+    def _on_stalled(self) -> None:
+        """The read has taken too long. Refresh is pressable again, and the status says so. The read is not cancelled."""
+        if not self._busy:
             return
         self._busy = False
         self._refresh.setEnabled(True)
-        status = item.value
+        self._status.setText(STALLED_TEXT)
+
+    @Slot(object)
+    def _on_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another panel is dropped here, and so is one a newer Refresh superseded.
+        if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        if not isinstance(item.value, tuple) or len(item.value) != 2:
+            return
+        generation, status = item.value
+        if generation != self._generation:
+            return
+        self._stall.stop()
+        self._busy = False
+        self._refresh.setEnabled(True)
         if not isinstance(status, ToolsStatus):
             status = ToolsStatus(rows=(), message=NO_RESULT_TEXT)
         self._show(status)

@@ -19,7 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from meridian_desktop import updater
@@ -32,6 +33,8 @@ READY_TEXT = "Meridian Desktop {version} is ready. Restart to update."
 RESTART_TEXT = "Restart to update"
 LATER_TEXT = "Later"
 PAGE_TEXT = "Release page: {url}"
+# The result for a check that raised instead of returning. The Home card reads it as an offline check.
+CHECK_FAILED_TEXT = "The update check could not finish. Try again later."
 
 Launcher = Callable[[Path, str], None]
 
@@ -44,6 +47,11 @@ def downloading_text(version: str) -> str:
 def ready_text(version: str) -> str:
     """The label once a release is staged and waits for the restart."""
     return READY_TEXT.format(version=version)
+
+
+def open_release_page(url: str) -> bool:
+    """Open a release page in the browser with QDesktopServices.openUrl. Only the Home tab's Updates card calls this."""
+    return bool(QDesktopServices.openUrl(QUrl(url)))
 
 
 @dataclass(frozen=True)
@@ -102,7 +110,14 @@ class _CheckJob(QRunnable):
 
 
 class UpdateNoticeBar(QWidget):
-    """The status-bar update bar: hidden unless a release is downloading or staged. See the module docstring."""
+    """The status-bar update bar: hidden unless a release is downloading or staged. See the module docstring.
+
+    The Home tab's Updates card reads the same check through ``result``, ``checking``, ``enabled`` and
+    ``release_page_url``, and hears ``resultChanged`` each time a download notice or the final result arrives.
+    """
+
+    # Emitted on the GUI thread for each notice this bar receives: a download starting, or the final result.
+    resultChanged = Signal()
 
     def __init__(
         self,
@@ -134,6 +149,7 @@ class UpdateNoticeBar(QWidget):
         self._finished = False
         self._ready: str | None = None  # the staged version the bar offers to restart into
         self._dismissed = False  # Later was pressed: the staged bar stays hidden until the next launch
+        self._result: object | None = None  # the last final check result, as the Home card reads it
         # Identifies this bar's results. A plain object, so a job can hold it without holding the bar.
         self._owner = object()
         self._timer = QTimer(self)
@@ -171,6 +187,26 @@ class UpdateNoticeBar(QWidget):
     def check_finished(self) -> bool:
         """True once a check result has arrived, whatever it was."""
         return self._finished
+
+    @property
+    def result(self) -> object | None:
+        """The last final check result (an updater.UpdateResult), or None before one arrives."""
+        return self._result
+
+    @property
+    def enabled(self) -> bool:
+        """True when a check may run for this window: a transport was given and both update switches are on."""
+        return self._transport is not None and self._enabled()
+
+    @property
+    def checking(self) -> bool:
+        """True while the one check is running."""
+        return self._busy
+
+    @property
+    def release_page_url(self) -> str:
+        """The release page of the staged release, or "" when no release is staged."""
+        return updater.release_page_url_for(self._ready) if self._ready is not None else ""
 
     @property
     def ready_version(self) -> str | None:
@@ -230,9 +266,18 @@ class UpdateNoticeBar(QWidget):
         value = item.value
         if isinstance(value, _Downloading):
             self._show_downloading(value.version)
+            self.resultChanged.emit()
             return
         self._busy = False
         self._finished = True
+        if value is None:
+            # A check that raised delivers None. The Home card shows it as an offline check, not as "not checked".
+            value = updater.UpdateResult("offline", reason=CHECK_FAILED_TEXT)
+        self._result = value
+        self._show_final(value)
+        self.resultChanged.emit()
+
+    def _show_final(self, value: object) -> None:
         if isinstance(value, updater.UpdateResult) and value.status == "update_staged" and value.version:
             self._show_ready(value.version)
             return
@@ -296,5 +341,6 @@ __all__ = [
     "RESTART_TEXT",
     "UpdateNoticeBar",
     "downloading_text",
+    "open_release_page",
     "ready_text",
 ]

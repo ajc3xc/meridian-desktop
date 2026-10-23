@@ -22,7 +22,7 @@ from meridian_desktop.ui.text import enable_table_copy, selected_cells_text
 
 BY_MOUSE = Qt.TextInteractionFlag.TextSelectableByMouse
 BY_KEYBOARD = Qt.TextInteractionFlag.TextSelectableByKeyboard
-TABLE_NAMES = ("projects-table", "runpod-pods", "services-ports-table", "tunnel-slot-table")
+TABLE_NAMES = ("projects-table", "runpod-pods", "tools-table", "search-results", "zotero-results")
 
 
 def _window(qtbot, settings_path):

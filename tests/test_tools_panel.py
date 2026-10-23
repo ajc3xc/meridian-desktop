@@ -267,3 +267,54 @@ def test_a_read_from_another_panel_is_dropped(qtbot):
         qtbot.wait(20)  # the sibling's result has reached every panel that listens on the shared object
     assert visible_state(panel) == shown
     assert "Sibling read." not in _status_text(panel)
+
+
+def test_a_read_that_takes_too_long_stops_holding_refresh_and_says_so(qtbot, monkeypatch):
+    """The owner saw the panel stay on "Checking the tools". A read that does not finish after STALL_SECONDS now
+    leaves Refresh pressable, says it has stalled, and keeps the read: if the read finishes, its answer still shows."""
+    from meridian_desktop.ui import tools_panel
+
+    monkeypatch.setattr(tools_panel, "STALL_SECONDS", 0.05)
+    gate = threading.Event()
+
+    def held() -> ToolsStatus:
+        gate.wait(5)
+        return _ready("Late answer.")
+
+    panel = _panel(qtbot, held)
+    button = panel.findChild(QPushButton, "tools-refresh")
+    panel.refresh()
+    qtbot.waitUntil(lambda: button.isEnabled(), timeout=5000)
+    assert "Press Refresh to check again" in _status_text(panel)
+    assert "Checking the tools" not in _status_text(panel)
+
+    gate.set()
+    qtbot.waitUntil(lambda: "Late answer." in _status_text(panel), timeout=5000)
+    assert _table(panel).rowCount() == len(_rows())
+
+
+def test_a_newer_refresh_replaces_a_stalled_read_and_its_late_answer_is_dropped(qtbot, monkeypatch):
+    from meridian_desktop.ui import tools_panel
+
+    monkeypatch.setattr(tools_panel, "STALL_SECONDS", 0.05)
+    gate = threading.Event()
+    answers = iter(["First, stalled.", "Second, newer."])
+
+    def provider() -> ToolsStatus:
+        message = next(answers)
+        if message == "First, stalled.":
+            gate.wait(5)
+        return _ready(message)
+
+    panel = _panel(qtbot, provider)
+    button = panel.findChild(QPushButton, "tools-refresh")
+    panel.refresh()
+    qtbot.waitUntil(lambda: button.isEnabled(), timeout=5000)
+    panel.refresh()
+    qtbot.waitUntil(lambda: "Second, newer." in _status_text(panel), timeout=5000)
+
+    gate.set()
+    qtbot.wait(100)
+    assert "Second, newer." in _status_text(panel)
+    assert "First, stalled." not in _status_text(panel)
+
