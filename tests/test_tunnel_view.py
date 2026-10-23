@@ -387,15 +387,18 @@ def _page_buttons(page):
     return [button for button in buttons if button.objectName() != "qt_tableview_cornerbutton"]
 
 
-def test_tunnel_page_has_no_start_stop_or_restart_button(qtbot):
+def test_tunnel_page_has_only_the_tunnel_start_stop_and_restart_buttons(qtbot):
+    # The Tunnel tab's controls are the three buttons of ScopeControls for the tunnel (contract rules 2 and 9). No other
+    # button is on the page, before or after a snapshot.
+    expected = {"tunnel-start", "tunnel-stop", "tunnel-restart"}
     page = TunnelPage()
     qtbot.addWidget(page)
-    assert _page_buttons(page) == []
+    assert {button.objectName() for button in _page_buttons(page)} == expected
 
     page.set_snapshot(FIVE_STATE_SNAPSHOT)
-    assert _page_buttons(page) == []
+    assert {button.objectName() for button in _page_buttons(page)} == expected
 
-    # The module imports no button class either, so none can be added without this failing.
+    # The module imports no button class either, so the page cannot add a button of its own without this failing.
     page_path = REPO / "meridian_desktop" / "ui" / "tunnel_page.py"
     tree = ast.parse(page_path.read_text(encoding="utf-8"))
     imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}

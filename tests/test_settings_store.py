@@ -17,8 +17,10 @@ from meridian_desktop.settings_store import (
 
 REPO = Path(__file__).resolve().parents[1]
 
-# What a missing, corrupt or unreadable file gives: the defaults, with no mode the owner chose.
+# What a missing file gives: the defaults, with no mode the owner chose.
 NO_FILE_SETTINGS = replace(Settings(), mode_explicit=False)
+# What a corrupt or unreadable file gives: the same, but with the tunnel switch off (fail closed, X1).
+FAILED_READ_SETTINGS = replace(NO_FILE_SETTINGS, tunnel_control_enabled=False)
 
 
 def _write(path: Path, text: str) -> None:
@@ -58,7 +60,7 @@ def test_set_mode_round_trip(settings_path):
 def test_corrupt_file_returns_defaults_and_warning(settings_path):
     _write(settings_path, "{not json")
     result = SettingsStore(settings_path).load()
-    assert result.settings == NO_FILE_SETTINGS
+    assert result.settings == FAILED_READ_SETTINGS
     assert result.warning is not None
     assert "corrupt" in result.warning
 
@@ -66,7 +68,7 @@ def test_corrupt_file_returns_defaults_and_warning(settings_path):
 def test_json_that_is_not_an_object_returns_defaults_and_warning(settings_path):
     _write(settings_path, "[1, 2, 3]")
     result = SettingsStore(settings_path).load()
-    assert result.settings == NO_FILE_SETTINGS
+    assert result.settings == FAILED_READ_SETTINGS
     assert result.warning is not None
     assert "JSON object" in result.warning
 
@@ -76,9 +78,31 @@ def test_unreadable_file_returns_defaults_and_warning(tmp_path):
     path = tmp_path / "settings.json"
     path.mkdir()
     result = SettingsStore(path).load()
-    assert result.settings == NO_FILE_SETTINGS
+    assert result.settings == FAILED_READ_SETTINGS
     assert result.warning is not None
     assert "unreadable" in result.warning
+
+
+@pytest.mark.parametrize("text", ["{not json", "[1, 2, 3]"])
+def test_a_corrupt_settings_file_turns_the_tunnel_switch_off_and_says_so(settings_path, text):
+    _write(settings_path, text)
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.settings.tunnel_control_enabled is False
+    assert loaded.warning is not None and "tunnel controls off" in loaded.warning
+
+
+def test_an_unreadable_settings_file_turns_the_tunnel_switch_off_and_says_so(tmp_path):
+    path = tmp_path / "settings.json"
+    path.mkdir()
+    loaded = SettingsStore(path).load()
+    assert loaded.settings.tunnel_control_enabled is False
+    assert loaded.warning is not None and "tunnel controls off" in loaded.warning
+
+
+def test_a_missing_settings_file_keeps_the_tunnel_switch_on(settings_path):
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.settings.tunnel_control_enabled is True
+    assert loaded.warning is None
 
 
 def test_invalid_mode_in_file_falls_back_to_local(settings_path):
@@ -418,14 +442,38 @@ def test_a_launch_switch_turned_back_off_removes_its_key(settings_path):
 
 
 @pytest.mark.parametrize("key", CONTROL_KEYS)
-@pytest.mark.parametrize("value", ["yes", 1, None, []])
-def test_a_non_boolean_runner_switch_is_refused_with_a_warning(settings_path, key, value):
+def test_an_absent_runner_switch_gives_its_default_without_a_warning(settings_path, key):
+    _write(settings_path, "{}")
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.warning is None
+    assert getattr(loaded.settings, key) is CONTROL_DEFAULTS[key]
+
+
+MALFORMED_SWITCH_VALUES = ["yes", "true", 1, 0, None, []]
+
+
+@pytest.mark.parametrize("value", MALFORMED_SWITCH_VALUES)
+def test_a_malformed_tunnel_switch_is_read_as_false_and_never_as_its_default(settings_path, value):
+    # The default of this switch is true. A value that is not a real true or false must not give that default (X1).
+    _write(settings_path, json.dumps({"tunnel_control_enabled": value}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.settings.tunnel_control_enabled is False
+    assert "tunnel_control_enabled must be true or false; using false" in loaded.warning
+
+
+@pytest.mark.parametrize("key", ["zotero_autostart", "local_server_autostart"])
+@pytest.mark.parametrize("value", MALFORMED_SWITCH_VALUES)
+def test_a_malformed_launch_switch_is_read_as_false_with_a_warning(settings_path, key, value):
     _write(settings_path, json.dumps({key: value}))
 
     loaded = SettingsStore(settings_path).load()
 
-    assert getattr(loaded.settings, key) is CONTROL_DEFAULTS[key]
-    assert f"{key} must be true or false" in loaded.warning
+    assert getattr(loaded.settings, key) is False
+    assert f"{key} must be true or false; using false" in loaded.warning
 
 
 def test_a_saved_switch_keeps_every_other_field(settings_path):

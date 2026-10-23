@@ -94,7 +94,7 @@ ALREADY_RUNNING_MESSAGE = "The {label} is already running, so nothing was starte
 EXIT_MESSAGE = "The runner command exited with code {code}, so the {verb} did not succeed."
 STILL_RUNNING_MESSAGE = "Not confirmed: the runner still reports the {label} as running."
 # A stop whose runner state cannot be read. It is not confirmed, and it never says running.
-STATE_UNREADABLE_MESSAGE = "Not confirmed: the runner state could not be read. Press Refresh to check again."
+STATE_UNREADABLE_MESSAGE = "Not confirmed: the runner state could not be read."
 STATUS_FAILED_MESSAGE = "The {label} status could not be read. It is not shown as running."
 STATE_MESSAGES = {
     RUNNING: "The {label} is running.",

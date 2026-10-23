@@ -4,8 +4,9 @@ File: %LOCALAPPDATA%\\meridian-desktop\\settings.json, or
 ~/.meridian-desktop/settings.json when LOCALAPPDATA is unset.
 
 Reads never raise. A missing file gives defaults with no warning. A corrupt or
-unreadable file gives defaults plus a warning string. Writes are atomic: a temp
-file in the same directory, then os.replace.
+unreadable file gives defaults plus a warning string, with the tunnel switch off
+(fail closed, see load). Writes are atomic: a temp file in the same directory,
+then os.replace.
 """
 
 from __future__ import annotations
@@ -76,7 +77,8 @@ class Settings:
     # The owner-confirmed runner controls (docs/local-trust-contract.md). save() writes a key only when it differs from
     # its default, so a file that keeps the defaults keeps the keys it had before. tunnel_control_enabled switches the
     # tunnel start, stop and restart buttons, and defaults to true by owner decision on 2026-10-23 (amendment F). Each
-    # button still asks first. zotero_autostart and local_server_autostart start Zotero and the local server once at
+    # button still asks first. A malformed value, and a file that is corrupt or unreadable, read it as false, so the
+    # buttons fail closed. zotero_autostart and local_server_autostart start Zotero and the local server once at
     # launch, default to off, and are turned on only after the owner confirms the dialog.
     tunnel_control_enabled: bool = True
     zotero_autostart: bool = False
@@ -212,7 +214,9 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("check_updates must be true or false; using true")
 
-    # The runner control switches: an absent key means off, with no warning. Only a real true or false is accepted.
+    # The runner control switches: an absent key means its default in CONTROL_FLAG_DEFAULTS (tunnel on, the two launch
+    # switches off), with no warning. Only a real true or false is accepted. Any other value is read as false, never as
+    # the default, so a malformed tunnel switch fails closed instead of turning the tunnel buttons on.
     for key in CONTROL_FLAG_KEYS:
         if key not in data:
             continue
@@ -220,6 +224,7 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         if isinstance(value, bool):
             values[key] = value
         else:
+            values[key] = False
             problems.append(f"{key} must be true or false; using false")
 
     return replace(Settings(), **values), problems
@@ -263,27 +268,33 @@ class SettingsStore:
         return replace(settings, mode=self._launch_mode)
 
     def load(self) -> LoadResult:
+        # Fail closed for the tunnel switch (decision, X1). A missing file has no saved choice, so it keeps the default,
+        # which is on (amendment F). A file that is there but cannot be used has a saved choice nobody can read, so the
+        # tunnel switch is off until the owner fixes the file.
         no_file = replace(Settings(), mode_explicit=False)
+        unusable = replace(no_file, tunnel_control_enabled=False)
         try:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return LoadResult(self._for_this_run(no_file))
         except (OSError, ValueError) as exc:
             return LoadResult(
-                self._for_this_run(no_file),
-                f"settings file unreadable ({exc.__class__.__name__}); using defaults",
+                self._for_this_run(unusable),
+                f"settings file unreadable ({exc.__class__.__name__}); using defaults, with the tunnel controls off",
             )
 
         try:
             data = json.loads(raw)
         except ValueError:
             return LoadResult(
-                self._for_this_run(no_file), "settings file is corrupt (not valid JSON); using defaults",
+                self._for_this_run(unusable),
+                "settings file is corrupt (not valid JSON); using defaults, with the tunnel controls off",
             )
 
         if not isinstance(data, dict):
             return LoadResult(
-                self._for_this_run(no_file), "settings file does not hold a JSON object; using defaults",
+                self._for_this_run(unusable),
+                "settings file does not hold a JSON object; using defaults, with the tunnel controls off",
             )
 
         settings, problems = _from_mapping(data)

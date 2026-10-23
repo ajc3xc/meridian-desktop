@@ -310,7 +310,7 @@ def test_a_stop_is_not_confirmed_while_the_runner_still_reports_running(tmp_path
     assert "still reports" in result.message
 
 
-UNREADABLE_AFTER_STOP = "Not confirmed: the runner state could not be read. Press Refresh to check again."
+UNREADABLE_AFTER_STOP = "Not confirmed: the runner state could not be read."
 
 
 def test_a_stop_whose_runner_state_is_unknown_says_the_state_could_not_be_read_and_never_running(tmp_path):
@@ -324,6 +324,8 @@ def test_a_stop_whose_runner_state_is_unknown_says_the_state_could_not_be_read_a
     assert result.message == UNREADABLE_AFTER_STOP
     assert "running" not in result.message
     assert "still reports" not in result.message
+    # No control is named: the Tunnel tab and the Settings runner block have no Refresh button.
+    assert "Refresh" not in result.message
     assert "outcome=not_confirmed pid=60" in log.read_text(encoding="utf-8")
 
 

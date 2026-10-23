@@ -1,7 +1,7 @@
 # Local-trust contract: desktop tunnel and runner controls
 
-Status: CONFIRMED by the owner in chat on 2026-10-22, with the Amendment at the end of this file.
-Amendment F records an owner decision made on 2026-10-23.
+Status: CONFIRMED by the owner in chat on 2026-10-22, with Amendments A to E at the end of this file.
+Amendment F, also at the end, was accepted by the owner in chat on 2026-10-23.
 Written by the desktop maintainer at the owner's request (sprint item 84d8fd28 is not in the
 repository).
 
@@ -32,8 +32,9 @@ repository).
 
 ## Owner confirmation
 
-- [x] Read this contract and agree to it, with the Amendment.
+- [x] Read this contract and agree to it, with Amendments A to E.
 - Confirmed by the owner in chat on: 2026-10-22
+- Amendment F accepted by the owner in chat on: 2026-10-23
 
 Once confirmed, the owner's sprint item 84d8fd28 is recorded done, and the start, stop and
 restart controls may be built to this contract.
@@ -62,6 +63,8 @@ D. Tunnel start, stop and restart stay user actions only, and stay behind `tunne
    (default true from 2026-10-23, Amendment F), as rule 10 says.
 E. Every start in A and B is logged to the same local file as rule 6, with the time, the scope or
    program, the outcome and the pid if reported. The log holds no secrets.
+
+## Amendment F (accepted by the owner in chat on 2026-10-23)
 
 F. Owner decision, 2026-10-23. `tunnel_control_enabled` now defaults to `true`, in place of the
    default `false` of rule 10. The Start, Stop and Restart buttons on the Tunnel tab are on while the
