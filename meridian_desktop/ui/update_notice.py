@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, QUrl, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
@@ -68,7 +68,11 @@ class UpdateNoticeBar(QWidget):
 
     start(enabled) runs one check. A second call does nothing, and nothing runs when enabled is False or when
     no transport was given. Only an UpdateNotice result shows the bar. Every other result hides it again.
+    The Home tab's Updates card reads the same result through ``result`` and hears ``resultChanged`` when it arrives.
     """
+
+    # Emitted on the GUI thread when the check's result arrives, whatever it was.
+    resultChanged = Signal()
 
     def __init__(
         self,
@@ -85,6 +89,7 @@ class UpdateNoticeBar(QWidget):
         self._url = ""
         self._started = False
         self._finished = False
+        self._result: object | None = None
         # Identifies this bar's check. A plain object, so the check job can hold it without holding the bar.
         self._owner = object()
         shared_delivery().delivered.connect(self._on_delivered)
@@ -109,6 +114,21 @@ class UpdateNoticeBar(QWidget):
     def check_finished(self) -> bool:
         """True once a check result has arrived, whatever it was."""
         return self._finished
+
+    @property
+    def result(self) -> object | None:
+        """The check's result (UpdateNotice, UpToDate, Offline or Refused), or None before it arrives."""
+        return self._result
+
+    @property
+    def enabled(self) -> bool:
+        """True when the one check was started for this window. False when check_updates is off or no transport was given."""
+        return self._started
+
+    @property
+    def checking(self) -> bool:
+        """True while the one check is running."""
+        return self._started and not self._finished
 
     @property
     def release_page_url(self) -> str:
@@ -136,6 +156,11 @@ class UpdateNoticeBar(QWidget):
             return
         result = item.value
         self._finished = True
+        self._result = result
+        self._show_result(result)
+        self.resultChanged.emit()
+
+    def _show_result(self, result: object) -> None:
         if isinstance(result, updater.UpdateNotice):
             self._url = result.release_page_url
             self._label.setText(notice_text(result.version))

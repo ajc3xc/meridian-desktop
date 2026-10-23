@@ -7,7 +7,7 @@ Settings panel. These tests pin the fix.
 
 import dataclasses
 
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QFrame, QLabel
 
 from _fakes import MemoryKeyring
 from meridian_desktop import local_client
@@ -15,7 +15,6 @@ from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, MainWindow
 from meridian_desktop.ui.projects_tab import default_sources
-from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.zotero_client import API_NOT_RUNNING, NOT_RUNNING_MESSAGE, ApiCheck, ZoteroStatus
 
 # The Settings panel's key row and pods table need at least this much room on first show.
@@ -99,23 +98,17 @@ def test_window_cannot_shrink_below_the_tab_bar(qtbot, settings_path):
     assert _clipped_tabs(bar) == []
 
 
-def test_zotero_tab_is_the_panel_and_keeps_the_window_size(qtbot, settings_path):
+def test_home_zotero_card_checks_on_boot_and_keeps_the_window_size(qtbot, settings_path):
     fake = _OfflineZotero()
     window = MainWindow(SettingsStore(settings_path), zotero=fake, data_sources=_offline_sources())
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
-    # Showing the window does not check Zotero. Only selecting the Zotero tab does.
-    assert fake.status_calls == 0
-
-    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-    index = names.index("Zotero")
-    window.tabs.setCurrentIndex(index)
-    page = window.tabs.widget(index)
-    assert isinstance(page, ZoteroPanel)
-    assert page.objectName() == "zotero-panel"
-    refresh = page.findChild(QPushButton, "zotero-refresh")
-    qtbot.waitUntil(lambda: fake.status_calls == 1 and refresh.isEnabled())
+    # Showing the window checks Zotero once, on Home, with no tab opened.
+    qtbot.waitUntil(lambda: fake.status_calls == 1, timeout=5000)
+    card = window.findChild(QFrame, "home-card-zotero")
+    assert card is not None
+    qtbot.waitUntil(lambda: card.findChild(QLabel, "home-zotero-headline").text() == "Not installed", timeout=5000)
     assert fake.status_calls == 1
 
     assert window.width() <= DEFAULT_WINDOW_SIZE[0]

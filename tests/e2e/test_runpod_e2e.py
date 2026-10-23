@@ -201,9 +201,11 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp):
         qtbot.waitExposed(window)
 
         names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        panel = window.tabs.widget(names.index("Settings"))
-        assert panel.objectName() == "runpod-panel"
-        window.tabs.setCurrentWidget(panel)
+        page = window.tabs.widget(names.index("Settings"))
+        # The Settings tab scrolls its sections, and the RunPod panel is one of them.
+        panel = page.findChild(RunPodPanel, "runpod-panel")
+        assert panel is not None
+        window.tabs.setCurrentWidget(page)
 
         # Showing the tab probes the server. Wait for the probe and the start-up key read.
         qtbot.waitUntil(lambda: not panel.busy, timeout=10000)

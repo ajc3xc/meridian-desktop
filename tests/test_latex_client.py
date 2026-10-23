@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QLabel, QPushButton
+from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
 from _fakes import MemoryKeyring, QuietServer
 from meridian_desktop import latex_client
@@ -36,7 +36,7 @@ from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui.latex_panel import CONNECTED_TEXT, NOT_CONNECTED_TEXT, LatexPanel
-from meridian_desktop.ui.main_window import LATEX_SECTION, PLACEHOLDER_REASONS, MainWindow
+from meridian_desktop.ui.main_window import LATEX_SECTION, MainWindow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_URL = "http://127.0.0.1:8471"
@@ -357,7 +357,7 @@ def _no_source(*args):
     raise AssertionError("no data source is read in this test")
 
 
-def test_writing_tab_keeps_the_latex_label_and_places_the_panel_under_it(qtbot, settings_path):
+def test_settings_diagnostics_keeps_the_latex_label_and_places_the_panel_under_it(qtbot, settings_path):
     sources = DataSources(
         probe=lambda url: "not_running",
         read_server=_no_source,
@@ -372,12 +372,12 @@ def test_writing_tab_keeps_the_latex_label_and_places_the_panel_under_it(qtbot, 
     )
     qtbot.addWidget(window)
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-    page = window.tabs.widget(names.index("Writing"))
+    page = window.tabs.widget(names.index("Settings"))
+    body = page.findChild(QWidget, "settings-page")
 
-    panel = page.findChild(LatexPanel, "latex-panel")
-    labels = [label for label in page.findChildren(QLabel) if label.text() == LATEX_SECTION]
+    panel = body.findChild(LatexPanel, "latex-panel")
+    labels = [label for label in body.findChildren(QLabel) if label.text() == LATEX_SECTION]
     assert panel is not None
     assert len(labels) == 1
-    assert PLACEHOLDER_REASONS["Writing"] in [label.text() for label in page.findChildren(QLabel)]
-    layout = page.layout()
+    layout = body.layout()
     assert layout.indexOf(panel) == layout.indexOf(labels[0]) + 1
