@@ -313,6 +313,60 @@ def test_tunnel_buttons_are_on_once_the_core_is_set_and_the_switch_is_on(qtbot, 
     assert not tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
 
 
+def test_a_core_found_after_the_boot_checks_is_read_again_by_the_tunnel_and_tools_cards(qtbot, tmp_path):
+    """The launch-time core search can finish after the boot checks. The Tunnel and Tools cards then read the core again,
+    so they stop saying it is not set, and the Open Settings button goes away."""
+    store = SettingsStore(tmp_path / "settings.json")
+    found = {"core": False}
+
+    def tunnel(scope):
+        if not found["core"]:
+            return _tunnel_not_available(scope)
+        return RunnerResult(verb="status", ok=True, payload={"scope": "tunnel", "child": {"state": "not_started"}}, exit_code=0)
+
+    def tools():
+        if not found["core"]:
+            not_set = "The Meridian core checkout is not set. Choose it in Settings."
+            return ToolsStatus(rows=(), message=not_set, checked_at=datetime(2026, 10, 23, 14, 5))
+        return _tools_ready()
+
+    actions = RunnerActions(store, make_control=lambda python, cwd: None, confirm=lambda *args: False)
+    tab = _shown(qtbot, _deps(tmp_path, actions=actions, tunnel=tunnel, tools=tools))
+    _wait_settled(qtbot, tab, "tunnel")
+    qtbot.waitUntil(lambda: _headline(tab, "tools") == "Not checked yet", timeout=5000)
+    assert _headline(tab, "tunnel") == "Not checked"
+    assert tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
+
+    # The search finds the core, saves it, and says it has finished.
+    store.save(Settings(core_python=str(tmp_path / "python.exe"), core_checkout=str(tmp_path / "core")))
+    found["core"] = True
+    actions.coreChanged.emit()
+
+    qtbot.waitUntil(lambda: _headline(tab, "tunnel") == "Not running", timeout=5000)
+    qtbot.waitUntil(lambda: _headline(tab, "tools") == "All set up", timeout=5000)
+    assert not tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
+    assert tab.findChild(QPushButton, "tunnel-start").isEnabled()
+
+
+def test_a_search_still_running_does_not_re_read_the_cards_yet(qtbot, tmp_path):
+    """A coreChanged that comes from the start of a search is skipped, so the cards are not read while the core is unknown."""
+    store = SettingsStore(tmp_path / "settings.json")
+    reads = []
+
+    def tunnel(scope):
+        reads.append(scope)
+        return _tunnel_not_available(scope)
+
+    actions = RunnerActions(store, make_control=lambda python, cwd: None, confirm=lambda *args: False)
+    tab = _shown(qtbot, _deps(tmp_path, actions=actions, tunnel=tunnel))
+    _wait_settled(qtbot, tab, "tunnel")
+    before = len(reads)
+    actions._locating = True  # a search is running: the start of one emits coreChanged too
+    actions.coreChanged.emit()
+    qtbot.wait(50)
+    assert len(reads) == before
+
+
 def test_tunnel_start_asks_first_and_a_no_starts_nothing(qtbot, tmp_path):
     store = _core_settings(tmp_path)
     asked = []
@@ -400,6 +454,30 @@ def test_updates_card_shows_the_one_startup_check_and_its_release_button(qtbot, 
     tab = _shown(qtbot, _deps(tmp_path, updates=bar))
     qtbot.waitUntil(lambda: _headline(tab, "updates") == "Update ready: v9.9.9", timeout=5000)
     assert _card(tab, "updates").findChild(QPushButton, "home-updates-action").text() == "Open release page"
+
+
+def test_a_source_run_says_updates_are_not_applied_and_makes_no_request(qtbot, tmp_path, monkeypatch):
+    """A run from source cannot take an update. The Updates card gets the refused reason at once, instead of staying at
+    "Not checked yet", and no request or check is made."""
+    calls = []
+
+    def transport(request, timeout):
+        calls.append(request)
+        raise AssertionError("a source run must not make a request")
+
+    def must_not_stage(*args, **kwargs):
+        raise AssertionError("a source run must not stage an update")
+
+    monkeypatch.setattr(updater, "running_frozen", lambda: False)
+    monkeypatch.setattr(updater, "check_and_stage", must_not_stage)
+    bar = UpdateNoticeBar("0.2.0", transport=transport, install_root=tmp_path, enabled=lambda: True)
+    qtbot.addWidget(bar)
+    bar.start()
+    tab = _shown(qtbot, _deps(tmp_path, updates=bar))
+    detail = _card(tab, "updates").findChild(QLabel, "home-updates-detail")
+    qtbot.waitUntil(lambda: detail.text() == updater.DEV_RUN_REASON, timeout=5000)
+    assert _headline(tab, "updates") == "Could not check"
+    assert calls == []
 
 
 def test_updates_card_says_checks_are_off_when_check_updates_is_off(qtbot, tmp_path):

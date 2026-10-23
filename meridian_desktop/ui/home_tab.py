@@ -257,9 +257,13 @@ class _Card(QFrame):
         """Put a widget (the tunnel's control buttons) under the card's text."""
         self._body.addWidget(widget)
 
-    def check(self) -> None:
-        """Run this card's read on the thread pool. A read already running is not doubled, and a stalled one is replaced."""
-        if self._work is None or self._busy:
+    def check(self, *, replace: bool = False) -> None:
+        """Run this card's read on the thread pool. A read already running is not doubled, and a stalled one is replaced.
+
+        ``replace`` starts a new read even when one is running. The older answer is then dropped when it arrives, because
+        the generation has moved on, so a read that began before the core was found cannot show after the newer one.
+        """
+        if self._work is None or (self._busy and not replace):
             return
         self._busy = True
         self._generation += 1
@@ -515,6 +519,21 @@ class HomeTab(QWidget):
         self._tunnel_settings.setObjectName("home-tunnel-settings")
         self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
         self._tunnel.add_body(self._tunnel_settings)
+        # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
+        deps.actions.coreChanged.connect(self._on_core_changed)
+
+    def _on_core_changed(self) -> None:
+        """The core search finished, or the core setup was saved: the tunnel buttons and the Tunnel and Tools cards read again.
+
+        The boot checks can run before the launch-time search finds the core, so their first answers can say the core is not
+        set. A search that is still running is skipped here, because its finish comes back through this slot.
+        """
+        actions = self._deps.actions
+        if actions is None or actions.locating:
+            return
+        self.refresh_tunnel_gate()
+        self._tunnel.check(replace=True)
+        self._tools.check(replace=True)
 
     def refresh_tunnel_gate(self) -> None:
         """Read the saved core setup again. The tunnel buttons are on only when the gate allows, and Open Settings shows when they are off."""
