@@ -79,6 +79,11 @@ PRESS_REFRESH_TEXT = "Press Refresh to read this project's sessions."
 NO_PROJECTS_TEXT = "No projects are available to pick. Create a project in Meridian first."
 PROJECTS_FAILED_TEXT = "The projects could not be read. Check the local server or the database file in Settings."
 READ_FAILED_TEXT = "The sessions could not be read. Check the local server or the hosted token in Settings."
+# The desktop has no read-only process check for Claude Desktop or Claude Code yet, so this line says so and lists none.
+CLAUDE_PROCESSES_TEXT = (
+    "Running Claude Desktop and Claude Code processes on this computer: Not connected. "
+    "This desktop has no read-only check for them yet, so none are listed here."
+)
 UNNAMED_TEXT = "(unnamed)"
 SOURCE_TEXT = {SOURCE_LOCAL: "this computer's Meridian server", SOURCE_HOSTED: "hosted Meridian"}
 
@@ -293,6 +298,8 @@ class SessionsPanel(QWidget):
 
         self._status = _label(self, "sessions-status", LOADING_TEXT)
         layout.addWidget(self._status)
+        self._claude_processes = _label(self, "sessions-claude-processes", CLAUDE_PROCESSES_TEXT)
+        layout.addWidget(self._claude_processes)
 
         self._table = QTableWidget(0, len(COLUMNS), self)
         self._table.setObjectName("sessions-table")

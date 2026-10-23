@@ -319,6 +319,18 @@ def test_no_text_says_not_built_yet(qtbot):
     assert "not built yet" not in all_visible_text(panel).lower()
 
 
+def test_running_claude_processes_say_not_connected_and_list_none(qtbot):
+    # No read-only process check exists for Claude Desktop or Claude Code yet, so the tab says so plainly.
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
+    panel.show()
+    settle(qtbot, panel)
+    line = panel.findChild(QLabel, "sessions-claude-processes").text()
+    assert "Claude Desktop and Claude Code" in line
+    assert "Not connected" in line
+    # The only table row is the one session the local server sent, never a process.
+    assert table_of(panel).rowCount() == 1
+
+
 # ----------------------------------------------------------------- picker
 
 
