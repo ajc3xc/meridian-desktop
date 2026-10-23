@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meridian-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local coordination desktop for Meridian (PySide6). Wave 1 skeleton."
 readme = "README.md"
 # requires-python is 3.10 for now: the only interpreter on this machine is
