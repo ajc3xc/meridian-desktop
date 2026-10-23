@@ -69,12 +69,11 @@ PREVIEW_ACTIONS = frozenset({"unchanged", "would_write", "would_remove"})
 CHANGE_ACTIONS = frozenset({"unchanged", "written", "removed"})
 
 NOT_SET_CHECKOUT_TEXT = (
-    "Meridian core checkout is not set. In Settings, choose the folder that holds the meridian "
-    "package and save it."
+    "Meridian core checkout is not set. Press Find it again, or Choose the Meridian core folder, "
+    "and the Python is found after that."
 )
 NOT_SET_PYTHON_TEXT = (
-    "Python for Meridian core is not set. In Settings, choose the python.exe that can import meridian "
-    "and save it."
+    "Python for Meridian core is not set. Press Find it again, or pick the python.exe with Browse and Save."
 )
 CHECKOUT_MISSING_TEXT = (
     "The Meridian core checkout folder does not exist: {path}. In Settings, choose the folder again "

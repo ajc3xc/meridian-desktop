@@ -285,7 +285,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._runner)
 
         # Client setup: the Meridian core checkout, then one row per client with Check, Apply and Remove.
-        self._client_setup = ClientSetupSection(self._store, self)
+        self._client_setup = ClientSetupSection(self._store, self, actions=self._actions)
         layout.addWidget(self._client_setup)
         # A saved core path turns the launch switches off, so the runner block shows them as saved now.
         self._client_setup.coreChanged.connect(self._runner.refresh_flags)

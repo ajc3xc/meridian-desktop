@@ -12,11 +12,13 @@ import json
 import subprocess
 import threading
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QPushButton
 
+from meridian_desktop.core_locator import FOUND, NOT_FOUND, SOURCE_SEARCHED, LocatedCore
 from meridian_desktop.runner_controls import RunnerControl, build_argv, describe_command
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop.ui.runner_actions import CoreSetup, RunnerActions
+from meridian_desktop.ui.runner_actions import CHOOSE_CANCELLED_TEXT, CHOSEN_TEXT, CoreSetup, RunnerActions
 from meridian_desktop.ui.scope_controls import (
     CORE_NOT_SET_TEXT,
     TUNNEL_OFF_TEXT,
@@ -440,3 +442,98 @@ def test_the_tunnel_buttons_are_enabled_by_default_once_the_core_is_set(qtbot, s
 
     for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
         assert _button(widget, name).isEnabled() is True, name
+
+
+# ------------------------------------------------------------------ the one-step fix next to a greyed control
+
+
+def _fix(widget, prefix="tunnel") -> QPushButton:
+    return widget.findChild(QPushButton, f"{prefix}-fix")
+
+
+def _located_actions(settings_path, *, locate, choose_folder=lambda parent, start: "", spawn=None, tmp_path=None):
+    """RunnerActions with a fake core search and a fake folder chooser. Nothing starts a process or opens a dialog."""
+    return RunnerActions(
+        SettingsStore(settings_path),
+        make_control=lambda python, cwd: RunnerControl(
+            python, cwd, spawn=spawn or Spawn(), log_path=(tmp_path or settings_path.parent) / "log.txt", clock=lambda: STAMP,
+        ),
+        confirm=Confirm(),
+        locate=locate,
+        choose_folder=choose_folder,
+    )
+
+
+def test_the_fix_button_is_shown_only_while_the_gate_is_off_and_names_the_one_thing_that_enables_it(qtbot, settings_path, tmp_path):
+    _settings(settings_path, core_python="", core_checkout="")
+    widget = _widget(qtbot, _actions(settings_path, Spawn(), Confirm(), tmp_path / "log.txt"))
+    assert _fix(widget).isVisibleTo(widget) is True
+    assert _fix(widget).text() == "Choose the Meridian core folder"
+    assert _fix(widget).isEnabled() is True
+
+    _settings(settings_path)
+    widget.refresh_enabled()
+    assert _fix(widget).isVisibleTo(widget) is False  # the core is set and the switch is on, so nothing needs a fix
+
+    _settings(settings_path, tunnel_control_enabled=False)
+    widget.refresh_enabled()
+    assert _fix(widget).text() == "Turn on the tunnel controls"
+
+
+def test_choose_the_core_folder_turns_the_controls_on_once_the_search_finds_the_core(qtbot, settings_path, tmp_path):
+    _settings(settings_path, core_python="", core_checkout="")
+    checkout = tmp_path / "chosen" / "repository"
+    checkout.mkdir(parents=True)
+    (checkout / "meridian").mkdir()
+    (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "env" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"MZ")
+    actions = _located_actions(
+        settings_path,
+        locate=lambda store: LocatedCore(FOUND, str(checkout), str(python), SOURCE_SEARCHED),
+        choose_folder=lambda parent, start: str(checkout),
+    )
+    widget = _widget(qtbot, actions)
+    assert _button(widget, "tunnel-start").isEnabled() is False
+
+    qtbot.mouseClick(_fix(widget), Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(lambda: _button(widget, "tunnel-start").isEnabled(), timeout=5000)
+    assert _label(widget, "tunnel-control-result").text() == CHOSEN_TEXT
+    assert SettingsStore(settings_path).load().settings.core_python == str(python)
+
+
+def test_a_cancelled_folder_choice_keeps_the_controls_off_and_the_fix_button_there(qtbot, settings_path, tmp_path):
+    _settings(settings_path, core_python="", core_checkout="")
+    actions = _located_actions(settings_path, locate=lambda s: LocatedCore(NOT_FOUND, reason="none"), choose_folder=lambda p, s: "")
+    widget = _widget(qtbot, actions)
+
+    qtbot.mouseClick(_fix(widget), Qt.MouseButton.LeftButton)
+
+    assert _label(widget, "tunnel-control-result").text() == CHOOSE_CANCELLED_TEXT
+    assert _button(widget, "tunnel-start").isEnabled() is False
+    assert _fix(widget).isVisibleTo(widget) is True
+
+
+def test_the_turn_on_button_sets_the_switch_and_the_buttons_come_on(qtbot, settings_path, tmp_path):
+    _settings(settings_path, tunnel_control_enabled=False)
+    widget = _widget(qtbot, _actions(settings_path, Spawn(), Confirm(), tmp_path / "log.txt"))
+
+    qtbot.mouseClick(_fix(widget), Qt.MouseButton.LeftButton)
+
+    assert SettingsStore(settings_path).load().settings.tunnel_control_enabled is True
+    assert _button(widget, "tunnel-start").isEnabled() is True
+    assert _fix(widget).isVisibleTo(widget) is False
+
+
+def test_the_gate_reads_the_setup_again_when_the_core_setup_changes(qtbot, settings_path, tmp_path):
+    _settings(settings_path, core_python="", core_checkout="")
+    actions = _located_actions(settings_path, locate=lambda s: LocatedCore(NOT_FOUND, reason="none"))
+    widget = _widget(qtbot, actions)
+    assert _button(widget, "tunnel-start").isEnabled() is False
+
+    _settings(settings_path)  # the core is saved somewhere else, for example by the client setup section
+    actions.notify_core_changed()
+
+    assert _button(widget, "tunnel-start").isEnabled() is True

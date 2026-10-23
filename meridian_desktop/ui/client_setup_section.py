@@ -7,7 +7,9 @@ core makes a backup first. The result line then shows the backup path and whethe
 
 Every command runs on the thread pool, so the window stays responsive. The core checkout and Python
 are typed or chosen here and saved through settings_store, which refuses a path that does not exist.
-The runner and the dialogs are injected, so the tests never start the real command or open a real dialog.
+The top of the section says what the desktop found on this computer (ui/runner_actions.py, RunnerActions.find_core),
+with Find it again, and Choose the Meridian core folder when nothing usable was found. The owner does not have to type
+either path. The runner and the dialogs are injected, so the tests never start the real command or open a real dialog.
 """
 
 from __future__ import annotations
@@ -44,11 +46,22 @@ from meridian_desktop.client_setup_runner import (
     names_text,
     unchecked_rows,
 )
+from meridian_desktop.core_locator import LocatedCore
 from meridian_desktop.settings_store import CORE_CHECKOUT_KEY, CORE_PYTHON_KEY, SettingsStore
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
+from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.text import make_selectable
 
 HEADING_TEXT = "Client setup"
+FIND_AGAIN_TEXT = "Find it again"
+CHOOSE_CORE_TEXT = "Choose the Meridian core folder"
+LOCATING_TEXT = "Looking for the Meridian core on this computer. This takes a few seconds."
+NOT_LOOKED_TEXT = "The Meridian core has not been looked for yet in this run."
+FOUND_TEXT = "Meridian core found on this computer: {checkout}. Its Python: {python}."
+NOT_FOUND_TEXT = (
+    "The Meridian core was not found. {reason} Choose the Meridian core folder, "
+    "or press Find it again after you move or install it."
+)
 INTRO_TEXT = (
     "Writes Meridian's local tools into each client's own settings file. Check setup changes nothing. "
     "Apply and Remove ask first, and a backup of the file is made before anything is written."
@@ -271,7 +284,9 @@ class _RowWidgets:
 class ClientSetupSection(QWidget):
     """The client setup block for the Settings page. One section, one row per client.
 
-    ``coreChanged`` is emitted after a core path is saved, so the runner block on the same tab shows its switches again.
+    ``coreChanged`` is emitted after a core path is saved, or after the core search changes the setup, so the runner
+    block on the same tab shows its switches and its local state again. The boxes follow the saved paths, except a box the
+    owner has typed into, which is left as it is.
     """
 
     coreChanged = Signal()
@@ -285,6 +300,7 @@ class ClientSetupSection(QWidget):
         choose_folder: FolderChooser = _choose_checkout_folder,
         choose_python: FileChooser = _choose_python_file,
         confirm: Confirm = _ask_yes_no,
+        actions: RunnerActions | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("client-setup-section")
@@ -293,6 +309,10 @@ class ClientSetupSection(QWidget):
         self._choose_folder = choose_folder
         self._choose_python = choose_python
         self._confirm = confirm
+        self._actions = actions if actions is not None else RunnerActions(settings_store)
+        # The saved values the two boxes last showed. A box that still shows one follows the saved value; any other is typed.
+        self._shown_checkout = ""
+        self._shown_python = ""
         self._rows: dict[str, ClientRow] = {row.client: row for row in unchecked_rows()}
         self._widgets: dict[str, _RowWidgets] = {}
         self._busy = False
@@ -303,6 +323,7 @@ class ClientSetupSection(QWidget):
         self._owner = object()
         self._generation = 0
         shared_delivery().delivered.connect(self._on_delivered)
+        self._actions.coreChanged.connect(self._on_core_changed)
         self._build()
         self.refresh()
         self._render_rows()
@@ -314,6 +335,17 @@ class ClientSetupSection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(_label(self, "client-setup-heading", HEADING_TEXT))
         layout.addWidget(_label(self, "client-setup-intro", INTRO_TEXT))
+
+        # What the search found, with the two buttons that search again or let the owner choose the folder.
+        self._finder_status = _label(self, "client-setup-finder-status")
+        layout.addWidget(self._finder_status)
+        finder_row = QHBoxLayout()
+        self._find_again = _button(self, "client-setup-find-again", FIND_AGAIN_TEXT)
+        self._choose_core = _button(self, "client-setup-choose-core", CHOOSE_CORE_TEXT)
+        finder_row.addWidget(self._find_again)
+        finder_row.addWidget(self._choose_core)
+        finder_row.addStretch(1)
+        layout.addLayout(finder_row)
 
         self._checkout_input = QLineEdit(self)
         self._checkout_input.setObjectName("client-setup-checkout")
@@ -366,6 +398,8 @@ class ClientSetupSection(QWidget):
         self._save_checkout.clicked.connect(self._on_save_checkout)
         self._save_python.clicked.connect(self._on_save_python)
         self._check_button.clicked.connect(self._on_check_clicked)
+        self._find_again.clicked.connect(self._on_find_again_clicked)
+        self._choose_core.clicked.connect(self._on_choose_core_clicked)
 
     def _path_row(self, label: QLabel, line: QLineEdit, browse: QPushButton, save: QPushButton) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -408,7 +442,40 @@ class ClientSetupSection(QWidget):
         settings = self._store.load().settings
         self._checkout_input.setText(settings.core_checkout)
         self._python_input.setText(settings.core_python)
+        self._shown_checkout = settings.core_checkout
+        self._shown_python = settings.core_python
         self._recompute()
+        self._render_finder()
+
+    def _follow_saved_boxes(self) -> None:
+        """Move a box to a new saved path, unless the owner has typed into it since it last showed a saved path."""
+        settings = self._store.load().settings
+        if self._checkout_input.text().strip() == self._shown_checkout:
+            self._checkout_input.setText(settings.core_checkout)
+            self._shown_checkout = settings.core_checkout
+        if self._python_input.text().strip() == self._shown_python:
+            self._python_input.setText(settings.core_python)
+            self._shown_python = settings.core_python
+
+    def _render_finder(self) -> None:
+        """Say what the search found on this computer, in plain words."""
+        located: LocatedCore | None = self._actions.located
+        if self._actions.locating:
+            text = LOCATING_TEXT
+        elif located is None:
+            text = NOT_LOOKED_TEXT
+        elif located.found:
+            text = FOUND_TEXT.format(checkout=located.checkout, python=located.python)
+        else:
+            text = NOT_FOUND_TEXT.format(reason=located.reason)
+        _set_message(self._finder_status, text)
+
+    def _choose_core_needed(self) -> bool:
+        """The Choose button shows while the setup is not usable: the search found nothing, or the saved setup is not set."""
+        located = self._actions.located
+        if located is not None and not located.found:
+            return True
+        return not self._actions.core().core_ready
 
     def _recompute(self) -> None:
         """Say plainly what is not set yet, and turn the buttons on or off. The boxes are left as they are."""
@@ -452,6 +519,10 @@ class ClientSetupSection(QWidget):
         ):
             widget.setEnabled(not busy)
         self._check_button.setEnabled(not busy)
+        searching = self._actions.locating
+        self._find_again.setEnabled(not busy and not searching)
+        self._choose_core.setEnabled(not busy and not searching)
+        self._choose_core.setVisible(self._choose_core_needed())
         for client, _name in CLIENTS:
             row = self._rows[client]
             widgets = self._widgets[client]
@@ -473,7 +544,7 @@ class ClientSetupSection(QWidget):
     def _save_core(self, key: str, value: str, saved_text: str) -> None:
         before = self._store.load().settings
         try:
-            self._store.set_core_path(key, value)
+            saved = self._store.set_core_path(key, value)
         except ValueError as exc:
             # The store's text is fixed wording that names the path it refused, and nothing was written.
             _set_message(self._settings_message, str(exc))
@@ -481,11 +552,34 @@ class ClientSetupSection(QWidget):
         except OSError:
             _set_message(self._settings_message, NOT_WRITTEN_TEXT)
             return
+        # The box that was just saved now shows a saved path, so a later search may move it.
+        if key == CORE_CHECKOUT_KEY:
+            self._shown_checkout = saved.core_checkout
+        else:
+            self._shown_python = saved.core_python
         # A saved core path turns both launch-time switches off (contract amendment C), and the status line says so.
         turned_off = before.zotero_autostart or before.local_server_autostart
         _set_message(self._settings_message, f"{saved_text} {LAUNCH_STARTS_OFF_TEXT}" if turned_off else saved_text)
         self._recompute()  # the other box keeps what the user typed, saved or not
         self.coreChanged.emit()  # the runner block on this tab shows the switches as they are saved now
+        self._actions.notify_core_changed()  # the Tunnel and local controls read the saved setup again
+
+    @Slot()
+    def _on_find_again_clicked(self) -> None:
+        """Search this computer again. The search runs on the thread pool, and its result comes back through _on_core_changed."""
+        self._actions.find_core()
+
+    @Slot()
+    def _on_choose_core_clicked(self) -> None:
+        _set_message(self._settings_message, self._actions.choose_core_folder(self))
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """The core search finished or started, or the core folder changed. Show the search result and the saved paths."""
+        self._follow_saved_boxes()
+        self._recompute()
+        self._render_finder()
+        self.coreChanged.emit()  # the runner block on this tab reads its switches and local state again
 
     @Slot()
     def _on_browse_checkout(self) -> None:

@@ -154,6 +154,7 @@ class TunnelPage(QWidget):
 
         self._controls = ScopeControls(SCOPE_TUNNEL, self._actions, tunnel_gate, prefix="tunnel", parent=self)
         self._controls.actionFinished.connect(self._after_control)
+        self._actions.coreChanged.connect(self._on_core_changed)
         layout.addWidget(self._controls)
 
         self._status = _label(self, "tunnel-status", NOT_AVAILABLE_TEXT)
@@ -197,6 +198,19 @@ class TunnelPage(QWidget):
     def _after_control(self) -> None:
         """After a Start, Stop or Restart finishes, read the state again. An older status check's result is dropped."""
         self._busy = False
+        self.refresh()
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """The core search finished, or the owner chose the core folder. Read the tunnel again with the setup it now has.
+
+        The search's own start is ignored, so the check runs once the search has finished. A check still running is
+        dropped, and a page that is not shown reads when it is shown.
+        """
+        if self._actions.locating or not self.isVisible():
+            return
+        self._busy = False
+        self._generation += 1
         self.refresh()
 
     @Slot(object)
