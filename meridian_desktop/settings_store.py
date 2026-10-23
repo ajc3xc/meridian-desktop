@@ -86,6 +86,9 @@ class Settings:
     confirmed_core_python: str = ""
     confirmed_core_checkout: str = ""
     confirmed_zotero_exe: str = ""
+    # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
+    # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
+    key_names: tuple[str, ...] = ()
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -206,6 +209,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append(f"{key} must be a path as text or empty; using empty")
 
+    # key_names: an absent key means no saved names, with no warning. Only a list of non-empty text is accepted.
+    if "key_names" in data:
+        value = data["key_names"]
+        if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+            values["key_names"] = tuple(item.strip() for item in value)
+        else:
+            problems.append("key_names must be a list of names; using none")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -315,6 +326,9 @@ class SettingsStore:
             if not data[key]:
                 # "Not set" is the default, so a file that never set a core path or a confirmed value has no such key.
                 del data[key]
+        if not settings.key_names:
+            # No saved names is the default, so a file with no API keys has no such key.
+            del data["key_names"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]

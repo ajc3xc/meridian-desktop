@@ -40,6 +40,9 @@ PROBE_TIMEOUT = 2.0
 RUNPOD_TIMEOUT = 30.0
 POD_COLUMNS = ("id", "name", "status", "gpu", "costPerHour", "uptimeSeconds")
 MAX_SERVER_TEXT = 300
+# The pods table keeps room for a few rows inside the Keys section, so the card never collapses to a sliver.
+PODS_MIN_HEIGHT = 96
+PODS_MAX_HEIGHT = 160
 
 KEY_STORED_TEXT = "A RunPod key is stored in the keychain."
 KEY_MISSING_TEXT = "No RunPod key is stored."
@@ -277,7 +280,13 @@ class RunPodPanel(QWidget):
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # Every row of the panel sits in one entry card. The Settings tab's Keys section takes the card with take_card().
+        self._card = QWidget(self)
+        self._card.setObjectName("runpod-entry-card")
+        layout = QVBoxLayout(self._card)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self._server_status = _label(self, "runpod-server-status", SERVER_UNCHECKED_TEXT)
         layout.addWidget(self._server_status)
@@ -310,10 +319,14 @@ class RunPodPanel(QWidget):
         layout.addLayout(action_row)
 
         self._result = _label(self, "runpod-result", "")
+        # The result line takes no room until it has text, so an empty line never leaves a gap above the pods table.
+        self._result.setVisible(False)
         layout.addWidget(self._result)
 
         self._pods = QTableWidget(0, len(POD_COLUMNS), self)
         self._pods.setObjectName("runpod-pods")
+        self._pods.setMinimumHeight(PODS_MIN_HEIGHT)
+        self._pods.setMaximumHeight(PODS_MAX_HEIGHT)
         self._pods.setHorizontalHeaderLabels(list(POD_COLUMNS))
         self._pods.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._pods.verticalHeader().setVisible(False)
@@ -322,6 +335,7 @@ class RunPodPanel(QWidget):
         header.setStretchLastSection(True)
         enable_table_copy(self._pods)
         layout.addWidget(self._pods, 1)
+        outer.addWidget(self._card)
 
         self._save_button.clicked.connect(self._on_save_clicked)
         self._remove_button.clicked.connect(self._on_remove_clicked)
@@ -358,10 +372,15 @@ class RunPodPanel(QWidget):
         if self._pending == 0:
             self.idle.emit()
 
+    def _set_result(self, text: str) -> None:
+        """Show the result line with this text. An empty text hides the line, so it leaves no gap."""
+        self._result.setText(text)
+        self._result.setVisible(bool(text))
+
     def _take(self, result: Any, error: str | None) -> _Outcome | None:
         """Return the job's outcome, or show the error and return None."""
         if error is not None or not isinstance(result, _Outcome):
-            self._result.setText(error or "No result was produced.")
+            self._set_result(error or "No result was produced.")
             return None
         if result.state is not None:
             self._server_status.setText(server_state_text(result.state, result.url))
@@ -379,18 +398,18 @@ class RunPodPanel(QWidget):
     def _on_save_clicked(self) -> None:
         value = self._key_input.text()
         if not value.strip():
-            self._result.setText("Type a key first, then press Save key.")
+            self._set_result("Type a key first, then press Save key.")
             return
         work = self._work
         self._submit(lambda: work.set_key(value), RunPodPanel._on_save_done)
 
     def _on_save_done(self, result: Any, error: str | None) -> None:
         if error is not None:
-            self._result.setText(error)
+            self._set_result(error)
             return
         self._key_input.clear()
         self._key_status.setText(KEY_STORED_TEXT)
-        self._result.setText("Key saved in the keychain.")
+        self._set_result("Key saved in the keychain.")
 
     @Slot()
     def _on_remove_clicked(self) -> None:
@@ -398,10 +417,10 @@ class RunPodPanel(QWidget):
 
     def _on_remove_done(self, result: Any, error: str | None) -> None:
         if error is not None:
-            self._result.setText(error)
+            self._set_result(error)
             return
         self._key_status.setText(KEY_MISSING_TEXT)
-        self._result.setText("Key removed from the keychain." if result else "No key was stored, so nothing was removed.")
+        self._set_result("Key removed from the keychain." if result else "No key was stored, so nothing was removed.")
 
     # ----------------------------------------------------------- Meridian actions
 
@@ -416,11 +435,11 @@ class RunPodPanel(QWidget):
         if outcome is None:
             return
         if outcome.failure is not None:
-            self._result.setText(outcome.failure)
+            self._set_result(outcome.failure)
         elif outcome.state != local_client.HEALTH_RUNNING:
-            self._result.setText(not_sent_text(outcome.state))
+            self._set_result(not_sent_text(outcome.state))
         else:
-            self._result.setText(describe_check(outcome.payload or {}))
+            self._set_result(describe_check(outcome.payload or {}))
 
     @Slot()
     def _on_refresh_clicked(self) -> None:
@@ -434,21 +453,21 @@ class RunPodPanel(QWidget):
             return
         if outcome.failure is not None:
             self._clear_pods()
-            self._result.setText(outcome.failure)
+            self._set_result(outcome.failure)
             return
         if outcome.state != local_client.HEALTH_RUNNING:
             self._clear_pods()
-            self._result.setText(not_sent_text(outcome.state))
+            self._set_result(not_sent_text(outcome.state))
             return
         payload = outcome.payload or {}
         if payload.get("ok") is not True:
             self._clear_pods()
-            self._result.setText(f"RunPod pod list failed: {_server_error_text(payload)}")
+            self._set_result(f"RunPod pod list failed: {_server_error_text(payload)}")
             return
         raw = payload.get("pods")
         pods = [pod for pod in raw if isinstance(pod, dict)] if isinstance(raw, list) else []
         self._fill_pods(pods)
-        self._result.setText(describe_pod_list(payload, pods))
+        self._set_result(describe_pod_list(payload, pods))
 
     def _fill_pods(self, pods: list[dict[str, Any]]) -> None:
         self._pods.setRowCount(len(pods))
@@ -461,11 +480,23 @@ class RunPodPanel(QWidget):
 
     # ----------------------------------------------------------- first show
 
-    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
-        super().showEvent(event)
+    def take_card(self) -> QWidget:
+        """Give the entry card to the host that places it, such as the Keys section. The panel keeps its jobs and signals.
+
+        The panel is left with no rows of its own. Its first-show probe still runs through ensure_probed.
+        """
+        self.layout().removeWidget(self._card)
+        return self._card
+
+    def ensure_probed(self) -> None:
+        """Probe the local server once, on the first call. A host that places the card calls this when it is shown."""
         if not self._probed_on_show:
             self._probed_on_show = True
             self._submit(self._work.probe_only, RunPodPanel._take_probe_only)
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self.ensure_probed()
 
     def _take_probe_only(self, result: Any, error: str | None) -> None:
         self._take(result, error)
