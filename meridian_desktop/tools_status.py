@@ -107,7 +107,8 @@ PYTHON_MISSING_TEXT = "The Python interpreter is missing. Choose it again in Set
 
 SERVER_RUNNING_TEXT = "The local Meridian server answers on this computer."
 SERVER_NOT_RUNNING_TEXT = (
-    "The local Meridian server is not running. The desktop does not start it. Start it yourself, then press Refresh."
+    "The local Meridian server is not running. The desktop starts it only from the Settings tab, after you confirm. "
+    "Otherwise start it yourself, then press Refresh."
 )
 SERVER_NOT_MERIDIAN_TEXT = (
     "Something else answers at the local server address, not Meridian. Check the local server address in Settings."

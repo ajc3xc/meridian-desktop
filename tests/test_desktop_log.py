@@ -320,6 +320,10 @@ class _FakeWindow:
     def isVisible(self):
         return True
 
+    def show_launch_notes(self, text):
+        # The real window shows the launch-time notes on its status bar. The fake has no status bar to show them on.
+        pass
+
 
 class _FakeTray:
     def __init__(self, window, app):

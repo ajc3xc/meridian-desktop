@@ -34,6 +34,9 @@ CORE_CHECKOUT_KEY = "core_checkout"
 CORE_PYTHON_KEY = "core_python"
 CORE_KEYS = (CORE_CHECKOUT_KEY, CORE_PYTHON_KEY)
 
+# The three owner-confirmed control switches. Each is a real true or false, and an absent key means off.
+CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -56,6 +59,13 @@ class Settings:
     # JSON and downloads nothing. On by default. save() writes this key only when it is off, so a file that
     # never turned the check off is written exactly as before.
     check_updates: bool = True
+    # The owner-confirmed runner controls (docs/local-trust-contract.md). Each is off by default. save() writes a key
+    # only when it is on, so a file that never turned one on keeps the keys it had before. tunnel_control_enabled
+    # switches the tunnel start, stop and restart buttons. zotero_autostart and local_server_autostart start Zotero
+    # and the local server once at launch, and each is turned on only after the owner confirms the dialog.
+    tunnel_control_enabled: bool = False
+    zotero_autostart: bool = False
+    local_server_autostart: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,6 +175,16 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("check_updates must be true or false; using true")
 
+    # The runner control switches: an absent key means off, with no warning. Only a real true or false is accepted.
+    for key in CONTROL_FLAG_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be true or false; using false")
+
     return replace(Settings(), **values), problems
 
 
@@ -214,6 +234,10 @@ class SettingsStore:
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
+        for key in CONTROL_FLAG_KEYS:
+            if not data[key]:
+                # Off is the default, so a file that never turned a runner control on has no such key.
+                del data[key]
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
         try:

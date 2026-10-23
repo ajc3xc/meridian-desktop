@@ -69,6 +69,7 @@ from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.outputs_panel import OutputsPanel
 from meridian_desktop.ui.research_panel import ResearchPanel
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
+from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.services_page import ServicesPage
 from meridian_desktop.ui.sessions_panel import SessionsPanel
@@ -256,6 +257,7 @@ class MainWindow(QMainWindow):
         tunnel_runner: Any | None = None,
         tools_status: Callable[[], ToolsStatus] | None = None,
         update_transport: updater.Transport | None = None,
+        runner_actions: RunnerActions | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
@@ -265,8 +267,11 @@ class MainWindow(QMainWindow):
         # The Zotero tab calls this object. Tests pass a fake. The app uses the zotero_client module.
         self._zotero = zotero if zotero is not None else zotero_client
         # The tunnel status call (a status(scope) method). Tests pass a fake. The app builds the client
-        # from the core Python and folder in Settings. Neither one can start or stop the tunnel.
+        # from the core Python and folder in Settings. The status call never starts or stops anything. The
+        # Start, Stop and Restart controls use runner_actions instead, and they stay off until the owner turns them on.
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
+        # The runner controls (Tunnel tab and the Settings runner block). Tests pass fakes. The app reads Settings.
+        self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
         # The Tools tab's read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
         self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
@@ -290,7 +295,9 @@ class MainWindow(QMainWindow):
                 page = RunPodPanel(self._store, self._secrets, parent=self.tabs)
                 # The connection settings go above the RunPod rows, in the panel's own layout,
                 # so the Settings page is still the RunPod panel.
-                self._settings_tab = SettingsTab(self._store, secrets=self._secrets, parent=page)
+                self._settings_tab = SettingsTab(
+                    self._store, secrets=self._secrets, parent=page, actions=self._runner_actions,
+                )
                 page.layout().insertWidget(0, self._settings_tab)
             elif name == "Sessions":
                 # Nothing is read on build. The first show and the Refresh button read the project list and the
@@ -313,7 +320,7 @@ class MainWindow(QMainWindow):
             elif name == "Tunnel":
                 # The same read-only status call as the top bar. The page says whether the tunnel
                 # runs, and the slot states are not available in this build.
-                page = TunnelPage(self.tabs, status=self._tunnel_runner.status)
+                page = TunnelPage(self.tabs, status=self._tunnel_runner.status, actions=self._runner_actions)
             elif name == "Services":
                 # The checks run only when Check services is pressed. Nothing is probed on build or show.
                 page = ServicesPage(self._store, parent=self.tabs)
@@ -461,6 +468,10 @@ class MainWindow(QMainWindow):
         line, detail = bar_texts(status, failure)
         self.tunnel_status_label.setText(line)
         self.tunnel_detail.setText(detail)
+
+    def show_launch_notes(self, text: str) -> None:
+        """Show what the launch-time starts did, on the status bar. Called on the GUI thread by ui/runner_actions.LaunchStarts."""
+        self.statusBar().showMessage(text)
 
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""

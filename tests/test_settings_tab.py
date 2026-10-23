@@ -527,3 +527,39 @@ def test_token_text_is_never_in_the_settings_file_after_remove(qtbot, settings_p
     assert get_token(store=secrets) is None
     assert backend.snapshot() == {}
     assert not any(FAKE_TOKEN.encode() in p.read_bytes() for p in Path(settings_path).parent.rglob("*") if p.is_file())
+
+
+# ----------------------------------------------------------- shared delivery: foreign owner and stale generation
+
+
+def test_a_connection_result_with_a_foreign_owner_is_not_shown(qtbot, settings_path, secrets):
+    """A Delivered whose owner is another object is dropped, even when its generation is this tab's current one."""
+    from meridian_desktop.ui.delivery import Delivered, shared_delivery
+    from meridian_desktop.ui.settings_tab import _TestDone
+
+    tab = _tab(qtbot, settings_path, secrets)
+    result = _label(tab, "settings-test-result")
+    before = result.text()
+
+    shared_delivery().delivered.emit(Delivered(object(), _TestDone(tab._generation, "FOREIGN-RESULT-TEXT")))
+    qtbot.wait(50)
+
+    assert "FOREIGN-RESULT-TEXT" not in result.text()
+    assert result.text() == before
+
+
+def test_a_connection_result_with_a_stale_generation_is_not_shown(qtbot, settings_path, secrets):
+    """A Delivered from an earlier test is dropped, even when its owner is this tab's. A newer test has superseded it."""
+    from meridian_desktop.ui.delivery import Delivered, shared_delivery
+    from meridian_desktop.ui.settings_tab import _TestDone
+
+    tab = _tab(qtbot, settings_path, secrets)
+    result = _label(tab, "settings-test-result")
+    tab._generation = 2  # a newer connection test has started since the one below was run
+    before = result.text()
+
+    shared_delivery().delivered.emit(Delivered(tab._owner, _TestDone(1, "STALE-RESULT-TEXT")))
+    qtbot.wait(50)
+
+    assert "STALE-RESULT-TEXT" not in result.text()
+    assert result.text() == before

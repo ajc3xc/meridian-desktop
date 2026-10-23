@@ -283,7 +283,7 @@ def test_the_start_text_tells_the_owner_how_to_start_the_tunnel_by_hand():
     assert "--scope tunnel" in START_COMMAND
     assert START_COMMAND in START_TEXT
     assert STATUS_COMMAND in START_TEXT
-    assert "The desktop does not start or stop the tunnel." in START_TEXT
+    assert "The desktop starts or stops the tunnel only when you confirm it" in START_TEXT
     # The same command the Logs tab gives, so the two tabs never disagree.
     assert START_COMMAND == RUNNER_START_COMMAND
 

@@ -24,6 +24,7 @@ from meridian_desktop.runner_client import (
     RunnerClient,
     RunnerResult,
 )
+from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tunnel_status import (
     CHECK_FAILED_REASON,
     DEPENDENCY_TEXT,
@@ -34,7 +35,10 @@ from meridian_desktop.tunnel_status import (
     START_TEXT,
     UNKNOWN,
     UNREAD_REASON,
+    TunnelStatus,
 )
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.tunnel_page import (
     CHECKED_TEMPLATE,
     HEADLINES,
@@ -95,6 +99,18 @@ def _reply(child_state, *, scope="tunnel"):
 
 def _page(qtbot, status=None, clock=_clock):
     page = TunnelPage(status=status, clock=clock)
+    qtbot.addWidget(page)
+    return page
+
+
+def _no_confirm(parent, title, body, confirm_text):
+    raise AssertionError("no confirmation dialog may open in this test")
+
+
+def _page_with_actions(qtbot, settings_path, status=None, *, confirm=_no_confirm):
+    """A page whose controls read the settings file at ``settings_path``. The confirmation is a fake, never a dialog."""
+    actions = RunnerActions(SettingsStore(settings_path), confirm=confirm)
+    page = TunnelPage(status=status, clock=_clock, actions=actions)
     qtbot.addWidget(page)
     return page
 
@@ -339,7 +355,7 @@ def test_the_dependency_and_start_lines_are_on_the_page(qtbot):
     assert "codebase-memory" in dependency and "Serena" in dependency and "filesystem" in dependency
     assert start == START_TEXT
     assert START_COMMAND in start
-    assert "The desktop does not start or stop the tunnel." in start
+    assert "The desktop starts or stops the tunnel only when you confirm it" in start
 
 
 def test_the_slot_line_below_keeps_its_slot_state_text(qtbot):
@@ -349,8 +365,45 @@ def test_the_slot_line_below_keeps_its_slot_state_text(qtbot):
     assert _label(page, "tunnel-status").text() == NOT_AVAILABLE_TEXT
 
 
-def test_the_tab_has_no_button_so_no_start_stop_or_refresh_control(qtbot):
+def test_the_tab_has_only_the_three_tunnel_controls_and_no_refresh_button(qtbot):
     page = _page(qtbot, Fake(_reply("running")))
     _show_and_wait(qtbot, page, HEADLINES[RUNNING])
 
-    assert page.findChildren(QPushButton) == []
+    names = sorted(button.objectName() for button in page.findChildren(QPushButton))
+    assert names == ["tunnel-restart", "tunnel-start", "tunnel-stop"]
+
+
+def test_the_tunnel_controls_are_disabled_when_tunnel_control_is_off(qtbot, settings_path):
+    # The settings file is absent, so tunnel_control_enabled is its default, false.
+    page = _page_with_actions(qtbot, settings_path, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+        assert page.findChild(QPushButton, name).isEnabled() is False, name
+    assert "tunnel_control_enabled" in _label(page, "tunnel-control-note").text()
+
+
+def test_a_delivered_result_with_a_foreign_owner_is_not_shown(qtbot):
+    """A result that carries another object's owner token is dropped, even when its generation is the current one."""
+    page = _page(qtbot, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+    stopped = TunnelStatus(NOT_RUNNING, "The runner reports the tunnel process as stopped.", CHECKED)
+
+    shared_delivery().delivered.emit(Delivered(object(), (page._generation, (stopped, None))))
+    qtbot.wait(50)
+
+    assert _headline(page) == HEADLINES[RUNNING]
+    assert _label(page, "tunnel-run-reason").text() == "The runner reports the tunnel process as running."
+
+
+def test_a_delivered_result_with_a_stale_generation_is_not_shown(qtbot):
+    """A result from a check that a newer check has superseded is dropped, even when its owner token is this page's."""
+    page = _page(qtbot, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+    stopped = TunnelStatus(NOT_RUNNING, "The runner reports the tunnel process as stopped.", CHECKED)
+    stale = page._generation - 1
+
+    shared_delivery().delivered.emit(Delivered(page._owner, (stale, (stopped, None))))
+    qtbot.wait(50)
+
+    assert _headline(page) == HEADLINES[RUNNING]

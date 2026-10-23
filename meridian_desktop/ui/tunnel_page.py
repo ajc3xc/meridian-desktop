@@ -3,9 +3,11 @@
 The top of the tab says whether the tunnel is running. That line comes from one read-only runner
 status call for the tunnel scope (see meridian_desktop/tunnel_status.py). The call runs on the thread
 pool each time the tab is shown, so the UI thread never waits on it. The page starts no timer and
-makes no request until it is shown. It has no button and no control that starts, stops or restarts
-anything. The same top section names the tools that connect through the tunnel, and tells the owner
-how to start the tunnel by hand. The desktop does not start it.
+makes no request until it is shown. Below the status line are Start, Stop and Restart for the tunnel
+(see meridian_desktop/ui/scope_controls.py). They stay disabled until the tunnel_control_enabled setting
+is true, and each one asks the owner first, in a dialog that names the exact command (docs/local-trust-contract.md).
+The same top section names the tools that connect through the tunnel, and tells the owner how to start
+the tunnel by hand in a terminal.
 
 Below that is the slot table. It shows a snapshot the caller hands in (see meridian_desktop/tunnel_view.py
 for the rows). Until a snapshot is given, the slot line says the slot states are not available, because
@@ -31,6 +33,8 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
+from meridian_desktop.runner_controls import SCOPE_TUNNEL
+from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tunnel_status import (
     CHECK_FAILED_REASON,
     CHECKED_TEMPLATE,
@@ -47,6 +51,8 @@ from meridian_desktop.tunnel_status import (
 )
 from meridian_desktop.tunnel_view import slot_details, slots_of
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 NOT_AVAILABLE_TEXT = (
@@ -105,7 +111,10 @@ class TunnelCheckJob(QRunnable):
 
 
 class TunnelPage(QWidget):
-    """The Tunnel tab: the tunnel's running state, then the slot table. It has no control of its own."""
+    """The Tunnel tab: the tunnel's running state, the Start, Stop and Restart controls, then the slot table.
+
+    The controls are off unless the tunnel_control_enabled setting is true, and each one asks the owner first.
+    """
 
     def __init__(
         self,
@@ -113,6 +122,7 @@ class TunnelPage(QWidget):
         *,
         status: Callable[[str], RunnerResult] | None = None,
         clock: Callable[[], datetime] = datetime.now,
+        actions: RunnerActions | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("tunnel-page")
@@ -120,6 +130,7 @@ class TunnelPage(QWidget):
         # starts nothing. The app can pass a configured client once the desktop has a setting for one.
         self._check_runner = status if status is not None else RunnerClient().status
         self._clock = clock
+        self._actions = actions if actions is not None else RunnerActions(SettingsStore())
         self._busy = False
         # Identifies this page's checks. A plain object, so a job can hold it without holding the page.
         self._owner = object()
@@ -138,6 +149,10 @@ class TunnelPage(QWidget):
         layout.addWidget(self._run_dependency)
         self._run_start = _label(self, "tunnel-run-start", START_TEXT)
         layout.addWidget(self._run_start)
+
+        self._controls = ScopeControls(SCOPE_TUNNEL, self._actions, tunnel_gate, prefix="tunnel", parent=self)
+        self._controls.actionFinished.connect(self._after_control)
+        layout.addWidget(self._controls)
 
         self._status = _label(self, "tunnel-status", NOT_AVAILABLE_TEXT)
         layout.addWidget(self._status)
@@ -173,6 +188,13 @@ class TunnelPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._controls.refresh_enabled()
+        self.refresh()
+
+    @Slot()
+    def _after_control(self) -> None:
+        """After a Start, Stop or Restart finishes, read the state again. An older status check's result is dropped."""
+        self._busy = False
         self.refresh()
 
     @Slot(object)

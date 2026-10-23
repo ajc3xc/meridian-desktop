@@ -13,8 +13,9 @@ That client never passes a mutating verb. The child state in the reply becomes o
 Each check result carries the time the check finished and one fixed sentence saying why. The
 sentence never copies the runner's own output. This module starts nothing, stops nothing and holds
 no secret. It also holds the words that name the tools which connect through the tunnel, and the
-plain-words instructions for starting the tunnel by hand. The owner runs the tunnel. The desktop
-does not start it: that control waits for the owner to confirm docs/local-trust-contract.md.
+plain-words instructions for starting the tunnel by hand. The desktop starts and stops the tunnel only
+from the Tunnel tab's buttons, after the owner confirms each one, and only when tunnel_control_enabled is
+true (docs/local-trust-contract.md). This module itself still starts nothing.
 """
 
 from __future__ import annotations
@@ -72,7 +73,8 @@ DEPENDENCY_TEXT = (
 START_COMMAND = "pixi run python -m meridian.local_runner start --scope tunnel -- python -m meridian --tunnel"
 STATUS_COMMAND = "pixi run python -m meridian.local_runner status --scope tunnel"
 START_TEXT = (
-    "The desktop does not start or stop the tunnel. You start it yourself. Open a terminal in the "
+    "The desktop starts or stops the tunnel only when you confirm it with the buttons on this tab, and "
+    "only when tunnel_control_enabled is on. To start it yourself, open a terminal in the "
     "Meridian core folder and run this command:\n"
     f"{START_COMMAND}\n"
     "Then open this tab again to check. To check from the terminal instead, run this command in the "
@@ -92,7 +94,7 @@ CHECKED_TEMPLATE = "Checked at {}."
 NO_TIME_TEXT = "The check did not finish, so no time was recorded."
 NO_FAILURE_NAME = "unknown error"
 BY_HAND_NOT_STARTED = (
-    "The desktop does not start or stop the tunnel. Open the Tunnel tab to check it again. To start it "
+    "The desktop starts or stops the tunnel only when you confirm it on the Tunnel tab. To start it "
     f"yourself, open a terminal in the Meridian core folder and run: {START_COMMAND}"
 )
 BY_HAND_CHECK = f"To check from a terminal, run this in the Meridian core folder: {STATUS_COMMAND}"

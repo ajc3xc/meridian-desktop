@@ -352,3 +352,65 @@ def test_check_updates_that_is_not_true_or_false_warns_and_stays_on(settings_pat
     result = SettingsStore(settings_path).load()
     assert result.settings.check_updates is True
     assert result.warning is not None and "check_updates" in result.warning
+
+
+# ----------------------------------------------------------- the three runner control switches (contract rule 10, amendment A and B)
+
+CONTROL_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+
+
+def test_runner_control_switches_default_to_off_and_are_not_written(settings_path):
+    store = SettingsStore(settings_path)
+    loaded = store.load()
+
+    assert loaded.warning is None
+    for key in CONTROL_KEYS:
+        assert getattr(loaded.settings, key) is False, key
+    store.save(loaded.settings)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert not any(key in saved for key in CONTROL_KEYS)
+
+
+@pytest.mark.parametrize("key", CONTROL_KEYS)
+def test_each_runner_switch_round_trips_when_on_and_leaves_the_others_off(settings_path, key):
+    store = SettingsStore(settings_path)
+    store.save(Settings(**{key: True}))
+
+    loaded = store.load()
+    assert loaded.warning is None
+    assert getattr(loaded.settings, key) is True
+    for other in CONTROL_KEYS:
+        if other != key:
+            assert getattr(loaded.settings, other) is False, other
+    assert json.loads(settings_path.read_text(encoding="utf-8"))[key] is True
+
+
+def test_turning_a_runner_switch_back_off_removes_its_key(settings_path):
+    store = SettingsStore(settings_path)
+    store.save(Settings(zotero_autostart=True, tunnel_control_enabled=True))
+    store.save(Settings(zotero_autostart=True, tunnel_control_enabled=False))
+
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["zotero_autostart"] is True
+    assert "tunnel_control_enabled" not in saved
+
+
+@pytest.mark.parametrize("key", CONTROL_KEYS)
+@pytest.mark.parametrize("value", ["yes", 1, None, []])
+def test_a_non_boolean_runner_switch_is_refused_with_a_warning(settings_path, key, value):
+    _write(settings_path, json.dumps({key: value}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert getattr(loaded.settings, key) is False
+    assert f"{key} must be true or false" in loaded.warning
+
+
+def test_a_saved_switch_keeps_every_other_field(settings_path):
+    store = SettingsStore(settings_path)
+    store.save(Settings(local_url="http://127.0.0.1:7999", zotero_autostart=True))
+
+    loaded = store.load().settings
+    assert loaded.local_url == "http://127.0.0.1:7999"
+    assert loaded.zotero_autostart is True
+    assert loaded.local_server_autostart is False
