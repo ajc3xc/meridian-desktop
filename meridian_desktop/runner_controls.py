@@ -27,6 +27,10 @@ and nowhere else, and the only commands it builds are these, run with shell=Fals
   runner's output, a token or a path. Status is a read, not an attempt, so it is not logged.
 - A state is running only when the runner reports the child running. A missing, failed, unreadable or
   unknown state is unknown, and unknown is never shown as running (rule 7).
+- A confirmed start is read from the status the runner prints as it starts the child, before the child can exit. So
+  the controls read the status again about 3 and 20 seconds later (START_CHECK_DELAYS_SECONDS, check_start). A child
+  that is no longer running then reads as STOPPED_AFTER_START. Each check is logged as ``start-check``, because it
+  settles that start's outcome. It only runs ``status``, never a start or a stop.
 - The desktop never reads or logs a tunnel token (rule 8). It passes none, and it reads none from the environment.
 """
 
@@ -62,6 +66,11 @@ STOP_TIMEOUT_SECONDS = 15.0
 STATUS_TIMEOUT_SECONDS = 10.0
 TIMEOUTS = {START: START_TIMEOUT_SECONDS, STOP: STOP_TIMEOUT_SECONDS, STATUS: STATUS_TIMEOUT_SECONDS}
 
+# The status reads after a confirmed start, in seconds after it. The log names each one START_CHECK. It is a log word
+# only, never a subcommand: check_start runs ``status``.
+START_CHECK = "start-check"
+START_CHECK_DELAYS_SECONDS = (3.0, 20.0)
+
 # The arguments that follow the core python for each scope's child. Fixed here, never typed by the owner.
 CHILD_ARGS = {
     SCOPE_LOCAL: ("-m", "meridian"),
@@ -82,6 +91,8 @@ ALREADY_RUNNING = "already_running"
 FAILED = "failed"
 NOT_AVAILABLE = "not_available"
 REFUSED = "refused"
+# A start check found the child not running: the start was confirmed, but the child exited straight after.
+STOPPED_AFTER_START = "stopped_after_start"
 
 REFUSED_MESSAGE = "This command is not allowed. Only start, stop and status for the local or tunnel scope can be run."
 NOT_AVAILABLE_MESSAGE = (
@@ -103,6 +114,8 @@ STATE_MESSAGES = {
     UNKNOWN: "The {label} state is unknown. It is not shown as running.",
 }
 STARTED_MESSAGE = "The {label} started, and the runner reports it running (pid {pid})."
+STOPPED_AFTER_START_MESSAGE = "Started, but it stopped straight after. Check the control log."
+START_CHECK_UNKNOWN_MESSAGE = "Started, but its state could not be read just after. It is not shown as running."
 STOPPED_MESSAGE = "The {label} is stopped."
 TIMEOUT_MESSAGE = (
     "Not confirmed: the {verb} of the {label} did not finish within {seconds} seconds. Nothing was retried. "
@@ -335,6 +348,26 @@ class RunnerControl:
     def stop(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._attempt(STOP, scope)
 
+    def check_start(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
+        """Read the status again after a confirmed start, and log what it found. It runs ``status`` only.
+
+        Running is CONFIRMED. Not running is STOPPED_AFTER_START: the start was confirmed, but the child exited straight
+        after. Any state that cannot be read is NOT_CONFIRMED, and is never worded as running. A refused scope runs and
+        logs nothing.
+        """
+        status = self._run(STATUS, scope)
+        if status.outcome == REFUSED:
+            return status
+        if status.confirmed and status.state == RUNNING:
+            outcome, message, state = CONFIRMED, STATE_MESSAGES[RUNNING].format(label=_label(scope)), RUNNING
+        elif status.confirmed and status.state == NOT_RUNNING:
+            outcome, message, state = STOPPED_AFTER_START, STOPPED_AFTER_START_MESSAGE, NOT_RUNNING
+        else:
+            outcome, message, state = NOT_CONFIRMED, START_CHECK_UNKNOWN_MESSAGE, UNKNOWN
+        result = ControlResult(START_CHECK, scope, outcome, message, state, status.pid, status.exit_code)
+        self._log(START_CHECK, scope, result)
+        return result
+
     def _attempt(self, subcommand: str, scope: str) -> ControlResult:
         result = self._run(subcommand, scope)
         if result.outcome != REFUSED:
@@ -395,7 +428,12 @@ __all__ = [
     "SCOPE_LOCAL",
     "SCOPE_TUNNEL",
     "START",
+    "START_CHECK",
+    "START_CHECK_DELAYS_SECONDS",
+    "START_CHECK_UNKNOWN_MESSAGE",
     "START_TIMEOUT_SECONDS",
+    "STOPPED_AFTER_START",
+    "STOPPED_AFTER_START_MESSAGE",
     "STATUS",
     "STATUS_TIMEOUT_SECONDS",
     "STOP",
