@@ -236,10 +236,16 @@ class UpdateNoticeBar(QWidget):
     @Slot()
     def check_now(self) -> None:
         """Run one check on the thread pool. Nothing runs when checks are off, the bar has no transport or install folder,
-        this is not the frozen bundle, a check is already running, or a staged update is waiting for the restart."""
+        a check is already running, or a staged update is waiting for the restart. A source run (not the frozen bundle)
+        makes no request: its Updates card gets the refused reason at once, so the card never waits for a result."""
         if self._transport is None or self._root is None or self._busy:
             return
-        if not self._enabled() or not updater.running_frozen():
+        if not self._enabled():
+            return
+        if not updater.running_frozen():
+            self._finished = True
+            self._result = updater.UpdateResult("refused", reason=updater.DEV_RUN_REASON)
+            self.resultChanged.emit()
             return
         if updater.ready_version(self._root, self._current) is not None:
             return
