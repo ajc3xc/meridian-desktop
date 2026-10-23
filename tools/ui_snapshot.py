@@ -110,6 +110,9 @@ def main(argv: list[str]) -> int:
 
         for index in range(window.tabs.count()):
             window.tabs.setCurrentIndex(index)
+            # Each tab reads its data on the thread pool when it is shown. Wait for those reads, so the PNG is not a
+            # loading state, then let their results paint.
+            QThreadPool.globalInstance().waitForDone(BOOT_WAIT_MS)
             pump(app, SETTLE_SECONDS)
             name = slug(window.tabs.tabText(index))
             written.append(save(window, out_dir / f"{index + 1:02d}-{name}.png"))
