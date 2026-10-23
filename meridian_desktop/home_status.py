@@ -18,6 +18,7 @@ from meridian_desktop.latex_client import (
     ENGINE_CONNECTED,
     ENGINE_NOT_ANSWERING,
     ENGINE_NOT_RUNNING,
+    START_HELP,
     EngineStatus,
     port_text,
 )
@@ -199,9 +200,7 @@ _ENGINE_HEADLINE = {
 }
 _ENGINE_DETAIL = {
     ENGINE_CONNECTED: "The engine answered its health and extension-version checks.",
-    ENGINE_NOT_RUNNING: (
-        "Nothing listens on that port. Start the LaTeX engine you installed on this computer if you need it."
-    ),
+    ENGINE_NOT_RUNNING: f"Nothing listens on that port. To start it, {START_HELP}",
     ENGINE_NOT_ANSWERING: "Something else answers on that port, not the LaTeX engine.",
 }
 PORTS_NOTE = "A listening port only shows that something accepts a connection. It does not show that Meridian is healthy."

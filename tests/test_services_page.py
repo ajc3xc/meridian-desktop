@@ -423,10 +423,7 @@ def test_not_listening_comes_from_a_refused_socket_for_both_addresses(qtbot, set
     assert _text(page, "services-health-seen") == "Port 7878 is not listening, so no local server is running there."
     assert _text(page, "services-engine") == "LaTeX engine: not running"
     assert _text(page, "services-engine-seen") == "Port 8471 is not listening, so no LaTeX engine is running there."
-    assert _text(page, "services-engine-start") == (
-        "How to start: start the LaTeX engine you installed on this computer so it listens on port 8471, "
-        "then press Check services."
-    )
+    assert _text(page, "services-engine-start") == f"How to start: {latex_client.START_HELP} Then press Check services."
 
 
 def test_http_answers_decide_running_and_not_meridian(qtbot, settings_path, monkeypatch):
@@ -491,16 +488,12 @@ def test_services_page_has_no_mutating_controls(qtbot, settings_path):
     assert page.findChildren(QTimer) == []
 
 
-def test_checks_run_only_when_the_button_is_pressed(qtbot, settings_path):
+def test_checks_run_on_show_and_when_the_button_is_pressed_never_when_built(qtbot, settings_path):
     health = Recorder(HealthFacts(state="running"))
     engine = Recorder(ENGINE_UP)
     runner = Recorder(_runner_ok())
     ports = Recorder(_ports())
     page = _page(qtbot, settings_path, health=health, engine=engine, runner=runner, ports=ports)
-
-    page.show()
-    qtbot.waitExposed(page)
-    qtbot.wait(200)  # give any work started on show a chance to run
 
     assert health.calls == []
     assert engine.calls == []
@@ -508,12 +501,16 @@ def test_checks_run_only_when_the_button_is_pressed(qtbot, settings_path):
     assert ports.calls == []
     assert _text(page, "services-health").endswith("not checked yet")
 
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.waitUntil(lambda: len(ports.calls) == 1 and not page.busy, timeout=5000)
+
     _press(qtbot, page)
 
-    assert len(health.calls) == 1
-    assert len(engine.calls) == 1
-    assert len(runner.calls) == 1
-    assert len(ports.calls) == 1
+    assert len(health.calls) == 2
+    assert len(engine.calls) == 2
+    assert len(runner.calls) == 2
+    assert len(ports.calls) == 2
 
 
 def test_checks_run_off_the_ui_thread(qtbot, settings_path):

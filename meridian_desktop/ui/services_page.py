@@ -1,8 +1,9 @@
 """Services tab: a read-only look at the local server, the LaTeX engine, the runner and the slot ports.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The page makes no request,
-starts no timer and polls nothing when it is built or shown. It checks only when Check services
-is pressed, and the checks run on the thread pool, so the UI thread never blocks. The four checks:
+starts no timer and polls nothing when it is built. It checks each time it is shown, so a service
+started while the page was hidden reads as running when it comes back, and again when Check services
+is pressed. The checks run on the thread pool, so the UI thread never blocks. The four checks:
 
 - the local server health: one GET of /health at the local_url setting (local_client.probe_health);
 - the LaTeX engine: GET /health, then GET /extension-version, at the engine_url setting
@@ -55,8 +56,8 @@ NOT_CHECKED = "not checked yet"
 CHECK_BUTTON_TEXT = "Check services"
 CHECKING_TEXT = "checking..."
 UNCHECKED_TEXT = (
-    "Press Check services to look at the local server, the LaTeX engine, the runner and the slot "
-    "ports. Nothing is checked until then, and nothing here starts or stops a service."
+    "This page checks the local server, the LaTeX engine, the runner and the slot ports each time it "
+    "is shown, and when you press Check services. Nothing here starts or stops a service."
 )
 FAILED_TEXT = "The {} check failed unexpectedly ({})."
 NO_RESULT_TEXT = "The check gave no result."
@@ -103,7 +104,7 @@ ENGINE_SEEN = {
 }
 ENGINE_START = {
     STATE_RUNNING: "it is already running, so there is nothing to start.",
-    STATE_NOT_RUNNING: "start the LaTeX engine you installed on this computer so it listens on port {port}, then press Check services.",
+    STATE_NOT_RUNNING: f"{latex_client.START_HELP} Then press Check services.",
     STATE_NOT_MERIDIAN: "stop the other program on port {port}, then start the LaTeX engine you installed and press Check services.",
     STATE_COULD_NOT_CHECK: "check that the LaTeX engine you installed is running on this computer, then press Check services.",
 }
@@ -514,6 +515,11 @@ class ServicesPage(QWidget):
         return (self._local, self._engine_row, self._runner_row)
 
     # ----------------------------------------------------------- checks
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        # Every show checks again, the same pass the button runs. A pass already running is not started twice.
+        self._on_check_clicked()
 
     @Slot()
     def _on_check_clicked(self) -> None:

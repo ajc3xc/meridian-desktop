@@ -1,13 +1,14 @@
 """LaTeX engine panel for the Writing tab: one probe of the local engine, with both versions shown.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The panel makes no
-request when it is built. It probes when it is first shown and again when Check again
+request when it is built. It probes each time it is shown, so an engine started while the
+panel was hidden reads as running when the panel comes back, and again when Check again
 is pressed. The probe runs on the thread pool, and the engine address comes from the
 settings file, so the UI thread never blocks. Results are plain text (PlainText labels),
 so engine text is never read as HTML.
 
 The panel shows running or not running, the engine and extension versions when the engine
-answers, what the probe found, and one sentence on how to start the engine.
+answers, what the probe found, and how to start the engine. The panel never starts it.
 """
 
 from __future__ import annotations
@@ -87,10 +88,7 @@ def engine_start_text(status: EngineStatus | None, port: str) -> str:
     if status.connected:
         return "it is already running, so there is nothing to start."
     if status.state == latex_client.ENGINE_NOT_RUNNING:
-        return (
-            f"start the LaTeX engine you installed on this computer so it listens on port {port}, "
-            "then press Check again."
-        )
+        return f"{latex_client.START_HELP} Then press Check again to check port {port}."
     if status.state == latex_client.ENGINE_NOT_ANSWERING:
         return (
             f"stop the other program on port {port}, then start the LaTeX engine you installed "
@@ -143,7 +141,6 @@ class LatexPanel(QWidget):
         self.setObjectName("latex-panel")
         self._settings = settings_store
         self._client = client
-        self._probed_on_show = False
         self._probing = False
         # Identifies this panel's probes. A plain object, so a job can hold it without holding the panel.
         self._owner = object()
@@ -187,9 +184,8 @@ class LatexPanel(QWidget):
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
-        if not self._probed_on_show:
-            self._probed_on_show = True
-            self._start_probe()
+        # Every show checks again. A probe already running is not started twice (see _start_probe).
+        self._start_probe()
 
     @Slot()
     def _on_check_clicked(self) -> None:

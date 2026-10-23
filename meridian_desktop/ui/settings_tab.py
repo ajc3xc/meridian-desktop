@@ -49,12 +49,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, token_store
+from meridian_desktop import hosted_client, latex_client, token_store
 from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.settings_store import DEFAULT_ENGINE_URL, DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
@@ -80,8 +80,19 @@ LOCAL_SERVER_TITLE = "Local server and startup"
 KEYS_TITLE = "Keys"
 CLIENT_SETUP_TITLE = "Client setup"
 DIAGNOSTICS_TITLE = "Diagnostics (logs)"
-# The one place for diagnostics. The LaTeX section label is the one main_window shows and tests look for.
-LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
+# The LaTeX section label names the saved engine address (engine_url), host and port only.
+LATEX_SECTION_TEMPLATE = "LaTeX (local engine on {address})"
+LATEX_SECTION_NOT_LOCAL = "LaTeX (local engine; the saved engine address is not on this computer)"
+
+
+def latex_section_text(engine_url: object) -> str:
+    """The LaTeX section label for ``engine_url``. An address that is not loopback is not shown at all."""
+    address = latex_client.address_text(engine_url)
+    return LATEX_SECTION_NOT_LOCAL if address is None else LATEX_SECTION_TEMPLATE.format(address=address)
+
+
+# The label for the default engine address. main_window re-exports it, and tests look for it with default settings.
+LATEX_SECTION = latex_section_text(DEFAULT_ENGINE_URL)
 TOOLS_SECTION = "Tools (full table)"
 DIAGNOSTICS_INTRO = (
     "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
@@ -439,8 +450,11 @@ class SettingsTab(QWidget):
         if self._tools_status is not None:
             group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))
             group.add_widget(ToolsPanel(self._tools_status, parent=group.body()))
-        # The LaTeX probe sits under its section label. It makes no request until shown.
-        group.add_widget(make_selectable(QLabel(LATEX_SECTION, group.body())))
+        # The LaTeX probe sits under its section label, which names the saved engine address. It makes no request until shown.
+        self._latex_section = _label(
+            group.body(), "settings-latex-section", latex_section_text(self._store.load().settings.engine_url)
+        )
+        group.add_widget(self._latex_section)
         group.add_widget(LatexPanel(self._store, parent=group.body()))
         # The Logs view reads nothing until its own Refresh is pressed, so folding this group costs nothing.
         self._logs = LogsPage(parent=group.body())
@@ -473,6 +487,7 @@ class SettingsTab(QWidget):
         self._auto_update.setChecked(settings.auto_update)
         self._auto_update.blockSignals(False)
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
+        self._latex_section.setText(latex_section_text(settings.engine_url))
         self._refresh_token_status()
         self._runner.refresh_flags()
         self._keys.refresh()

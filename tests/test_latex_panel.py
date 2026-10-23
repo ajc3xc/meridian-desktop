@@ -102,7 +102,7 @@ def _all_label_text(panel):
     [
         (CONNECTED_STATUS, "8471", "it is already running, so there is nothing to start."),
         (NOT_RUNNING_STATUS, "8471",
-         "start the LaTeX engine you installed on this computer so it listens on port 8471, then press Check again."),
+         f"{latex_client.START_HELP} Then press Check again to check port 8471."),
         (NOT_ANSWERING_STATUS, "8471",
          "stop the other program on port 8471, then start the LaTeX engine you installed and press Check again."),
         (EngineStatus(ENGINE_ERROR, latex_client.NOT_LOOPBACK_MESSAGE), "",
@@ -150,8 +150,7 @@ def test_engine_not_listening_shows_not_running_from_a_refused_socket(qtbot, set
     assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
     assert _label(panel, "latex-extension-version").text() == "Extension version: not available"
     assert _label(panel, "latex-start").text() == (
-        "How to start: start the LaTeX engine you installed on this computer so it listens on port 8471, "
-        "then press Check again."
+        f"How to start: {latex_client.START_HELP} Then press Check again to check port 8471."
     )
 
 
@@ -161,7 +160,7 @@ def test_the_start_sentence_names_the_port_from_the_configured_address(qtbot, se
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, client))
 
     assert client.calls == [("http://127.0.0.1:9999", latex_client.PROBE_TIMEOUT)]
-    assert "listens on port 9999" in _label(panel, "latex-start").text()
+    assert "check port 9999" in _label(panel, "latex-start").text()
 
 
 def test_another_program_on_the_port_reads_not_running_and_says_to_stop_it(qtbot, settings_path):
@@ -228,7 +227,7 @@ def test_check_again_moves_from_running_to_not_running_and_updates_the_sentence(
     qtbot.waitUntil(lambda: _settled(panel), timeout=5000)
 
     assert _label(panel, "latex-status").text() == "LaTeX engine: not running."
-    assert "listens on port 8471" in _label(panel, "latex-start").text()
+    assert "check port 8471" in _label(panel, "latex-start").text()
     assert len(client.calls) == 2
 
 

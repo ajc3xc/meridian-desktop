@@ -146,7 +146,7 @@ def test_services_engine_not_running_is_idle_not_an_error():
     view = services_view(facts)
     assert view.headline == "LaTeX engine not running"
     assert view.tone == TONE_IDLE
-    assert "Start the LaTeX engine you installed" in view.rows[0].detail
+    assert "node dist/server.js" in view.rows[0].detail
 
 
 def test_services_another_program_on_the_engine_port_needs_attention():
