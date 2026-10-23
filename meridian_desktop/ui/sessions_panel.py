@@ -27,6 +27,11 @@ The four providers are called on the worker thread, never on the UI thread:
 
 Only names, status, last seen (as an age) and the client name reach the table. Session summaries, task log bodies
 and notes are never read by the client, so they cannot reach this panel.
+
+The running Claude Desktop and Claude Code processes are listed on the same worker job as the sessions, on every
+read: the first show, Refresh, a project change and each local tick, so they stay live while the tab is visible. Each
+row is the program's image name and its process id, read by claude_processes. Nothing else about a process is read.
+A failed listing says so in one line and leaves the sessions table as it is.
 """
 
 from __future__ import annotations
@@ -50,7 +55,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client
+from meridian_desktop import claude_processes, hosted_client
+from meridian_desktop.claude_processes import ClaudeProcessesResult
 from meridian_desktop.sessions_client import (
     ERROR,
     NO_PROJECT,
@@ -79,11 +85,14 @@ PRESS_REFRESH_TEXT = "Press Refresh to read this project's sessions."
 NO_PROJECTS_TEXT = "No projects are available to pick. Create a project in Meridian first."
 PROJECTS_FAILED_TEXT = "The projects could not be read. Check the local server or the database file in Settings."
 READ_FAILED_TEXT = "The sessions could not be read. Check the local server or the hosted token in Settings."
-# The desktop has no read-only process check for Claude Desktop or Claude Code yet, so this line says so and lists none.
-CLAUDE_PROCESSES_TEXT = (
-    "Running Claude Desktop and Claude Code processes on this computer: Not connected. "
-    "This desktop has no read-only check for them yet, so none are listed here."
+CLAUDE_CAPTION = "Claude Desktop and Claude Code processes on this computer. Read-only: program name and id only."
+CLAUDE_CHECKING_TEXT = "Checking the running Claude processes..."
+CLAUDE_NONE_TEXT = "No Claude Desktop or Claude Code process is running on this computer right now."
+CLAUDE_NOTE_TEXT = (
+    "A Claude Code session started through Node.js runs as node.exe. That name is shared with other software, "
+    "so it is not listed here."
 )
+CLAUDE_COLUMNS = ("Program", "Process ID")
 UNNAMED_TEXT = "(unnamed)"
 SOURCE_TEXT = {SOURCE_LOCAL: "this computer's Meridian server", SOURCE_HOSTED: "hosted Meridian"}
 
@@ -97,6 +106,8 @@ class _Snapshot:
     choices: tuple[tuple[str, str], ...] | None
     project_id: str
     result: SessionsResult | None
+    # The Claude processes, read on the same job. None when that read did not finish, so the table keeps what it shows.
+    claude: ClaudeProcessesResult | None = None
 
 
 # ----------------------------------------------------------------- pure helpers
@@ -125,6 +136,36 @@ def status_text(result: SessionsResult, checked_at: str) -> str:
 def row_cells(row: SessionRow, now: datetime) -> tuple[str, str, str, str]:
     """The four table cells for one session, in COLUMNS order. Last seen is shown as an age, not a timestamp."""
     return (row.name or UNNAMED_TEXT, row.status, last_seen_age(row.last_seen, now), row.client)
+
+
+def claude_status_text(result: ClaudeProcessesResult, checked_at: str) -> str:
+    """The Claude status line for one listing. ``checked_at`` is the local time the listing arrived.
+
+    A failed listing is one plain line: its fixed message, then the time it was checked.
+    """
+    if result.state != claude_processes.LISTED:
+        return f"{result.message} Checked at {checked_at}."
+    count = len(result.processes)
+    if count == 0:
+        return f"{CLAUDE_NONE_TEXT} Checked at {checked_at}."
+    noun = "process" if count == 1 else "processes"
+    return f"{count} Claude {noun} running on this computer. Checked at {checked_at}."
+
+
+def _table(parent: QWidget, name: str, columns: tuple[str, ...]) -> QTableWidget:
+    """A read-only table: no editing, one row selected at a time, and copy enabled."""
+    table = QTableWidget(0, len(columns), parent)
+    table.setObjectName(name)
+    table.setHorizontalHeaderLabels(list(columns))
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.verticalHeader().setVisible(False)
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    header.setStretchLastSection(True)
+    enable_table_copy(table)
+    return table
 
 
 def _plain(value: Any) -> str:
@@ -186,6 +227,7 @@ class _Reads:
         mode_provider: Callable[[], str],
         local_transport: Any,
         hosted_transport: hosted_client.Transport | None,
+        process_lister: Callable[[], ClaudeProcessesResult] | None = None,
     ) -> None:
         self._local_url = local_url_provider
         self._hosted = hosted_provider
@@ -193,9 +235,12 @@ class _Reads:
         self._mode = mode_provider
         self._local_transport = local_transport
         self._hosted_transport = hosted_transport
+        # None means the real listing. A test passes a fake, so it starts no process.
+        self._process_lister = process_lister
 
     def collect_full(self, generation: int, selected: str) -> _Snapshot:
         """Runs on a worker. Lists the projects once, then reads the sessions of the chosen project."""
+        claude = self._claude()
         choices, failure = self._read_projects()
         chosen = selected if choices is None else choose_project(selected, choices)
         if not chosen:
@@ -205,21 +250,31 @@ class _Reads:
                 message = NO_PROJECTS_TEXT
             else:
                 message = PICK_TEXT
-            return _Snapshot(generation, choices, "", SessionsResult(NO_PROJECT, message))
-        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen))
+            return _Snapshot(generation, choices, "", SessionsResult(NO_PROJECT, message), claude)
+        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen), claude)
 
     def collect_local(self, generation: int, selected: str) -> _Snapshot:
         """Runs on a worker. A local read: the local server only, for the picked project, and only in local mode.
 
         It never lists the projects and never calls the hosted host. When the local server does not answer, there is
-        nothing new to show, so the result is None and the table and status line keep what they show.
+        nothing new to show, so the result is None and the table and status line keep what they show. The Claude
+        processes are listed on every local read, whatever the mode, because they are on this computer.
         """
+        claude = self._claude()
         if not selected or self._mode() != LOCAL_MODE:
-            return _Snapshot(generation, None, "", None)
+            return _Snapshot(generation, None, "", None, claude)
         result = local_sessions(self._local_url(), selected, transport=self._local_transport)
         if result.state == NOT_RUNNING:
-            return _Snapshot(generation, None, selected, None)
-        return _Snapshot(generation, None, selected, result)
+            return _Snapshot(generation, None, selected, None, claude)
+        return _Snapshot(generation, None, selected, result, claude)
+
+    def _claude(self) -> ClaudeProcessesResult:
+        """The running Claude processes, listed on the worker. A listing that raises is shown as unavailable."""
+        try:
+            lister = claude_processes.list_claude_processes if self._process_lister is None else self._process_lister
+            return lister()
+        except Exception:  # noqa: BLE001 - a listing must never fail the sessions read
+            return ClaudeProcessesResult(claude_processes.UNAVAILABLE, claude_processes.UNAVAILABLE_MESSAGE)
 
     def _read_projects(self) -> tuple[tuple[tuple[str, str], ...] | None, str]:
         """(choices, "") on success. (None, message) when the project list could not be read."""
@@ -256,6 +311,7 @@ class SessionsPanel(QWidget):
         *,
         local_transport: Any = None,
         hosted_transport: hosted_client.Transport | None = None,
+        process_lister: Callable[[], ClaudeProcessesResult] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("sessions-panel")
@@ -266,6 +322,7 @@ class SessionsPanel(QWidget):
             mode_provider,
             local_transport,
             hosted_transport,
+            process_lister,
         )
         # Identifies this tab's reads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
@@ -298,21 +355,16 @@ class SessionsPanel(QWidget):
 
         self._status = _label(self, "sessions-status", LOADING_TEXT)
         layout.addWidget(self._status)
-        self._claude_processes = _label(self, "sessions-claude-processes", CLAUDE_PROCESSES_TEXT)
-        layout.addWidget(self._claude_processes)
 
-        self._table = QTableWidget(0, len(COLUMNS), self)
-        self._table.setObjectName("sessions-table")
-        self._table.setHorizontalHeaderLabels(list(COLUMNS))
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.verticalHeader().setVisible(False)
-        header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setStretchLastSection(True)
-        enable_table_copy(self._table)
-        layout.addWidget(self._table, 1)
+        self._table = _table(self, "sessions-table", COLUMNS)
+        layout.addWidget(self._table, 2)
+
+        layout.addWidget(_label(self, "sessions-claude-caption", CLAUDE_CAPTION))
+        self._claude_processes = _label(self, "sessions-claude-processes", CLAUDE_CHECKING_TEXT)
+        layout.addWidget(self._claude_processes)
+        self._claude_table = _table(self, "sessions-claude-table", CLAUDE_COLUMNS)
+        layout.addWidget(self._claude_table, 1)
+        layout.addWidget(_label(self, "sessions-claude-note", CLAUDE_NOTE_TEXT))
 
     # ----------------------------------------------------------- reads
 
@@ -358,10 +410,13 @@ class SessionsPanel(QWidget):
             return  # a newer read started after this one
         self._in_flight = None
         self._refresh.setEnabled(True)
+        now = datetime.now(timezone.utc)
         if snapshot.choices is not None:
             self._fill_picker(snapshot.choices, snapshot.project_id)
         if snapshot.result is not None:
-            self._show(snapshot.result, datetime.now(timezone.utc))
+            self._show(snapshot.result, now)
+        if snapshot.claude is not None:
+            self._show_claude(snapshot.claude, now)
 
     def _fill_picker(self, choices: tuple[tuple[str, str], ...], chosen: str) -> None:
         wanted = [pid for pid, _name in choices]
@@ -383,6 +438,14 @@ class SessionsPanel(QWidget):
             for column, text in enumerate(row_cells(row, now)):
                 self._table.setItem(row_index, column, QTableWidgetItem(text))
         self._status.setText(status_text(result, now.astimezone().strftime("%H:%M:%S")))
+
+    def _show_claude(self, result: ClaudeProcessesResult, now: datetime) -> None:
+        processes = result.processes if result.state == claude_processes.LISTED else ()
+        self._claude_table.setRowCount(len(processes))
+        for row_index, process in enumerate(processes):
+            self._claude_table.setItem(row_index, 0, QTableWidgetItem(process.image))
+            self._claude_table.setItem(row_index, 1, QTableWidgetItem(str(process.pid)))
+        self._claude_processes.setText(claude_status_text(result, now.astimezone().strftime("%H:%M:%S")))
 
     # ----------------------------------------------------------- events
 
@@ -410,11 +473,13 @@ class SessionsPanel(QWidget):
 
 
 __all__ = [
+    "CLAUDE_COLUMNS",
     "COLUMNS",
     "LOCAL_MODE",
     "REFRESH_MS",
     "SessionsPanel",
     "choose_project",
+    "claude_status_text",
     "row_cells",
     "status_text",
 ]
