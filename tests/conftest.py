@@ -50,6 +50,24 @@ def no_loopback_probe_waits(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_modal_dialog(monkeypatch):
+    """A modal dialog never returns offscreen, so a test that opens one by accident would hang the whole run.
+
+    Any exec() of a message box or dialog fails that test at once. A test that means to answer a question injects the
+    answer instead, as the confirmation fakes do.
+    """
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    def refuse(self, *args, **kwargs):
+        raise AssertionError("a modal dialog opened in a test; inject the answer instead")
+
+    for cls in (QDialog, QMessageBox):
+        for name in ("exec", "exec_"):
+            if hasattr(cls, name):
+                monkeypatch.setattr(cls, name, refuse)
+
+
+@pytest.fixture(autouse=True)
 def drain_pool_jobs():
     """Let every thread-pool job a test started finish before the next test starts.
 
