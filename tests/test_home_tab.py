@@ -7,6 +7,7 @@ The LaTeX and slot-port probes are stand-ins from conftest.py.
 import threading
 from datetime import datetime
 
+import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton
 
@@ -146,6 +147,27 @@ def test_every_card_checks_once_when_the_window_first_shows_with_no_click(qtbot,
     assert _headline(tab, "zotero") == "Not installed"
     for key in ("local", "tunnel", "services", "zotero", "tools"):
         assert _headline(tab, key) != "Could not check", key
+
+
+@pytest.mark.parametrize("mode", ["local", "hosted", "tunnel"])
+def test_the_local_tunnel_and_services_cards_check_at_boot_in_every_saved_mode(qtbot, tmp_path, mode):
+    """Home's boot checks do not depend on the saved mode. Only the one-line tunnel status in the window's mode bar does."""
+    SettingsStore(tmp_path / "settings.json").save(Settings(mode=mode))
+    calls = {"probe": [], "tunnel": []}
+
+    def probe(url):
+        calls["probe"].append(url)
+        return local_client.HEALTH_NOT_RUNNING
+
+    def tunnel(scope):
+        calls["tunnel"].append(scope)
+        return _tunnel_not_available(scope)
+
+    tab = _shown(qtbot, _deps(tmp_path, probe=probe, tunnel=tunnel))
+    for key in ("local", "tunnel", "services"):
+        _wait_settled(qtbot, tab, key)
+    assert calls["probe"] == ["http://127.0.0.1:7878"]
+    assert calls["tunnel"] == ["tunnel"]
 
 
 def test_nothing_is_checked_until_the_tab_is_shown(qtbot, tmp_path):
