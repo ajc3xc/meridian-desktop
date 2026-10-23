@@ -85,7 +85,7 @@ LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
 TOOLS_SECTION = "Tools (full table)"
 DIAGNOSTICS_INTRO = (
     "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
-    "tunnel and runner logs. Nothing here starts a service."
+    "control, tunnel and runner logs. Nothing here starts a service."
 )
 SETTINGS_FILE_TEXT = "Settings file: {path}"
 LOAD_WARNING_TEXT = "Note from the settings file: {warning}"

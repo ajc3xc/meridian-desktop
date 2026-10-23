@@ -1,10 +1,11 @@
-"""Logs tab: a read-only look at the desktop log, the tunnel log and the runner's log tail.
+"""Logs view under Settings, Diagnostics: a read-only look at the desktop, control, tunnel and runner logs.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The page reads nothing when it
 is built or shown, starts no timer and polls nothing. It reads only when Refresh is pressed, and
-the reads run on the thread pool, so the UI thread never blocks. The three reads are:
+the reads run on the thread pool, so the UI thread never blocks. The reads are:
 
 - the desktop log: the bounded, redacted tail that desktop_log.read_desktop_log_tail returns;
+- the control log: the bounded, redacted tail that runner_controls.read_control_log_tail returns, one line per Start or Stop;
 - the tunnel log: the bounded, redacted tail that log_tail.read_tunnel_log_tail returns;
 - the runner log: the tail-log reply of the runner client. runner_client passes only the read
   verbs, so no mutating verb is ever run from this page.
@@ -38,16 +39,16 @@ from meridian_desktop.log_tail import (
     read_tunnel_log_tail,
 )
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
+from meridian_desktop.runner_controls import read_control_log_tail
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
-INTRO_UNREAD_TEXT = "Press Refresh to read the end of all three logs. Nothing is read until then."
+INTRO_UNREAD_TEXT = "Press Refresh to read the end of each log. Nothing is read until then."
 INTRO_READING_TEXT = "Reading the logs..."
-INTRO_SHOWN_TEXT = (
-    "All three logs are shown read-only, with secret-shaped values redacted. Press Refresh to read them again."
-)
+INTRO_SHOWN_TEXT = "Each log is shown read-only, with secret-shaped values redacted. Press Refresh to read them again."
 DESKTOP_HEADING = "Desktop log:"
+CONTROL_HEADING = "Control log:"
 TUNNEL_HEADING = "Tunnel log:"
 RUNNER_HEADING = "Runner log (tail-log):"
 READING_TEXT = "reading..."
@@ -58,6 +59,8 @@ NO_RESULT = "NoResult"
 NOTHING_HERE_TEXT = "Nothing here yet."
 # The owner starts the tunnel from the Home tunnel card (Start asks first). No terminal command is typed here.
 START_TUNNEL_TEXT = "Start the tunnel from the Home tunnel card, then press Refresh here."
+# The control log gets one line for each Start or Stop of the local server or the tunnel.
+START_CONTROL_TEXT = "Press Start or Stop in Local server and startup, or on the Home tunnel card, then press Refresh here."
 
 DESKTOP_MISSING_TEXT = (
     "No log yet. The Meridian Desktop app writes this file each time it starts. "
@@ -71,6 +74,9 @@ DESKTOP_UNREADABLE_TEXT = "The desktop log exists but could not be read."
 TUNNEL_MISSING_TEXT = f"No log yet. The Meridian core's tunnel writes this file while it runs. {START_TUNNEL_TEXT}"
 EMPTY_TUNNEL_TEXT = f"The tunnel log is empty. The Meridian core's tunnel writes to it while it runs. {START_TUNNEL_TEXT}"
 TUNNEL_UNREADABLE_TEXT = "The tunnel log exists but could not be read."
+CONTROL_MISSING_TEXT = f"No log yet. The desktop adds one line here for each Start or Stop. {START_CONTROL_TEXT}"
+CONTROL_EMPTY_TEXT = f"The control log is empty. The desktop adds one line here for each Start or Stop. {START_CONTROL_TEXT}"
+CONTROL_UNREADABLE_TEXT = "The control log exists but could not be read."
 RUNNER_EMPTY_TEXT = f"No log yet. The Meridian core's runner writes this log when it starts the tunnel. {START_TUNNEL_TEXT}"
 RUNNER_NOT_AVAILABLE_PREFIX = "Runner log not available."
 RUNNER_NOT_CONNECTED_TEXT = (
@@ -88,6 +94,7 @@ class LogsOutcome:
     runner: RunnerResult | None = None
     failures: dict[str, str] = field(default_factory=dict)
     desktop: LogTail | None = None
+    control: LogTail | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,7 @@ class LogText:
 
 DESKTOP_TEXT = LogText(DESKTOP_MISSING_TEXT, DESKTOP_EMPTY_TEXT, DESKTOP_UNREADABLE_TEXT)
 TUNNEL_TEXT = LogText(TUNNEL_MISSING_TEXT, EMPTY_TUNNEL_TEXT, TUNNEL_UNREADABLE_TEXT)
+CONTROL_TEXT = LogText(CONTROL_MISSING_TEXT, CONTROL_EMPTY_TEXT, CONTROL_UNREADABLE_TEXT)
 
 
 def runner_tail_not_configured() -> RunnerResult:
@@ -199,18 +207,21 @@ class _Reads:
         desktop_log: Callable[[], LogTail],
         tunnel_log: Callable[[], LogTail],
         runner: Callable[[], RunnerResult],
+        control_log: Callable[[], LogTail],
     ) -> None:
         self._desktop_log = desktop_log
         self._tunnel_log = tunnel_log
         self._runner = runner
+        self._control_log = control_log
 
     def collect(self) -> LogsOutcome:
-        """Run the three reads in order. Runs on a worker thread, and never raises for one failed read."""
+        """Run the reads in order. Runs on a worker thread, and never raises for one failed read."""
         failures: dict[str, str] = {}
         desktop = _guarded("desktop", failures, self._desktop_log)
+        control = _guarded("control", failures, self._control_log)
         tunnel = _guarded("tunnel", failures, self._tunnel_log)
         runner = _guarded("runner", failures, self._runner)
-        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures, desktop=desktop)
+        return LogsOutcome(tunnel=tunnel, runner=runner, failures=failures, desktop=desktop, control=control)
 
 
 class _ReadJob(QRunnable):
@@ -240,9 +251,9 @@ class _ReadJob(QRunnable):
 
 
 class LogsPage(QWidget):
-    """The Logs tab: one Refresh button and three log panes (desktop, tunnel, runner).
+    """The Logs view: one Refresh button and four log panes (desktop, control, tunnel, runner).
 
-    The three reads are injected. The app passes the defaults above. Tests pass fakes or temp files.
+    The reads are injected. The app passes the defaults above. Tests pass fakes or temp files.
     """
 
     def __init__(
@@ -251,11 +262,12 @@ class LogsPage(QWidget):
         desktop_log: Callable[[], LogTail] = read_desktop_log_tail,
         tunnel_log: Callable[[], LogTail] = read_tunnel_log_tail,
         runner: Callable[[], RunnerResult] = runner_tail_not_configured,
+        control_log: Callable[[], LogTail] = read_control_log_tail,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("logs-page")
-        self._reads = _Reads(desktop_log, tunnel_log, runner)
+        self._reads = _Reads(desktop_log, tunnel_log, runner, control_log)
         self._busy = False
         # Identifies this page's passes. A plain object, so a job can hold it without holding the page.
         self._owner = object()
@@ -279,6 +291,11 @@ class LogsPage(QWidget):
         layout.addWidget(self._desktop_heading)
         self._desktop_text = _pane(self, "logs-desktop-text")
         layout.addWidget(self._desktop_text, 1)
+
+        self._control_heading = _heading(self, "logs-control-heading", f"{CONTROL_HEADING} not read yet.")
+        layout.addWidget(self._control_heading)
+        self._control_text = _pane(self, "logs-control-text")
+        layout.addWidget(self._control_text, 1)
 
         self._tunnel_heading = _heading(self, "logs-tunnel-heading", f"{TUNNEL_HEADING} not read yet.")
         layout.addWidget(self._tunnel_heading)
@@ -330,9 +347,11 @@ class LogsPage(QWidget):
     def _show_reading(self) -> None:
         self._intro.setText(INTRO_READING_TEXT)
         self._desktop_heading.setText(f"{DESKTOP_HEADING} {READING_TEXT}")
+        self._control_heading.setText(f"{CONTROL_HEADING} {READING_TEXT}")
         self._tunnel_heading.setText(f"{TUNNEL_HEADING} {READING_TEXT}")
         self._runner_heading.setText(f"{RUNNER_HEADING} {READING_TEXT}")
         self._desktop_text.setPlainText("")
+        self._control_text.setPlainText("")
         self._tunnel_text.setPlainText("")
         self._runner_text.setPlainText("")
 
@@ -340,9 +359,11 @@ class LogsPage(QWidget):
         text = FAILED_TEXT.format("logs", failure)
         self._intro.setText(INTRO_SHOWN_TEXT)
         self._desktop_heading.setText(DESKTOP_HEADING)
+        self._control_heading.setText(CONTROL_HEADING)
         self._tunnel_heading.setText(TUNNEL_HEADING)
         self._runner_heading.setText(RUNNER_HEADING)
         self._desktop_text.setPlainText(text)
+        self._control_text.setPlainText(text)
         self._tunnel_text.setPlainText(text)
         self._runner_text.setPlainText(text)
 
@@ -356,6 +377,15 @@ class LogsPage(QWidget):
             tail=outcome.desktop,
             failure=outcome.failures.get("desktop", NO_RESULT),
             texts=DESKTOP_TEXT,
+        )
+        self._show_file_pane(
+            self._control_heading,
+            self._control_text,
+            title=CONTROL_HEADING,
+            label="control log",
+            tail=outcome.control,
+            failure=outcome.failures.get("control", NO_RESULT),
+            texts=CONTROL_TEXT,
         )
         self._show_file_pane(
             self._tunnel_heading,
