@@ -10,9 +10,11 @@ notice files). Beside them it holds install.cmd and uninstall.cmd from packaging
 unzips the archive and runs install.cmd, which runs ``MeridianDesktop.exe --install --desktop``
 from its own folder.
 
-The version is ``version`` under [workspace] in pixi.toml. A file or folder named .env, .env.*,
-*.env or meridian.toml is never added, at any depth, and each one left out is listed. The scripts
-are written with CRLF line endings, which cmd.exe needs for labels and exit codes to behave.
+The version is ``version`` under [workspace] in pixi.toml, plain dotted integers such as 0.1.0. A file
+or folder named .env, .env.*, *.env, meridian.toml, *.pem, *.key or .netrc is never added, at any depth
+and in any letter case, and each one left out is listed. A bundle that holds a symbolic link or a
+junction is refused before anything is zipped. The scripts are written with CRLF line endings, which
+cmd.exe needs for labels and exit codes to behave.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ SCRIPTS_DIR = REPO / "packaging" / "release"
 PIXI_TOML = REPO / "pixi.toml"
 SCRIPT_NAMES = ("install.cmd", "uninstall.cmd")
 SECRET_FILE_NAMES = frozenset({"meridian.toml"})
-VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.-]+)?")
+VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)*")  # the same plain dotted integers the updater accepts
 
 
 class ReleaseError(RuntimeError):
@@ -62,8 +64,25 @@ def read_version(pixi_toml: Path = PIXI_TOML) -> str:
 
 
 def is_secret_name(name: str) -> bool:
-    """True for a file or folder name that must never ship: .env, .env.*, *.env and meridian.toml."""
-    return name in SECRET_FILE_NAMES or name == ".env" or name.startswith(".env.") or name.endswith(".env")
+    """True for a file or folder name that must never ship, in any letter case.
+
+    Covers the same names as verify_bundle._secret_named: .env and .env.* (any name starting .env), *.env,
+    meridian.toml, *.pem, *.key and .netrc.
+    """
+    lower = name.lower()
+    return (
+        lower in SECRET_FILE_NAMES
+        or lower.startswith(".env")
+        or lower.endswith(".env")
+        or lower.endswith((".pem", ".key"))
+        or lower == ".netrc"
+    )
+
+
+def _is_link(path: Path) -> bool:
+    """True for a symbolic link or a Windows junction. Either one could point outside the bundle."""
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or (is_junction is not None and is_junction())
 
 
 def _crlf(data: bytes) -> bytes:
@@ -82,7 +101,11 @@ def build_release(bundle: Path, scripts: Path, out_dir: Path, version: str) -> R
 
     included: list[tuple[str, Path]] = []
     excluded: list[str] = []
+    links: list[str] = []
     for path in sorted(bundle.rglob("*")):
+        if _is_link(path):
+            links.append(path.relative_to(bundle).as_posix())
+            continue
         if not path.is_file():
             continue
         relative = path.relative_to(bundle)
@@ -91,6 +114,11 @@ def build_release(bundle: Path, scripts: Path, out_dir: Path, version: str) -> R
             continue
         included.append((relative.as_posix(), path))
 
+    if links:
+        raise ReleaseError(
+            f"the bundle holds a link, {', '.join(sorted(links))}; remove it from the bundle before building a "
+            "release. Nothing was zipped."
+        )
     taken = sorted(name for name, _ in included if name in SCRIPT_NAMES)
     if taken:
         raise ReleaseError(f"the bundle already holds {', '.join(taken)}; move it out before building a release")

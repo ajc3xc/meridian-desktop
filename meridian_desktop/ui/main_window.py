@@ -29,9 +29,11 @@ The Tools tab (read-only) shows which Meridian tools each AI client has set up, 
 and the tunnel are live. It reads when it is first shown and when its Refresh button is pressed. Neither tab
 starts, stops or installs anything.
 
-At a real start, one update check runs on the thread pool. It asks GitHub for the latest release JSON and
-nothing else, and it shows a status-bar notice when a newer release is published. It is off when the
-check_updates setting is false, and the app passes no transport under --smoke, so a smoke run makes no request.
+At a real start, one update check runs on the thread pool, and again every six hours while the app runs. It asks GitHub
+for the latest release and its signed checksum list, downloads a newer release only after the signature verifies, and
+stages it for the next restart. The status bar shows the download and the staged release. It is off when the
+auto_update or check_updates setting is false, and the app passes no transport under --smoke, so a smoke run makes
+no request.
 
 Tunnel mode reads projects the same way Hosted does. Its top bar shows one line with the tunnel's
 state (from one read-only status call, made when the mode is switched to Tunnel and at start in
@@ -42,6 +44,7 @@ control that starts, stops or restarts anything.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QThreadPool, Qt, Slot
@@ -124,6 +127,17 @@ MODE_DESCRIPTIONS = {
 # The window opens at this size (width, height). It fits the full tab bar, which holds twelve labels now
 # that Sessions and Tools are tabs, and gives the Settings panel room for its key row and pods table.
 DEFAULT_WINDOW_SIZE = (1280, 640)
+
+
+def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
+    """A reader that says whether automatic updates and the update check are both on. Read at each check, so a change
+    in Settings applies at once. It holds the store only, never the window, so the window can still be freed."""
+
+    def allowed() -> bool:
+        settings = store.load().settings
+        return settings.auto_update and settings.check_updates
+
+    return allowed
 
 
 def _placeholder_page(
@@ -258,6 +272,8 @@ class MainWindow(QMainWindow):
         tools_status: Callable[[], ToolsStatus] | None = None,
         update_transport: updater.Transport | None = None,
         runner_actions: RunnerActions | None = None,
+        update_root: Path | None = None,
+        record_apps_entry: updater.AppsEntryWriter | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
@@ -349,11 +365,20 @@ class MainWindow(QMainWindow):
         self.resize(*DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
-        # The update notice sits at the right of the status bar, hidden until a check finds a newer release.
-        # One check per window, and only when check_updates is on. No transport means no request is made.
-        self._update_notice = UpdateNoticeBar(APP_VERSION, update_transport, parent=self)
+        # The update bar sits at the right of the status bar. It is hidden unless a release is downloading or staged.
+        # A check runs at start and every six hours after, only while auto_update and check_updates are on. No
+        # transport means no request is made, and no update_root means nothing is staged or restarted.
+        self._update_notice = UpdateNoticeBar(
+            APP_VERSION,
+            update_transport,
+            install_root=update_root,
+            enabled=_updates_allowed_reader(self._store),
+            report=self.statusBar().showMessage,
+            parent=self,
+            record_apps_entry=record_apps_entry,
+        )
         self.statusBar().addPermanentWidget(self._update_notice)
-        self._update_notice.start(enabled=self._store.load().settings.check_updates)
+        self._update_notice.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
 
