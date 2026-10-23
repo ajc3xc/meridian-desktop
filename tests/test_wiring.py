@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QPushButton, QTableWidg
 
 from _fakes import MemoryKeyring
 from _shared_delivery import recording_deliveries, visible_state
-from meridian_desktop import sessions_client, updater
+from meridian_desktop import claude_processes, sessions_client, updater
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.local_client import HEALTH_NOT_RUNNING
 from meridian_desktop.secret_store import KeyringSecretStore
@@ -32,6 +32,13 @@ from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text, ready_text
 from meridian_desktop.version import APP_VERSION
+
+@pytest.fixture(autouse=True)
+def no_real_process_listing(monkeypatch):
+    """No test here starts tasklist. The Claude process listing finds no Claude program."""
+    empty = claude_processes.ClaudeProcessesResult(claude_processes.LISTED, "", ())
+    monkeypatch.setattr(claude_processes, "list_claude_processes", lambda run=None: empty)
+
 
 EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
 LOCAL = "http://127.0.0.1:7999"
