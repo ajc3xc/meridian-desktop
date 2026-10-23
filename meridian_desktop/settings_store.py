@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -35,6 +36,12 @@ _URL_KEYS = ("hosted_url", "local_url", "engine_url")
 CORE_CHECKOUT_KEY = "core_checkout"
 CORE_PYTHON_KEY = "core_python"
 CORE_KEYS = (CORE_CHECKOUT_KEY, CORE_PYTHON_KEY)
+# True when the locator (meridian_desktop/core_locator.py) found that core path, and the owner did not choose it. The
+# locator may replace an automatically found path, and never a path the owner saved by hand. Absent means false.
+CORE_CHECKOUT_AUTO_KEY = "core_checkout_auto"
+CORE_PYTHON_AUTO_KEY = "core_python_auto"
+CORE_AUTO_FLAGS = {CORE_CHECKOUT_KEY: CORE_CHECKOUT_AUTO_KEY, CORE_PYTHON_KEY: CORE_PYTHON_AUTO_KEY}
+CORE_AUTO_KEYS = tuple(CORE_AUTO_FLAGS.values())
 
 # The mode a run starts in when the file names none and a hosted token is saved (owner decision, 2026-10-23).
 HOSTED_MODE = "hosted"
@@ -86,6 +93,10 @@ class Settings:
     confirmed_core_python: str = ""
     confirmed_core_checkout: str = ""
     confirmed_zotero_exe: str = ""
+    # Whether the core checkout and Python were found by the locator rather than chosen by the owner. False by default,
+    # and save() writes each one only when it is True.
+    core_checkout_auto: bool = False
+    core_python_auto: bool = False
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -206,6 +217,16 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append(f"{key} must be a path as text or empty; using empty")
 
+    # core_checkout_auto and core_python_auto: an absent key means the owner chose the path (false), with no warning.
+    for key in CORE_AUTO_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be true or false; using false")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -315,6 +336,10 @@ class SettingsStore:
             if not data[key]:
                 # "Not set" is the default, so a file that never set a core path or a confirmed value has no such key.
                 del data[key]
+        for key in CORE_AUTO_KEYS:
+            if not data[key]:
+                # False is the default, so only a path the locator found carries its flag.
+                del data[key]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -337,6 +362,20 @@ class SettingsStore:
                 pass
             raise
 
+    def keep_unreadable_copy(self) -> None:
+        """Copy the settings file aside before a write that would replace it, when the file did not load cleanly.
+
+        The copy is <name>.unreadable.bak beside the file. Nothing is copied for a file that loads cleanly or does not
+        exist. Never raises: a failed copy must not stop the write the owner asked for.
+        """
+        if self.load().warning is None:
+            return
+        try:
+            if self._path.is_file():
+                shutil.copyfile(self._path, self._path.with_name(self._path.name + ".unreadable.bak"))
+        except OSError:
+            return
+
     def set_mode(self, mode: str) -> Settings:
         if mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
@@ -358,7 +397,7 @@ class SettingsStore:
             raise ValueError(problem)
         updated = replace(
             self.load().settings,
-            **{key: text},
+            **{key: text, CORE_AUTO_FLAGS[key]: False},
             zotero_autostart=False,
             local_server_autostart=False,
         )

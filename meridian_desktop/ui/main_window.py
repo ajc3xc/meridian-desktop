@@ -356,6 +356,16 @@ class MainWindow(QMainWindow):
         self._update_notice.start(enabled=self._store.load().settings.check_updates)
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
+        # The core search at start, and any later search or chosen core folder, changes what the tunnel check can reach.
+        # A Tunnel mode window checks again once a search has finished.
+        self._runner_actions.coreChanged.connect(self._on_core_changed)
+
+    @Slot()
+    def _on_core_changed(self) -> None:
+        """Re-check the tunnel in Tunnel mode once the core search has finished. Other modes do nothing."""
+        if self._runner_actions.locating or self._saved_mode != TUNNEL_MODE:
+            return
+        self._start_tunnel_check()
 
     def _build_mode_bar(self, parent: QWidget) -> QVBoxLayout:
         result = self._store.load()

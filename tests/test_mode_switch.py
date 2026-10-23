@@ -611,8 +611,9 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
         "tunnel-restart", "tunnel-start", "tunnel-stop",
         "zotero-start",
     ]
-    # The tunnel controls are off until tunnel_control_enabled is true, which is the default here.
-    tunnel_buttons = [b for b in buttons if b.objectName().startswith("tunnel-")]
+    # The tunnel controls are off until the core is found. The one fix button that turns them on is not a control, so it is
+    # left out of the check that the three controls are off.
+    tunnel_buttons = [b for b in buttons if b.objectName().startswith("tunnel-") and b.objectName() != "tunnel-fix"]
     assert tunnel_buttons
     assert all(not b.isEnabled() for b in tunnel_buttons)
 

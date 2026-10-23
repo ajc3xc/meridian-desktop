@@ -33,9 +33,12 @@ from meridian_desktop.hosted_client import (
     UNREACHABLE_TEXT,
     Reply,
 )
+from meridian_desktop.core_locator import FOUND, NOT_FOUND, SOURCE_SEARCHED, LocatedCore
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE, get_token, set_token
+from meridian_desktop.ui.client_setup_section import NOT_LOOKED_TEXT
+from meridian_desktop.ui.runner_actions import CHOSEN_TEXT, RunnerActions
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
     HOSTED_URL_SAVED_TEXT,
@@ -624,4 +627,68 @@ def test_saving_a_core_path_with_no_launch_switch_on_says_nothing_about_them(qtb
 
     status = _label(tab, "client-setup-settings-message").text()
     assert status == "Meridian core checkout saved."
+    assert SettingsStore(settings_path).load().settings.core_checkout == str(checkout)
+
+
+# ------------------------------------------------------------------ the core search block in Settings
+
+
+def _core_tab(qtbot, settings_path, secrets, *, locate, choose_folder=lambda parent, start: ""):
+    """A Settings tab whose core search and folder chooser are fakes. Nothing starts a process or opens a dialog."""
+    actions = RunnerActions(SettingsStore(settings_path), locate=locate, choose_folder=choose_folder)
+    tab = SettingsTab(SettingsStore(settings_path), secrets=secrets, list_hosted=_unexpected_list, actions=actions)
+    qtbot.addWidget(tab)
+    return tab, actions
+
+
+def test_the_client_setup_says_what_the_search_found_and_find_it_again_searches_again(qtbot, settings_path, secrets, tmp_path):
+    checkout = tmp_path / "Meridian" / "repository"
+    (checkout / "meridian").mkdir(parents=True)
+    (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"MZ")
+    tab, actions = _core_tab(
+        qtbot, settings_path, secrets,
+        locate=lambda store: LocatedCore(FOUND, str(checkout), str(python), SOURCE_SEARCHED),
+    )
+    status = tab.findChild(QLabel, "client-setup-finder-status")
+    assert status.text() == NOT_LOOKED_TEXT
+
+    tab.findChild(QPushButton, "client-setup-find-again").click()
+
+    qtbot.waitUntil(lambda: str(checkout) in status.text(), timeout=5000)
+    assert str(python) in status.text()
+    assert tab.findChild(QLineEdit, "client-setup-checkout").text() == str(checkout)  # the box follows the saved path
+    assert tab.findChild(QPushButton, "client-setup-choose-core").isVisibleTo(tab) is False
+
+
+def test_when_nothing_is_found_the_settings_block_says_why_and_offers_the_choose_button(qtbot, settings_path, secrets, tmp_path):
+    tab, actions = _core_tab(
+        qtbot, settings_path, secrets,
+        locate=lambda store: LocatedCore(NOT_FOUND, reason="No Meridian core folder was found in the Documents folders on this computer."),
+    )
+
+    tab.findChild(QPushButton, "client-setup-find-again").click()
+
+    qtbot.waitUntil(lambda: actions.located is not None, timeout=5000)
+    status = tab.findChild(QLabel, "client-setup-finder-status")
+    assert status.text().startswith("The Meridian core was not found.")
+    choose = tab.findChild(QPushButton, "client-setup-choose-core")
+    assert choose.isVisibleTo(tab) and choose.isEnabled() and choose.text() == "Choose the Meridian core folder"
+
+
+def test_choose_the_core_folder_in_settings_saves_the_folder_and_says_so(qtbot, settings_path, secrets, tmp_path):
+    checkout = tmp_path / "chosen" / "repository"
+    (checkout / "meridian").mkdir(parents=True)
+    (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    tab, actions = _core_tab(
+        qtbot, settings_path, secrets,
+        locate=lambda store: LocatedCore(NOT_FOUND, reason="none"),
+        choose_folder=lambda parent, start: str(checkout),
+    )
+
+    tab.findChild(QPushButton, "client-setup-choose-core").click()
+
+    message = tab.findChild(QLabel, "client-setup-settings-message")
+    assert message.text().startswith(CHOSEN_TEXT)
     assert SettingsStore(settings_path).load().settings.core_checkout == str(checkout)

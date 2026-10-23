@@ -9,9 +9,11 @@ Restart is a stop, then a start, and the owner is asked before each one (rule 9)
 ends the restart, so nothing is started after a stop the runner did not confirm.
 
 The buttons are enabled only when the gate says so. For the tunnel the gate also needs tunnel_control_enabled
-(rule 10). Both gates need the Meridian core checkout and its Python to be set. The gate's text is shown when the
-buttons are off, so the owner sees why. After each finished call, after_action runs on the GUI thread, so the owner
-can read the state again.
+(rule 10). Both gates need the Meridian core checkout and its Python to be set. The core is looked for at start, and
+again by "Find it again" in Settings. The gate's text is shown when the buttons are off, so the owner sees why, and a
+button next to the text does the one thing that turns them on: Choose the Meridian core folder, or Turn on the tunnel
+controls. The buttons read the setup again whenever RunnerActions.coreChanged is emitted. After each finished call,
+after_action runs on the GUI thread, so the owner can read the state again.
 """
 
 from __future__ import annotations
@@ -34,12 +36,22 @@ from meridian_desktop.ui.text import make_selectable
 
 RESTART = "restart"
 TUNNEL_OFF_TEXT = (
-    "The tunnel controls are off, because tunnel_control_enabled is false in the desktop settings file. "
-    "To turn them on, set it to true. The desktop never starts or stops the tunnel by itself."
+    "The tunnel controls are off. Turn them on with the button here. Each one still asks first, "
+    "and the desktop never starts or stops the tunnel by itself."
 )
 CORE_NOT_SET_TEXT = (
-    "Set the Meridian core checkout and its Python in the client setup section of the Settings tab first."
+    "The Meridian core was not found on this computer, so these buttons are off. "
+    "Choose the Meridian core folder, and the desktop finds its Python."
 )
+# The button that does the one thing that turns the controls on, for each gate note that has one.
+CHOOSE_CORE_BUTTON = "Choose the Meridian core folder"
+TURN_ON_TUNNEL_BUTTON = "Turn on the tunnel controls"
+FIX_CHOOSE_CORE = "choose-core"
+FIX_TURN_ON_TUNNEL = "turn-on-tunnel"
+FIX_BY_NOTE = {
+    CORE_NOT_SET_TEXT: (FIX_CHOOSE_CORE, CHOOSE_CORE_BUTTON),
+    TUNNEL_OFF_TEXT: (FIX_TURN_ON_TUNNEL, TURN_ON_TUNNEL_BUTTON),
+}
 BUTTON_TEXT = {START: "Start {label}", STOP: "Stop {label}", RESTART: "Restart {label}"}
 QUESTION_TEXT = {START: "Start the {label}?", STOP: "Stop the {label}?"}
 RESTART_STOP_QUESTION = "Restart the {label}: stop it first?"
@@ -112,6 +124,8 @@ class ScopeControls(QWidget):
         self._gate = gate
         self._busy = False
         self._enabled_by_gate = False
+        # The button that turns the controls on, when the gate is off: FIX_CHOOSE_CORE, FIX_TURN_ON_TUNNEL, or None.
+        self._fix_kind: str | None = None
         # The call in flight: (python, working folder, "start" when a restart still has its start to do, or None).
         self._pending: tuple[str, str, str | None] | None = None
         # Identifies this widget's calls. A plain object, so a job can hold it without holding the widget.
@@ -128,7 +142,11 @@ class ScopeControls(QWidget):
         self._stop.setObjectName(f"{prefix}-stop")
         self._restart = QPushButton(BUTTON_TEXT[RESTART].format(label=self._label), self)
         self._restart.setObjectName(f"{prefix}-restart")
-        for button in (self._start, self._stop, self._restart):
+        # The one-step fix. It is shown only while the gate is off, next to the greyed controls, and says what it does.
+        self._fix = QPushButton(self)
+        self._fix.setObjectName(f"{prefix}-fix")
+        self._fix.setVisible(False)
+        for button in (self._start, self._stop, self._restart, self._fix):
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -141,22 +159,30 @@ class ScopeControls(QWidget):
         self._start.clicked.connect(self._on_start_clicked)
         self._stop.clicked.connect(self._on_stop_clicked)
         self._restart.clicked.connect(self._on_restart_clicked)
+        self._fix.clicked.connect(self._on_fix_clicked)
+        # The core search and a chosen core folder change the gate, so the buttons read the setup again then.
+        actions.coreChanged.connect(self.refresh_enabled)
         self.refresh_enabled()
 
     # ----------------------------------------------------------- state
 
     def refresh_enabled(self) -> None:
-        """Read the saved setup again and set the buttons and the gate note. Starts nothing."""
+        """Read the saved setup again and set the buttons, the gate note and the fix button. Starts nothing."""
         enabled, note = self._gate(self._actions.core())
         self._enabled_by_gate = enabled
         self._note.setText(note)
         self._note.setVisible(bool(note))
+        fix = FIX_BY_NOTE.get(note) if not enabled else None
+        self._fix_kind = fix[0] if fix else None
+        self._fix.setText(fix[1] if fix else "")
         self._set_buttons()
 
     def _set_buttons(self) -> None:
         on = self._enabled_by_gate and not self._busy
         for button in (self._start, self._stop, self._restart):
             button.setEnabled(on)
+        self._fix.setVisible(self._fix_kind is not None)
+        self._fix.setEnabled(self._fix_kind is not None and not self._busy)
 
     def _show(self, text: str) -> None:
         self._result.setText(text)
@@ -194,6 +220,18 @@ class ScopeControls(QWidget):
     @Slot()
     def _on_restart_clicked(self) -> None:
         self._ask_and_run(STOP, restart=True)
+
+    @Slot()
+    def _on_fix_clicked(self) -> None:
+        """Do the one thing the gate note names: choose the core folder, or turn the tunnel controls on. Starts nothing."""
+        if self._busy or self._fix_kind is None:
+            return
+        if self._fix_kind == FIX_CHOOSE_CORE:
+            message = self._actions.choose_core_folder(self)
+        else:
+            message = self._actions.enable_tunnel_controls()
+        self._show(message)
+        self.refresh_enabled()
 
     def _ask_and_run(self, subcommand: str, *, restart: bool) -> None:
         if self._busy:

@@ -18,6 +18,7 @@ import shiboken6
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget, QWidget
 
+from meridian_desktop.core_locator import FOUND, NOT_FOUND, SOURCE_SEARCHED, LocatedCore
 from meridian_desktop.runner_client import (
     ERR_TIMEOUT,
     NOT_AVAILABLE_MESSAGE,
@@ -367,12 +368,25 @@ def test_the_slot_line_below_keeps_its_slot_state_text(qtbot):
     assert _label(page, "tunnel-status").text() == NOT_AVAILABLE_TEXT
 
 
-def test_the_tab_has_only_the_three_tunnel_controls_and_no_refresh_button(qtbot):
+def test_the_tab_has_only_the_three_tunnel_controls_and_no_refresh_button(qtbot, settings_path):
+    # With the core set, the tab has its three controls and nothing else. The fix button is shown only while they are off.
+    SettingsStore(settings_path).save(Settings(core_python=PY, core_checkout=CWD))
+    page = _page_with_actions(qtbot, settings_path, Fake(_reply("running")))
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+
+    shown = sorted(button.objectName() for button in page.findChildren(QPushButton) if button.isVisible())
+    assert shown == ["tunnel-restart", "tunnel-start", "tunnel-stop"]
+
+
+def test_with_the_core_not_found_the_only_extra_button_is_the_one_that_enables_the_controls(qtbot):
     page = _page(qtbot, Fake(_reply("running")))
     _show_and_wait(qtbot, page, HEADLINES[RUNNING])
 
     names = sorted(button.objectName() for button in page.findChildren(QPushButton))
-    assert names == ["tunnel-restart", "tunnel-start", "tunnel-stop"]
+    assert names == ["tunnel-fix", "tunnel-restart", "tunnel-start", "tunnel-stop"]
+    fix = page.findChild(QPushButton, "tunnel-fix")
+    assert fix.isVisible() and fix.isEnabled()
+    assert fix.text() == "Choose the Meridian core folder"
 
 
 def test_the_tunnel_controls_are_disabled_when_tunnel_control_is_turned_off(qtbot, settings_path):
@@ -383,7 +397,10 @@ def test_the_tunnel_controls_are_disabled_when_tunnel_control_is_turned_off(qtbo
 
     for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
         assert page.findChild(QPushButton, name).isEnabled() is False, name
-    assert "tunnel_control_enabled" in _label(page, "tunnel-control-note").text()
+    # The note says why, and the one button next to it turns the controls on. Nothing is greyed out without a way to fix it.
+    assert "tunnel controls are off" in _label(page, "tunnel-control-note").text()
+    fix = page.findChild(QPushButton, "tunnel-fix")
+    assert fix.isVisible() and fix.text() == "Turn on the tunnel controls"
 
 
 def test_the_tunnel_controls_are_on_by_default_when_the_core_is_set(qtbot, settings_path):
@@ -403,7 +420,9 @@ def test_the_tunnel_controls_say_the_core_is_not_set_when_it_is_not_set_by_defau
 
     for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
         assert page.findChild(QPushButton, name).isEnabled() is False, name
-    assert "core checkout and its Python" in _label(page, "tunnel-control-note").text()
+    assert "Meridian core was not found" in _label(page, "tunnel-control-note").text()
+    fix = page.findChild(QPushButton, "tunnel-fix")
+    assert fix.isVisible() and fix.text() == "Choose the Meridian core folder"
 
 
 def test_a_delivered_result_with_a_foreign_owner_is_not_shown(qtbot):
@@ -430,3 +449,40 @@ def test_a_delivered_result_with_a_stale_generation_is_not_shown(qtbot):
     qtbot.wait(50)
 
     assert _headline(page) == HEADLINES[RUNNING]
+
+
+def test_when_the_core_search_finishes_the_tunnel_is_checked_again_with_the_core_it_found(qtbot, settings_path):
+    status = Fake(_reply("running"))
+    actions = RunnerActions(
+        SettingsStore(settings_path),
+        confirm=_no_confirm,
+        locate=lambda store: LocatedCore(FOUND, CWD, PY, SOURCE_SEARCHED),
+    )
+    page = TunnelPage(status=status, clock=_clock, actions=actions)
+    qtbot.addWidget(page)
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+    before = len(status.scopes)
+    assert page.findChild(QPushButton, "tunnel-start").isEnabled() is False  # no core saved yet
+
+    actions.find_core()
+
+    qtbot.waitUntil(lambda: len(status.scopes) > before, timeout=5000)
+    qtbot.waitUntil(lambda: page.findChild(QPushButton, "tunnel-start").isEnabled(), timeout=5000)
+
+
+def test_a_core_search_that_is_still_running_does_not_start_a_tunnel_check(qtbot, settings_path):
+    gate = threading.Event()
+    status = Fake(_reply("running"))
+    actions = RunnerActions(SettingsStore(settings_path), confirm=_no_confirm, locate=lambda store: gate.wait(5) and LocatedCore(NOT_FOUND))
+    page = TunnelPage(status=status, clock=_clock, actions=actions)
+    qtbot.addWidget(page)
+    _show_and_wait(qtbot, page, HEADLINES[RUNNING])
+    before = len(status.scopes)
+
+    actions.find_core()  # the search holds on its worker until the gate opens
+    qtbot.wait(50)
+    gate.set()
+    qtbot.waitUntil(lambda: actions.located is not None, timeout=5000)
+
+    # The search's own start changed nothing, so the only new check is the one that follows the finished search.
+    assert len(status.scopes) == before + 1

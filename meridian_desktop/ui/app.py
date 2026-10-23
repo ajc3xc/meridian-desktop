@@ -52,7 +52,9 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
 
     # The update check runs once at a real start, through the urllib transport. A --smoke run passes no transport,
     # so it makes no request. The window still honours the check_updates setting.
-    window = MainWindow(store, update_transport=None if smoke else updater.urllib_transport)
+    # One set of runner controls is shared by every tab that starts or stops a runner, so one core search serves them all.
+    actions = RunnerActions(store)
+    window = MainWindow(store, update_transport=None if smoke else updater.urllib_transport, runner_actions=actions)
     tray = MeridianTray(window, app)
     window.show()
     tray.show()
@@ -64,9 +66,14 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         print("smoke ok")
         return 0
 
+    # The core search runs once per launch, on the thread pool, after the window shows. It finds the Meridian checkout
+    # and its Python, so the Tunnel and local-server controls are on without the owner typing either path. A smoke run
+    # never searches. The result reaches the controls through RunnerActions.coreChanged.
+    QTimer.singleShot(0, actions.find_core)
+
     # The launch-time starts (amendments A and B of docs/local-trust-contract.md) run once, after the window shows.
     # Each runs only when its own switch is on, and never in a smoke run, which returned above. The starter is held
     # by this frame, so it lives as long as the event loop runs.
-    launch = LaunchStarts(RunnerActions(store), report=window.show_launch_notes)
+    launch = LaunchStarts(actions, report=window.show_launch_notes)
     QTimer.singleShot(0, launch.start)
     return int(app.exec())

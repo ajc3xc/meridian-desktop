@@ -390,13 +390,14 @@ def _page_buttons(page):
 def test_tunnel_page_has_only_the_tunnel_start_stop_and_restart_buttons(qtbot):
     # The Tunnel tab's controls are the three buttons of ScopeControls for the tunnel (contract rules 2 and 9). No other
     # button is on the page, before or after a snapshot.
-    expected = {"tunnel-start", "tunnel-stop", "tunnel-restart"}
+    # With no core found, the one fix button that turns the controls on is shown too. It is the only button beyond the three.
+    expected = {"tunnel-start", "tunnel-stop", "tunnel-restart", "tunnel-fix"}
     page = TunnelPage()
     qtbot.addWidget(page)
-    assert {button.objectName() for button in _page_buttons(page)} == expected
+    assert {b.objectName() for b in _page_buttons(page) if b.isVisibleTo(page)} == expected
 
     page.set_snapshot(FIVE_STATE_SNAPSHOT)
-    assert {button.objectName() for button in _page_buttons(page)} == expected
+    assert {b.objectName() for b in _page_buttons(page) if b.isVisibleTo(page)} == expected
 
     # The module imports no button class either, so the page cannot add a button of its own without this failing.
     page_path = REPO / "meridian_desktop" / "ui" / "tunnel_page.py"
