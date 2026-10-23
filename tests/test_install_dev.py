@@ -213,7 +213,7 @@ def test_dev_install_leaves_an_installed_bundle_and_its_entries_alone(tmp_path):
     registry = FakeRegistry()
     SettingsStore(default_settings_path(env)).save(Settings(autostart=True))
     inst.install(_bundle(tmp_path), env, writer=lambda shortcut, target: None, registry=registry)
-    installed = inst.install_dir(env)
+    installed = inst.install_dir(env) / "versions" / inst.__version__
     apps_before = dict(registry.keys[inst.UNINSTALL_KEY])
     run_before = registry.run_value()
     assert run_before is not None

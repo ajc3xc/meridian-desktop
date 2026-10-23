@@ -41,6 +41,11 @@ def _env(tmp_path: Path) -> dict[str, str]:
     }
 
 
+def _installed(env: dict[str, str]) -> Path:
+    """The folder of the version this build installs: install folder\\versions\\<version>."""
+    return inst.install_dir(env) / "versions" / __version__
+
+
 def _bundle(tmp_path: Path, *, marker: str = "v1") -> Path:
     source = tmp_path / "bundle"
     (source / "_internal").mkdir(parents=True)
@@ -68,6 +73,9 @@ class FakeRegistry:
         if self.fail_writes:
             raise PermissionError(13, "Access is denied")
         self.keys.setdefault(key, {}).update(values)
+
+    def read_string(self, key: str, name: str) -> str | None:
+        return self.keys.get(key, {}).get(name)
 
     def delete_value(self, key: str, name: str) -> bool:
         values = self.keys.get(key, {})
@@ -154,10 +162,10 @@ def test_install_copies_the_bundle_and_writes_one_shortcut(tmp_path):
     recorder = _Recorder()
     result = inst.install(_bundle(tmp_path), env, writer=recorder)
 
-    target = inst.install_dir(env)
+    target = _installed(env)
     assert (target / inst.EXE_NAME).read_bytes() == b"MZ-fake"
     assert (target / "_internal" / "data.txt").read_text(encoding="utf-8") == "v1"
-    assert result.install_dir == target
+    assert result.install_dir == inst.install_dir(env)
     assert result.shortcuts == (inst.start_menu_shortcut(env),)
     assert recorder.calls == [(inst.start_menu_shortcut(env), target / inst.EXE_NAME)]
 
@@ -174,12 +182,12 @@ def test_desktop_flag_adds_a_second_shortcut(tmp_path):
 def test_install_over_an_older_copy_replaces_it(tmp_path):
     env = _env(tmp_path)
     inst.install(_bundle(tmp_path, marker="v1"), env, writer=_Recorder())
-    stale = inst.install_dir(env) / "old_only.txt"
+    stale = _installed(env) / "old_only.txt"
     stale.write_text("left over", encoding="utf-8")
 
     inst.install(_bundle(tmp_path / "second", marker="v2"), env, writer=_Recorder())
 
-    assert (inst.install_dir(env) / "_internal" / "data.txt").read_text(encoding="utf-8") == "v2"
+    assert (_installed(env) / "_internal" / "data.txt").read_text(encoding="utf-8") == "v2"
     assert not stale.exists()
 
 
@@ -194,7 +202,7 @@ def test_install_refuses_a_source_without_the_exe(tmp_path):
 def test_install_from_the_installed_folder_keeps_it(tmp_path):
     env = _env(tmp_path)
     inst.install(_bundle(tmp_path), env, writer=_Recorder())
-    installed = inst.install_dir(env)
+    installed = _installed(env)
 
     inst.install(installed, env, writer=_Recorder())
 
@@ -206,7 +214,7 @@ def test_install_writes_the_apps_and_features_entry(tmp_path):
     registry = FakeRegistry()
     inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
 
-    exe = inst.install_dir(env) / inst.EXE_NAME
+    exe = _installed(env) / inst.EXE_NAME
     assert registry.keys[inst.UNINSTALL_KEY] == {
         "DisplayName": "Meridian Desktop",
         "DisplayVersion": __version__,
@@ -258,8 +266,8 @@ def test_a_folder_in_use_is_left_whole_and_its_apps_entry_stays(tmp_path, monkey
     with pytest.raises(inst.InstallError, match="close Meridian Desktop first"):
         inst.uninstall(env, registry=registry)
     # Nothing was deleted, and the entry stays so the user can run the uninstall again.
-    assert (folder / inst.EXE_NAME).is_file()
-    assert (folder / "_internal" / "data.txt").is_file()
+    assert (_installed(env) / inst.EXE_NAME).is_file()
+    assert (_installed(env) / "_internal" / "data.txt").is_file()
     assert inst.UNINSTALL_KEY in registry.keys
 
 
@@ -328,7 +336,7 @@ def test_running_from_the_install_folder_hands_its_removal_to_the_scheduler(tmp_
 
     assert scheduled == [folder]
     assert any(line.startswith("scheduled removal of") for line in lines)
-    assert (folder / inst.EXE_NAME).is_file()  # this process deletes nothing it cannot finish
+    assert (_installed(env) / inst.EXE_NAME).is_file()  # this process deletes nothing it cannot finish
     assert inst.UNINSTALL_KEY not in registry.keys
 
 
@@ -362,7 +370,7 @@ def test_autostart_saved_as_on_writes_the_run_entry_for_the_installed_exe(tmp_pa
 
     inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
 
-    exe = inst.install_dir(env) / inst.EXE_NAME
+    exe = _installed(env) / inst.EXE_NAME
     assert registry.run_value() == f'"{exe}"'
 
 
@@ -400,7 +408,7 @@ def test_uninstall_removes_the_run_entry_first_and_the_apps_entry_last(tmp_path)
     env = _env(tmp_path)
     registry = FakeRegistry()
     inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=registry)
-    inst.set_autostart(True, env, registry=registry, target=inst.install_dir(env) / inst.EXE_NAME)
+    inst.set_autostart(True, env, registry=registry, target=_installed(env) / inst.EXE_NAME)
 
     lines = inst.uninstall(env, registry=registry)
 
@@ -496,7 +504,7 @@ def test_install_without_dev_never_uses_the_dev_writer(tmp_path):
     code = inst.main(["--install", "--source", str(_bundle(tmp_path))], env=env, writer=recorder, dev_writer=refuse)
 
     assert code == 0
-    assert recorder.calls == [(inst.start_menu_shortcut(env), inst.install_dir(env) / inst.EXE_NAME)]
+    assert recorder.calls == [(inst.start_menu_shortcut(env), _installed(env) / inst.EXE_NAME)]
 
 
 def test_main_install_and_uninstall_use_the_registry_they_are_given(tmp_path, capsys):

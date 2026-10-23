@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop import hosted_client, token_store
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
@@ -197,6 +197,13 @@ class SettingsTab(QWidget):
 
         settings = self._store.load().settings
 
+        # Automatic updates: one checkbox. Off stops the checks at launch and every six hours after.
+        self._auto_update = QCheckBox("Check for and install Meridian Desktop updates automatically", self)
+        self._auto_update.setObjectName("auto-update-box")
+        self._auto_update.setChecked(settings.auto_update)
+        self._auto_update.toggled.connect(self._on_auto_update_toggled)
+        layout.addWidget(self._auto_update)
+
         # Hosted Meridian: the URL, then the token, then the connection test.
         hosted_url_row = QHBoxLayout()
         hosted_url_row.addWidget(make_selectable(QLabel("Hosted URL:", self)))
@@ -297,6 +304,9 @@ class SettingsTab(QWidget):
         """Show the saved mode, the database file and whether a hosted token is set. The main window calls this after a mode change."""
         settings = self._store.load().settings
         self._mode.setText(mode_text(settings.mode))
+        self._auto_update.blockSignals(True)  # showing the saved value must not save it again
+        self._auto_update.setChecked(settings.auto_update)
+        self._auto_update.blockSignals(False)
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
         self._refresh_token_status()
         self._runner.refresh_flags()
@@ -314,6 +324,10 @@ class SettingsTab(QWidget):
     def _update(self, **changes: object) -> None:
         """Save changed fields through the store. Every other field in the saved file is kept."""
         self._store.save(replace(self._store.load().settings, **changes))
+
+    @Slot(bool)
+    def _on_auto_update_toggled(self, checked: bool) -> None:
+        self._update(auto_update=bool(checked))
 
     @Slot()
     def _on_save_hosted_url_clicked(self) -> None:

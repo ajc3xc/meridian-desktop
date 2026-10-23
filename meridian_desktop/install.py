@@ -4,6 +4,10 @@ Apps and Features entry, and start at sign-in only when the user has opted in.
 No administrator rights are needed. Everything lives under the user's own profile:
 
     install folder       %LOCALAPPDATA%\\Programs\\Meridian Desktop
+    versions             <install folder>\\versions\\<version>\\MeridianDesktop.exe, one folder per installed version.
+                         The shortcuts point at the one that current.json names. A flat install (the exe directly
+                         in the install folder, from before versions existed) is moved into versions\\ on the next
+                         install.
     Start Menu           %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Meridian Desktop.lnk
     desktop (opt in)     %USERPROFILE%\\Desktop\\Meridian Desktop.lnk
     Apps and Features    HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MeridianDesktop
@@ -45,11 +49,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from meridian_desktop import __version__
+from meridian_desktop import __version__, updater
 from meridian_desktop.settings_store import SettingsStore, default_settings_path
 
 APP_NAME = "Meridian Desktop"
 EXE_NAME = "MeridianDesktop.exe"
+VERSIONS_DIR = updater.VERSIONS_DIR  # install folder\versions\<version>, one folder per installed version
 PUBLISHER = "Meridian"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
 # The dev shortcut has its own name, so it never replaces the launch version's shortcut.
@@ -136,6 +141,8 @@ class RegistryBackend(Protocol):
 
     def write_strings(self, key: str, values: Mapping[str, str]) -> None: ...
 
+    def read_string(self, key: str, name: str) -> str | None: ...
+
     def delete_value(self, key: str, name: str) -> bool: ...
 
     def delete_key(self, key: str) -> bool: ...
@@ -147,11 +154,17 @@ class NullRegistry:
     def write_strings(self, key: str, values: Mapping[str, str]) -> None:
         return None
 
+    def read_string(self, key: str, name: str) -> str | None:
+        return None
+
     def delete_value(self, key: str, name: str) -> bool:
         return False
 
     def delete_key(self, key: str) -> bool:
         return False
+
+
+_KEY_READ = 0x20019  # the winreg access right for reading a key, the same value on every Windows
 
 
 class WindowsRegistry:
@@ -165,6 +178,16 @@ class WindowsRegistry:
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as handle:
             for name, value in values.items():
                 winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, value)
+
+    def read_string(self, key: str, name: str) -> str | None:
+        """A string value, or None when the key or the value is missing."""
+        winreg = self._winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, _KEY_READ) as handle:
+                value, _kind = winreg.QueryValueEx(handle, name)
+        except OSError:
+            return None
+        return value if isinstance(value, str) else None
 
     def delete_value(self, key: str, name: str) -> bool:
         winreg = self._winreg
@@ -295,10 +318,13 @@ def apps_entry(exe: Path) -> dict[str, str]:
 
 
 def autostart_target(env: Mapping[str, str]) -> Path | None:
-    """The exe a Run entry starts: the installed copy if there is one, else this frozen exe, else None."""
-    installed = install_dir(env) / EXE_NAME
-    if installed.is_file():
-        return installed
+    """The exe a Run entry starts: the installed version that current.json names, else this frozen exe, else None."""
+    root = install_dir(env)
+    current = updater.read_current(root)
+    if current is not None:
+        installed = updater.exe_for(root, current)
+        if installed.is_file():
+            return installed
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
     return None
@@ -334,10 +360,59 @@ def set_autostart(
     return exe
 
 
-def _replace_tree(source: Path, target: Path) -> None:
+# A flat install that records no plain version in Apps and Features still gets a folder, named so that rollback can
+# find it. 0.0.0 is the lowest plain version, so every real release is newer than it.
+UNKNOWN_FLAT_VERSION = "0.0.0"
+# The pointer files and the versions folder stay in the install folder when a flat install is moved.
+_LAYOUT_NAMES = frozenset({updater.CURRENT_NAME, updater.PENDING_NAME, updater.VERSIONS_DIR})
+
+
+def _flat_version(backend: RegistryBackend) -> str:
+    """The version a flat install reports in Apps and Features, or UNKNOWN_FLAT_VERSION when it reports none."""
+    recorded = backend.read_string(UNINSTALL_KEY, "DisplayVersion")
+    try:
+        updater.parse_version(recorded)
+    except updater.Refused:
+        return UNKNOWN_FLAT_VERSION
+    return str(recorded)
+
+
+def _migrate_flat_install(root: Path, backend: RegistryBackend) -> Path | None:
+    """Move a flat install (MeridianDesktop.exe directly in root) into versions\\<its version>. Return that folder.
+
+    Returns None when there is no flat install. Everything in root moves except the pointer files and versions\\.
+    """
+    if not (root / EXE_NAME).is_file():
+        return None
+    dest = root / VERSIONS_DIR / _flat_version(backend)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for entry in list(root.iterdir()):
+        if entry.name not in _LAYOUT_NAMES:
+            shutil.move(str(entry), str(dest / entry.name))
+    return dest
+
+
+def _publish_copy(source: Path, target: Path) -> None:
+    """Copy the bundle to target through target.partial, so a failed copy never leaves a half-written version."""
+    partial = target.with_name(f"{target.name}.partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    shutil.copytree(source, partial)
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(source, target)
+    partial.rename(target)
+
+
+def _prune_versions(root: Path, keep: set[str]) -> None:
+    """Delete every version folder and leftover partial copy under root\\versions that keep does not name."""
+    versions = root / VERSIONS_DIR
+    if not versions.is_dir():
+        return
+    for entry in versions.iterdir():
+        if entry.is_dir() and entry.name not in keep:
+            shutil.rmtree(entry, ignore_errors=True)
 
 
 def install(
@@ -348,29 +423,65 @@ def install(
     writer: ShortcutWriter = create_shortcut,
     registry: RegistryBackend | None = None,
 ) -> InstallResult:
-    """Copy the bundle in ``source`` into the install folder, then add the shortcuts and the Apps and Features entry.
+    """Copy the bundle in ``source`` into versions\\<version>, then point the shortcuts and the Apps and Features entry at it.
 
-    The start-at-sign-in entry follows the saved choice: written while settings say on, removed while off.
+    The version is this build's. A flat install in the install folder is moved into versions\\ first. The version that
+    was current stays with the new one, so rollback has a version to return to. Older versions are removed. The
+    start-at-sign-in entry follows the saved choice: written while settings say on, removed while off.
     """
     source = Path(source)
     if not (source / EXE_NAME).is_file():
         raise InstallError(f"{source} has no {EXE_NAME}; build the bundle first with pixi run build")
-    target = install_dir(env)
-    if source.resolve() != target.resolve():
-        _replace_tree(source, target)
+    root = install_dir(env)
+    backend = registry if registry is not None else default_registry(env)
+    version = __version__
+    target = root / VERSIONS_DIR / version
+    try:
+        previous = updater.read_current(root)
+        migrated = _migrate_flat_install(root, backend)
+        if migrated is not None and source.resolve() == root.resolve():
+            source = migrated  # the installed copy was the source, and it has just moved into versions\
+        if source.resolve() != target.resolve():
+            _publish_copy(source, target)
+        updater.write_current(root, version)
+    except OSError as exc:
+        raise InstallError(f"could not copy Meridian Desktop into {root} ({exc.strerror})") from exc
     exe = target / EXE_NAME
     links = [start_menu_shortcut(env)]
-    if desktop:
+    if desktop or desktop_shortcut(env).is_file():
+        # An existing desktop shortcut is repointed too, so it never keeps a version that is about to be removed.
         links.append(desktop_shortcut(env))
     for link in links:
         writer(link, exe)
-    backend = registry if registry is not None else default_registry(env)
     try:
         backend.write_strings(UNINSTALL_KEY, apps_entry(exe))
         set_autostart(_autostart_saved(env), env, registry=backend, target=exe)
     except OSError as exc:
         raise InstallError(f"could not update the Windows registry for Meridian Desktop ({exc.strerror})") from exc
-    return InstallResult(install_dir=target, shortcuts=tuple(links))
+    keep = {version, previous, migrated.name if migrated is not None else None}
+    _prune_versions(root, {name for name in keep if name})
+    return InstallResult(install_dir=root, shortcuts=tuple(links))
+
+
+def update_shortcut_writers(env: Mapping[str, str]) -> list[updater.ShortcutWriter]:
+    """One writer for each Meridian Desktop shortcut that already exists, and for the start-at-sign-in entry if it is on.
+
+    An update repoints only what this user already has. A shortcut that was never installed is never created.
+    """
+    writers: list[updater.ShortcutWriter] = []
+    for link in (start_menu_shortcut(env), desktop_shortcut(env)):
+        if link.is_file():
+            writers.append(_link_writer(link))
+    if _autostart_saved(env):
+        writers.append(lambda exe: set_autostart(True, env, target=exe))
+    return writers
+
+
+def _link_writer(link: Path) -> updater.ShortcutWriter:
+    def write(exe: Path) -> None:
+        create_shortcut(link, exe)
+
+    return write
 
 
 def dev_interpreter(interpreter: Path) -> Path:
