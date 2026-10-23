@@ -320,7 +320,7 @@ class FakeStage:
         self.calls: list[tuple] = []
         self.entered = threading.Event()
 
-    def __call__(self, current, transport, root, *, public_key=None, announce=None):
+    def __call__(self, current, transport, root, *, public_key=None, announce=None, record_apps_entry=None):
         self.calls.append((current, root))
         self.entered.set()
         if self.announce_version is not None and announce is not None:

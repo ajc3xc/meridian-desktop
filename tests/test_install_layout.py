@@ -238,3 +238,66 @@ def test_the_installed_exe_is_never_left_in_the_install_folder_root(tmp_path, fl
     inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=FakeRegistry(_apps("0.1.0")))
     assert not (root / inst.EXE_NAME).exists()
     assert _version_exe(root, __version__).is_file()
+
+
+# --- a flat-install move that fails part-way, and the Apps and Features values the recorder writes ------------
+
+
+def _state(root: Path) -> dict[str, bytes | None]:
+    """Every path under root with its bytes (None for a folder), so a test can show that nothing changed."""
+    paths = sorted(root.rglob("*"))
+    return {str(path.relative_to(root)): (path.read_bytes() if path.is_file() else None) for path in paths}
+
+
+def _fail_the_third_move_out_of(root: Path, monkeypatch) -> None:
+    """Make the third move out of root raise, as a disk error would. Moves back into root are not counted."""
+    real_move = inst.shutil.move
+    forward = {"moves": 0}
+
+    def failing_move(source, destination):
+        if Path(source).parent == root:
+            forward["moves"] += 1
+            if forward["moves"] == 3:
+                raise OSError("the disk went away")
+        return real_move(source, destination)
+
+    monkeypatch.setattr(inst.shutil, "move", failing_move)
+
+
+def _flat_install_with_three_entries(root: Path) -> None:
+    _flat_install(root, "old")
+    (root / "b.txt").write_bytes(b"b")
+    (root / "c.txt").write_bytes(b"c")
+
+
+def test_a_flat_install_move_that_fails_part_way_puts_every_entry_back(tmp_path, monkeypatch):
+    root = inst.install_dir(_env(tmp_path))
+    _flat_install_with_three_entries(root)
+    before = _state(root)
+    _fail_the_third_move_out_of(root, monkeypatch)
+
+    with pytest.raises(OSError, match="disk went away"):
+        inst._migrate_flat_install(root, FakeRegistry())
+
+    assert _state(root) == before  # every entry is back where it was, and the new folder is gone
+
+
+def test_install_reports_a_failed_flat_migration_and_leaves_the_flat_install_as_it_was(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    root = inst.install_dir(env)
+    _flat_install_with_three_entries(root)
+    before = _state(root)
+    _fail_the_third_move_out_of(root, monkeypatch)
+
+    with pytest.raises(inst.InstallError, match="could not copy"):
+        inst.install(_bundle(tmp_path), env, writer=_Recorder(), registry=FakeRegistry(_apps("0.1.0")))
+
+    assert _state(root) == before
+
+
+def test_the_recorder_writes_the_values_install_writes_for_the_version_it_is_given(tmp_path):
+    registry = FakeRegistry()
+    exe = tmp_path / "versions" / "0.2.0" / inst.EXE_NAME
+    inst.apps_entry_recorder({}, registry=registry)(exe, "0.2.0")
+    assert registry.keys[inst.UNINSTALL_KEY] == inst.apps_entry(exe, "0.2.0")
+    assert inst.apps_entry(exe)["DisplayVersion"] == __version__  # install() still names the build it installs

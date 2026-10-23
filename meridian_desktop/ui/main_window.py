@@ -273,6 +273,7 @@ class MainWindow(QMainWindow):
         update_transport: updater.Transport | None = None,
         runner_actions: RunnerActions | None = None,
         update_root: Path | None = None,
+        record_apps_entry: updater.AppsEntryWriter | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
@@ -374,6 +375,7 @@ class MainWindow(QMainWindow):
             enabled=_updates_allowed_reader(self._store),
             report=self.statusBar().showMessage,
             parent=self,
+            record_apps_entry=record_apps_entry,
         )
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()

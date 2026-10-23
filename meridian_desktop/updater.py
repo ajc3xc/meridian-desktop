@@ -27,6 +27,10 @@ launch_after_update starts versions/<version>/MeridianDesktop.exe with --after-u
 finish_update_at_start, which points the shortcuts at itself, makes it current and clears pending.json. A start with
 no pending update also points the shortcuts at the running version, when it is not older than the current one.
 
+The Apps and Features entry follows the same rule. After each successful staging, and after each start that makes a
+version current, record_apps_entry (when the caller gives one) points the entry at that version's exe. The updater
+never writes the registry itself, and a failed write never fails the update.
+
 Every request goes through an injectable transport, and urllib never follows a redirect. Each hop is checked
 against the https host allowlist before it is requested. Tests pass a fake transport, so they make no network call.
 
@@ -103,6 +107,21 @@ _TAG_REFUSED = "The latest release tag must be v followed by a plain version, su
 # any request, and install_update raises InstallDisabled before it writes anything.
 INSTALL_ENABLED = True
 INSTALL_OFF_REASON = "Installing updates is turned off in this build."
+# The caps on what a release zip may unpack to. Each is checked from the zip's own headers before anything is written,
+# and again while the bytes are copied, so a header that lies about a size is still stopped.
+MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024  # the total uncompressed size of the release zip
+MAX_EXTRACT_ENTRIES = 20_000  # the number of entries (files and folders) in the release zip
+# The names Windows reserves for devices. Such a name, with or without an extension, cannot be a file on Windows.
+_WINDOWS_DEVICE = re.compile(
+    r"CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]|CONIN\$|CONOUT\$", re.IGNORECASE
+)
+_DEVICE_NAME_REFUSED = "The release zip has an entry named like a Windows device. Nothing was installed."
+_TOO_MANY_ENTRIES = "The release zip has too many entries. Nothing was installed."
+_TOO_LARGE_UNPACKED = "The release zip unpacks to more than the size limit. Nothing was installed."
+NOT_INSTALLED_REASON = (
+    "This copy runs from outside the install folder, so it does not update that folder. "
+    "Run the installed copy to update."
+)
 
 
 class UpdateError(Exception):
@@ -165,6 +184,8 @@ class Reply:
 Transport = Callable[[str, int, Path | None], Reply]
 # A shortcut writer repoints one shortcut at the exe it is given. The caller binds the shortcut's own .lnk path.
 ShortcutWriter = Callable[[Path], None]
+# Points the Apps and Features entry at one installed version: its exe, and the version it is. Best effort.
+AppsEntryWriter = Callable[[Path, str], None]
 # Called with the version just before its download starts, so the window can say what is downloading.
 Announce = Callable[[str], None]
 
@@ -341,10 +362,17 @@ def _text(body: bytes) -> str:
         raise Refused("SHA256SUMS could not be read.") from None
 
 
-def _download_verified(release: Release, transport: Transport, scratch: Path, public_key: bytes) -> Path:
+def _download_verified(
+    release: Release,
+    transport: Transport,
+    scratch: Path,
+    public_key: bytes,
+    announce: Announce | None = None,
+) -> Path:
     """Download SHA256SUMS and its signature, verify the signature, then download the zip and check its SHA-256.
 
-    Nothing is downloaded from the zip address until the signature verifies. A failure leaves scratch with no zip.
+    Nothing is downloaded from the zip address until the signature verifies, and announce is called only then, so the
+    window says "Downloading" only for a release that is signed. A failure leaves scratch with no zip.
     """
     if not release.sig_url:
         raise Refused(UNSIGNED_REASON)
@@ -355,6 +383,8 @@ def _download_verified(release: Release, transport: Transport, scratch: Path, pu
         raise Refused(UNSIGNED_REASON)
     _require_ok(sig_reply, SIG_NAME)
     verify_sums_signature(sums_reply.body, sig_reply.body, public_key)
+    if announce is not None:
+        announce(release.version)
     expected = expected_sha256(_text(sums_reply.body), release.zip_name)
     zip_path = scratch / release.zip_name
     zip_reply = _fetch(transport, release.zip_url, MAX_DOWNLOAD_BYTES, zip_path)
@@ -384,6 +414,11 @@ def _member_parts(name: str) -> tuple[str, ...]:
     parts = tuple(part for part in text.split("/") if part not in ("", "."))
     if any(part == ".." or ":" in part for part in parts):
         raise Refused(_UNSAFE_ENTRY)
+    for part in parts:
+        # Windows ignores the extension and the spaces around the name: NUL, nul.txt and "NUL .log" are all the device.
+        stem = part.split(".", 1)[0].strip(" ")
+        if _WINDOWS_DEVICE.fullmatch(stem):
+            raise Refused(_DEVICE_NAME_REFUSED)
     return parts
 
 
@@ -396,6 +431,19 @@ def _remove_tree(path: Path, *, strict: bool = False) -> None:
     except OSError:
         if strict:
             raise Refused("An old copy of the update could not be removed. Close the app and try again.") from None
+
+
+def _copy_within(source: BinaryIO, sink: BinaryIO, budget: int) -> int:
+    """Copy source to sink and return the bytes copied. Raises TooLarge before a byte past budget is written."""
+    copied = 0
+    while True:
+        chunk = source.read(_CHUNK)
+        if not chunk:
+            return copied
+        copied += len(chunk)
+        if copied > budget:
+            raise TooLarge(_TOO_LARGE_UNPACKED)
+        sink.write(chunk)
 
 
 _EXTRACT_FAILED = "The release zip could not be extracted. Nothing was installed."
@@ -412,8 +460,13 @@ def _extract_verified(zip_path: Path, staging: Path) -> None:
         raise Refused("The release zip is not a valid zip file.") from None
     try:
         with archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_EXTRACT_ENTRIES:
+                raise Refused(_TOO_MANY_ENTRIES)
+            if sum(info.file_size for info in infos) > MAX_EXTRACT_BYTES:
+                raise TooLarge(_TOO_LARGE_UNPACKED)
             plan = []
-            for info in archive.infolist():
+            for info in infos:
                 parts = _member_parts(info.filename)
                 if stat.S_ISLNK(info.external_attr >> 16):
                     raise Refused(_UNSAFE_ENTRY)
@@ -423,6 +476,7 @@ def _extract_verified(zip_path: Path, staging: Path) -> None:
                     plan.append((info, parts))
             staging.mkdir(parents=True)
             staging_root = staging.resolve()
+            remaining = MAX_EXTRACT_BYTES
             for info, parts in plan:
                 target = staging.joinpath(*parts)
                 if not target.resolve().is_relative_to(staging_root):
@@ -432,7 +486,7 @@ def _extract_verified(zip_path: Path, staging: Path) -> None:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as source, target.open("wb") as sink:
-                    shutil.copyfileobj(source, sink)
+                    remaining -= _copy_within(source, sink, remaining)
     except (zipfile.BadZipFile, RuntimeError, zlib.error, ValueError, EOFError):
         # RuntimeError is an encrypted member. EOFError is a member whose data runs past the end of the file. The
         # others are a bad CRC or a corrupt compressed stream.
@@ -554,13 +608,15 @@ def install_update(
     *,
     public_key: bytes | None = None,
     announce: Announce | None = None,
+    record_apps_entry: AppsEntryWriter | None = None,
 ) -> Path:
     """Download, verify, extract and stage a release, then record it as pending. Return the version folder.
 
-    The shortcuts are not touched. They point at the running version until the owner restarts. Keeps the new
-    version, the running one and the current one, and deletes the rest. Raises InstallDisabled while INSTALL_ENABLED
-    is False, before anything is created or requested. Otherwise raises Refused, Offline or OSError. Does not check
-    whether the app is frozen; check_and_stage does that. public_key defaults to RELEASE_PUBLIC_KEY.
+    The shortcuts are not touched. They point at the running version until the owner restarts. The Apps and Features
+    entry is pointed at the new version once it is recorded as pending. Keeps the new version, the running one and the
+    current one, and deletes the rest. Raises InstallDisabled while INSTALL_ENABLED is False, before anything is
+    created or requested. Otherwise raises Refused, Offline or OSError. Does not check whether the app is frozen;
+    check_and_stage does that. public_key defaults to RELEASE_PUBLIC_KEY.
     """
     if not INSTALL_ENABLED:
         raise InstallDisabled(INSTALL_OFF_REASON)
@@ -570,10 +626,8 @@ def install_update(
     final = versions / release.version
     staging = versions / f"{release.version}.partial"
     install_root.mkdir(parents=True, exist_ok=True)
-    if announce is not None:
-        announce(release.version)
     with tempfile.TemporaryDirectory(dir=install_root, prefix="update-") as scratch:
-        zip_path = _download_verified(release, transport, Path(scratch), key)
+        zip_path = _download_verified(release, transport, Path(scratch), key, announce)
         _remove_tree(staging, strict=True)
         try:
             _extract_verified(zip_path, staging)
@@ -587,6 +641,8 @@ def install_update(
     except OSError:
         _remove_tree(final)
         raise Refused("The update could not be recorded. Nothing was changed.") from None
+    # Recorded before pruning, so the entry never names a folder that the prune below is about to delete.
+    _record_apps_entry(record_apps_entry, final / EXE_NAME, release.version)
     keep = {release.version, current_version, read_current(install_root)}
     _prune(versions, keep={name for name in keep if name})
     return final
@@ -678,6 +734,35 @@ def running_frozen() -> bool:
     return _is_frozen()
 
 
+def _running_exe() -> Path:
+    """The exe this process runs from. A function, so a test can place the bundle anywhere."""
+    return Path(sys.executable)
+
+
+def _running_inside(install_root: Path) -> bool:
+    """True when this process runs from inside install_root. A bundle run from the build folder never updates it."""
+    try:
+        exe = os.path.normcase(str(_running_exe().resolve()))
+        root = os.path.normcase(str(Path(install_root).resolve()))
+    except OSError:
+        return False
+    return Path(exe).is_relative_to(Path(root))
+
+
+def _record_apps_entry(record: AppsEntryWriter | None, exe: Path, version: str) -> None:
+    """Point the Apps and Features entry at one installed version. Best effort: a registry fault never fails the update.
+
+    The entry is a convenience for Apps and Features. A write that fails leaves the entry as it was, and the next
+    staging or start tries again.
+    """
+    if record is None:
+        return
+    try:
+        record(exe, version)
+    except OSError:
+        pass
+
+
 def check_and_stage(
     current_version: str,
     transport: Transport,
@@ -685,22 +770,27 @@ def check_and_stage(
     *,
     public_key: bytes | None = None,
     announce: Announce | None = None,
+    record_apps_entry: AppsEntryWriter | None = None,
 ) -> UpdateResult:
     """Check GitHub for a newer release and stage it. Never raises for a network or download fault.
 
     While INSTALL_ENABLED is False, it returns refused at once with INSTALL_OFF_REASON and makes no request. A source
-    run (not frozen) returns refused at once and makes no request. Otherwise the result is up_to_date,
-    update_staged (the new version is downloaded, verified and recorded as pending, and the shortcuts keep pointing at
-    the running version until the restart), refused (with the plain reason), or offline. A release whose version is
-    already staged is not downloaded again. After a rollback, a release that is not newer than the rolled-back version
-    is held: it is refused before anything is downloaded, and it stays held until a newer release is staged, which
-    clears the marker.
+    run (not frozen) returns refused at once and makes no request. A frozen copy that runs from outside install_root,
+    such as a bundle in the build folder, is refused the same way, so it never writes into the real install. Otherwise
+    the result is up_to_date, update_staged (the new version is downloaded, verified and recorded as pending, and the
+    shortcuts keep pointing at the running version until the restart), refused (with the plain reason), or offline.
+    A release whose version is already staged is not downloaded again. After a rollback, a release that is not newer
+    than the rolled-back version is held: it is refused before anything is downloaded, and it stays held until a newer
+    release is staged, which clears the marker. A successful staging points the Apps and Features entry at the new
+    version through record_apps_entry, when one is given.
     """
     if not INSTALL_ENABLED:
         return UpdateResult("refused", reason=INSTALL_OFF_REASON)
     if not _is_frozen():
         return UpdateResult("refused", reason=DEV_RUN_REASON)
     root = Path(install_root)
+    if not _running_inside(root):
+        return UpdateResult("refused", reason=NOT_INSTALLED_REASON)
     versions = root / VERSIONS_DIR
     try:
         release = fetch_latest(transport)
@@ -712,7 +802,15 @@ def check_and_stage(
             return UpdateResult("refused", version=release.version, reason=reason)
         if read_pending(root) == release.version and exe_for(root, release.version).is_file():
             return UpdateResult("update_staged", version=release.version)
-        install_update(release, current_version, transport, root, public_key=public_key, announce=announce)
+        install_update(
+            release,
+            current_version,
+            transport,
+            root,
+            public_key=public_key,
+            announce=announce,
+            record_apps_entry=record_apps_entry,
+        )
         _clear_skip_marker(versions)
     except Offline as exc:
         return UpdateResult("offline", reason=str(exc))
@@ -758,13 +856,16 @@ def finish_update_at_start(
     running_exe: Path | str,
     running_version: str,
     shortcut_writers: Sequence[ShortcutWriter],
+    *,
+    record_apps_entry: AppsEntryWriter | None = None,
 ) -> bool:
     """Run at each real start of an installed exe. Return True when it finished a staged update.
 
     A start of the staged version (after Restart to update) points the shortcuts at it, makes it current and clears
     pending.json. A start with no pending update points the shortcuts at the running version, when that version is not
     older than the current one. A start of any other version changes nothing. A shortcut that cannot be written keeps
-    the pending update for the next start, and nothing is raised.
+    the pending update for the next start, and nothing is raised. Whenever the running version is current after the
+    start, record_apps_entry points the Apps and Features entry at it, so an entry left on a pruned folder is repaired.
     """
     root = Path(install_root)
     exe = Path(running_exe)
@@ -779,6 +880,8 @@ def finish_update_at_start(
     if pending is not None and pending != running_version:
         return False  # another version is staged; the window offers the restart
     if pending is None and (current == running_version or (current is not None and is_newer(current, running_version))):
+        if current == running_version:
+            _record_apps_entry(record_apps_entry, exe_for(root, running_version), running_version)
         return False  # the shortcuts already follow this version, or they point at a newer one that must not be undone
     fallback = exe_for(root, current) if current is not None else exe
     try:
@@ -786,6 +889,7 @@ def finish_update_at_start(
         write_current(root, running_version)
     except (_RepointFailed, OSError):
         return False
+    _record_apps_entry(record_apps_entry, exe_for(root, running_version), running_version)
     if pending is None:
         return False
     clear_pending(root)

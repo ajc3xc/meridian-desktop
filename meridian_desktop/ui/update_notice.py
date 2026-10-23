@@ -69,6 +69,7 @@ class _CheckJob(QRunnable):
         install_root: Path,
         public_key: bytes | None,
         deliver: Callable[[object], None],
+        record_apps_entry: updater.AppsEntryWriter | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
@@ -77,6 +78,7 @@ class _CheckJob(QRunnable):
         self._root = install_root
         self._public_key = public_key
         self._deliver = deliver
+        self._record_apps_entry = record_apps_entry
 
     def run(self) -> None:
         def announce(version: str) -> None:
@@ -89,6 +91,7 @@ class _CheckJob(QRunnable):
                 self._root,
                 public_key=self._public_key,
                 announce=announce,
+                record_apps_entry=self._record_apps_entry,
             )
         except Exception:  # noqa: BLE001 - a check must never raise into the pool; nothing is shown for it
             result = None
@@ -114,6 +117,7 @@ class UpdateNoticeBar(QWidget):
         public_key: bytes | None = None,
         interval_ms: int = CHECK_INTERVAL_MS,
         parent: QWidget | None = None,
+        record_apps_entry: updater.AppsEntryWriter | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("update-notice")
@@ -125,6 +129,7 @@ class UpdateNoticeBar(QWidget):
         self._launcher: Launcher = launcher if launcher is not None else updater.launch_after_update
         self._quit = quit_app if quit_app is not None else _quit_application
         self._public_key = public_key
+        self._record_apps_entry = record_apps_entry
         self._busy = False
         self._finished = False
         self._ready: str | None = None  # the staged version the bar offers to restart into
@@ -213,6 +218,7 @@ class UpdateNoticeBar(QWidget):
                 self._root,
                 self._public_key,
                 lambda item: delivery.delivered.emit(Delivered(owner, item)),
+                record_apps_entry=self._record_apps_entry,
             )
         )
 

@@ -306,15 +306,33 @@ def schedule_folder_removal(folder: Path) -> None:
     )
 
 
-def apps_entry(exe: Path) -> dict[str, str]:
-    """The values under the per-user Uninstall key that Apps and Features reads."""
+def apps_entry(exe: Path, version: str = __version__) -> dict[str, str]:
+    """The values under the per-user Uninstall key that Apps and Features reads. ``version`` is the one ``exe`` is."""
     return {
         "DisplayName": APP_NAME,
-        "DisplayVersion": __version__,
+        "DisplayVersion": version,
         "Publisher": PUBLISHER,
         "DisplayIcon": f"{exe},0",
         "UninstallString": f'"{exe}" --uninstall',
     }
+
+
+def apps_entry_recorder(
+    env: Mapping[str, str],
+    *,
+    registry: RegistryBackend | None = None,
+) -> updater.AppsEntryWriter:
+    """The writer the updater calls to point Apps and Features at one installed version.
+
+    It writes the values install() writes, through the same registry backend, so a test can pass a fake backend and see
+    both paths. With no backend given, it uses the one default_registry picks for env.
+    """
+    backend = registry if registry is not None else default_registry(env)
+
+    def record(exe: Path, version: str) -> None:
+        backend.write_strings(UNINSTALL_KEY, apps_entry(exe, version))
+
+    return record
 
 
 def autostart_target(env: Mapping[str, str]) -> Path | None:
@@ -381,17 +399,51 @@ def _migrate_flat_install(root: Path, backend: RegistryBackend) -> Path | None:
     """Move a flat install (MeridianDesktop.exe directly in root) into versions\\<its version>. Return that folder.
 
     Returns None when there is no flat install. Everything in root moves except the pointer files and versions\\.
+    A move that fails part-way puts back everything already moved, and removes the new folder, before it raises.
     """
     if not (root / EXE_NAME).is_file():
         return None
-    dest = root / VERSIONS_DIR / _flat_version(backend)
+    versions = root / VERSIONS_DIR
+    existed = versions.is_dir()
+    dest = versions / _flat_version(backend)
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-    for entry in list(root.iterdir()):
-        if entry.name not in _LAYOUT_NAMES:
-            shutil.move(str(entry), str(dest / entry.name))
+    moved: list[tuple[Path, Path]] = []  # (where each entry is now, where it was)
+    try:
+        for entry in list(root.iterdir()):
+            if entry.name in _LAYOUT_NAMES:
+                continue
+            now = dest / entry.name
+            shutil.move(str(entry), str(now))
+            moved.append((now, entry))
+    except BaseException:
+        # The new folder is removed only when every entry is back in root. Otherwise it is the only copy of some files.
+        if _put_back(moved):
+            shutil.rmtree(dest, ignore_errors=True)
+            if not existed:
+                _remove_empty(versions)
+        raise
     return dest
+
+
+def _put_back(moved: list[tuple[Path, Path]]) -> bool:
+    """Move each entry back to where it was, newest first. True when every entry went back."""
+    restored = True
+    for now, original in reversed(moved):
+        try:
+            shutil.move(str(now), str(original))
+        except OSError:
+            restored = False
+    return restored
+
+
+def _remove_empty(folder: Path) -> None:
+    """Remove folder when it is empty. A folder with anything in it is left alone."""
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
 
 
 def _publish_copy(source: Path, target: Path) -> None:

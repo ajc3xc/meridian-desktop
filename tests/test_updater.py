@@ -6,10 +6,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
 import stat
 import struct
+import sys
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -17,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import meridian_desktop
-from meridian_desktop import ed25519
+from meridian_desktop import ed25519, install, release_key
 from meridian_desktop import updater as u
 from meridian_desktop.version import APP_VERSION
 
@@ -165,8 +167,10 @@ class Failing:
 
 
 @pytest.fixture
-def frozen(monkeypatch):
+def frozen(monkeypatch, tmp_path):
+    """A frozen bundle that runs from inside the test's install folder, as an installed copy does."""
     monkeypatch.setattr(u, "_is_frozen", lambda: True)
+    monkeypatch.setattr(u, "_running_exe", lambda: tmp_path / "install" / "versions" / "0.1.0" / u.EXE_NAME)
 
 
 @pytest.fixture
@@ -422,6 +426,20 @@ def test_a_checksum_mismatch_installs_nothing(root, frozen):
     assert "does not match SHA256SUMS" in result.reason
     assert version_names(root) == ["0.1.0"]
     assert u.read_pending(root) is None
+
+
+def test_a_fresh_updater_verifies_against_the_committed_release_key(monkeypatch):
+    """Every other test patches the key to a test key. This loads the updater as it ships and checks its own key."""
+    spec = importlib.util.spec_from_file_location("updater_as_shipped", u.__file__)
+    shipped = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "updater_as_shipped", shipped)  # dataclasses look the module up while it loads
+    spec.loader.exec_module(shipped)
+    assert shipped.RELEASE_PUBLIC_KEY == base64.b64decode(release_key.RELEASE_PUBLIC_KEY_B64, validate=True)
+    assert len(shipped.RELEASE_PUBLIC_KEY) == 32
+    sums = b"not a real release\n"
+    # A signature by the test key is refused under the committed key, which is the point of the check.
+    with pytest.raises(shipped.Refused, match="not signed by the Meridian release key"):
+        shipped.verify_sums_signature(sums, sign_sums(sums), shipped.RELEASE_PUBLIC_KEY)
 
 
 def test_a_release_not_signed_by_the_release_key_is_refused_before_the_zip_is_fetched(root, frozen):
@@ -1086,3 +1104,204 @@ def test_check_for_update_cannot_reach_the_install_path(monkeypatch):
     assert isinstance(u.check_for_update("0.1.0", github("0.2.0")), u.UpdateNotice)
     assert isinstance(u.check_for_update("0.2.0", github("0.2.0")), u.UpToDate)
     assert isinstance(u.check_for_update("0.1.0", github("0.1.0")), u.UpToDate)
+
+
+# --- the Apps and Features entry follows the version that is staged or running ----------------------------
+
+
+class FakeRegistry:
+    """The installer's registry backend, kept in memory. Values are read back the way the installer reads them."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, dict[str, str]] = {}
+
+    def write_strings(self, key, values) -> None:
+        self.values.setdefault(key, {}).update(values)
+
+    def read_string(self, key, name):
+        return self.values.get(key, {}).get(name)
+
+    def delete_value(self, key, name) -> bool:
+        return self.values.get(key, {}).pop(name, None) is not None
+
+    def delete_key(self, key) -> bool:
+        return self.values.pop(key, None) is not None
+
+
+def _recorder(registry: FakeRegistry):
+    return install.apps_entry_recorder({}, registry=registry)
+
+
+def _entry(registry: FakeRegistry) -> tuple[Path, str]:
+    """The exe and the version the Apps and Features entry names. Its three paths must agree, or this fails."""
+    values = registry.values[install.UNINSTALL_KEY]
+    exe_text, _icon_index = values["DisplayIcon"].rsplit(",", 1)
+    assert values["UninstallString"] == f'"{exe_text}" --uninstall'
+    return Path(exe_text), values["DisplayVersion"]
+
+
+def test_a_staged_update_points_the_apps_entry_at_the_new_version(root, frozen):
+    registry = FakeRegistry()
+    result = u.check_and_stage("0.1.0", github(), root, record_apps_entry=_recorder(registry))
+    assert result.status == "update_staged"
+    assert _entry(registry) == (root / "versions" / "0.2.0" / u.EXE_NAME, "0.2.0")
+
+
+def test_a_refused_update_leaves_the_apps_entry_alone(root, frozen):
+    registry = FakeRegistry()
+    result = u.check_and_stage(
+        "0.1.0", github(sums=f"{'0' * 64}  {ZIP_NAME}\n"), root, record_apps_entry=_recorder(registry)
+    )
+    assert result.status == "refused"
+    assert registry.values == {}
+
+
+def test_the_apps_entry_follows_the_running_version_through_an_update(root, frozen):
+    registry = FakeRegistry()
+    record = _recorder(registry)
+    running = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, running, "0.1.0", [], record_apps_entry=record) is False
+    assert _entry(registry) == (running, "0.1.0")
+
+    assert u.check_and_stage("0.1.0", github(), root, record_apps_entry=record).status == "update_staged"
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    assert _entry(registry) == (new_exe, "0.2.0")
+
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [Recorder()], record_apps_entry=record) is True
+    assert _entry(registry) == (new_exe, "0.2.0")
+
+
+def test_after_pruning_the_apps_entry_still_names_an_existing_exe(root, frozen):
+    """The entry starts on 0.1.0, which the second update prunes. After the prune it must name a folder that exists."""
+    registry = FakeRegistry()
+    record = _recorder(registry)
+    record(root / "versions" / "0.1.0" / u.EXE_NAME, "0.1.0")  # what install() wrote when 0.1.0 was installed
+
+    assert u.check_and_stage("0.1.0", github("0.2.0"), root, record_apps_entry=record).status == "update_staged"
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [Recorder()], record_apps_entry=record) is True
+    assert u.check_and_stage("0.2.0", github("0.3.0"), root, record_apps_entry=record).status == "update_staged"
+
+    assert not (root / "versions" / "0.1.0").exists()  # the prune removed the folder the entry named first
+    exe, version = _entry(registry)
+    assert version == "0.3.0"
+    assert exe.is_file()
+
+
+def test_a_start_with_no_update_repoints_a_stale_apps_entry(root):
+    registry = FakeRegistry()
+    record = _recorder(registry)
+    record(root / "versions" / "0.0.9" / u.EXE_NAME, "0.0.9")
+    running = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, running, "0.1.0", [], record_apps_entry=record) is False
+    assert _entry(registry) == (running, "0.1.0")
+
+
+def test_a_start_of_an_older_copy_leaves_the_apps_entry_alone(root):
+    u.write_current(root, "0.2.0")
+    registry = FakeRegistry()
+    older = root / "versions" / "0.1.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, older, "0.1.0", [], record_apps_entry=_recorder(registry)) is False
+    assert registry.values == {}
+
+
+def test_a_registry_fault_never_fails_the_update(root, frozen):
+    def broken(exe, version):
+        raise PermissionError("the registry key is locked")
+
+    assert u.check_and_stage("0.1.0", github(), root, record_apps_entry=broken).status == "update_staged"
+    assert u.read_pending(root) == "0.2.0"
+    new_exe = root / "versions" / "0.2.0" / u.EXE_NAME
+    assert u.finish_update_at_start(root, new_exe, "0.2.0", [Recorder()], record_apps_entry=broken) is True
+
+
+# --- the download notice, the extraction caps, Windows device names and the install-folder rule -----------
+
+
+def test_the_download_is_announced_only_after_its_signature_checks(root, frozen):
+    gh = github()
+    seen = []
+    result = u.check_and_stage("0.1.0", gh, root, announce=lambda version: seen.append((version, list(gh.calls))))
+    assert result.status == "update_staged"
+    assert len(seen) == 1
+    version, calls_when_announced = seen[0]
+    assert version == "0.2.0"
+    assert asset_url("0.2.0", SIG_NAME) in calls_when_announced  # the signature was fetched and checked
+    assert CDN_URL not in calls_when_announced  # the zip had not been asked for yet
+
+
+def test_an_unsigned_release_is_never_announced(root, frozen):
+    announced = []
+    result = u.check_and_stage("0.1.0", github(signed_by=OTHER_SEED), root, announce=announced.append)
+    assert result.status == "refused"
+    assert announced == []
+
+
+def test_a_zip_that_unpacks_past_the_size_cap_is_refused_and_installs_nothing(root, frozen, monkeypatch):
+    monkeypatch.setattr(u, "MAX_EXTRACT_BYTES", 10)  # bundle_zip unpacks to 22 bytes
+    result = u.check_and_stage("0.1.0", github(), root)
+    assert result.status == "refused"
+    assert "unpacks to more than the size limit" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+def test_a_zip_with_more_entries_than_the_cap_is_refused(root, frozen, monkeypatch):
+    monkeypatch.setattr(u, "MAX_EXTRACT_ENTRIES", 2)  # bundle_zip has three entries
+    result = u.check_and_stage("0.1.0", github(), root)
+    assert result.status == "refused"
+    assert "too many entries" in result.reason
+    assert version_names(root) == ["0.1.0"]
+
+
+def test_a_zip_exactly_at_both_caps_is_staged(root, frozen, monkeypatch):
+    monkeypatch.setattr(u, "MAX_EXTRACT_BYTES", 22)  # 8 + 3 + 11 bytes
+    monkeypatch.setattr(u, "MAX_EXTRACT_ENTRIES", 3)
+    assert u.check_and_stage("0.1.0", github(), root).status == "update_staged"
+
+
+def test_copy_within_allows_exactly_its_budget_and_refuses_one_byte_more():
+    sink = io.BytesIO()
+    assert u._copy_within(io.BytesIO(b"abcd"), sink, 4) == 4
+    assert sink.getvalue() == b"abcd"
+    refused = io.BytesIO()
+    with pytest.raises(u.TooLarge):
+        u._copy_within(io.BytesIO(b"abcde"), refused, 4)
+    assert refused.getvalue() == b""  # not one byte past the budget is written
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["CON", "nul.txt", "dir/COM1", "lpt9.log", "aux/x.txt", "Com1 .txt", "CONIN$", "COM¹.txt"],
+)
+def test_a_windows_device_name_entry_is_refused_and_writes_nothing(root, frozen, entry):
+    zip_bytes = make_zip({u.EXE_NAME: b"MZ", entry: b"x"})
+    result = u.check_and_stage("0.1.0", github(zip_bytes=zip_bytes), root)
+    assert result.status == "refused"
+    assert "Windows device" in result.reason
+    assert version_names(root) == ["0.1.0"]
+    assert not list(root.glob("update-*"))
+
+
+@pytest.mark.parametrize("name", ["CONFIG.txt", "COM10.txt", "console/readme.md", "nulls.txt", "lptx/file", "a/com1x"])
+def test_names_that_only_begin_like_device_names_are_allowed(name):
+    assert u._member_parts(name)
+
+
+@pytest.mark.parametrize("outside", ["dist", "sibling"])
+def test_a_bundle_run_outside_the_install_folder_stages_nothing(tmp_path, root, monkeypatch, outside):
+    running = (tmp_path / "dist" / "MeridianDesktop" if outside == "dist" else tmp_path / "install-old") / u.EXE_NAME
+    monkeypatch.setattr(u, "_is_frozen", lambda: True)
+    monkeypatch.setattr(u, "_running_exe", lambda: running)
+    gh = github()
+    before = tree_state(root)
+    result = u.check_and_stage("0.1.0", gh, root)
+    assert result == u.UpdateResult("refused", reason=u.NOT_INSTALLED_REASON)
+    assert gh.calls == []
+    assert tree_state(root) == before
+
+
+@pytest.mark.parametrize("digits", [4300, 4301, 20_000])
+def test_a_tag_of_any_length_never_raises_from_check_for_update(digits):
+    result = u.check_for_update("0.1.0", github(tag="v" + "9" * digits))
+    assert isinstance(result, (u.UpdateNotice, u.Refused))

@@ -602,6 +602,19 @@ def test_a_tampered_sha256sums_fails_verification(paths):
     assert ed25519.verify(TEST_PUBLIC, outcome.sums_path.read_bytes(), signature) is True
 
 
+def test_the_updater_accepts_the_signature_file_the_publisher_writes(paths):
+    """The updater reads SHA256SUMS.sig with its own check: one line of base64 and one trailing newline."""
+    from meridian_desktop import updater
+
+    outcome, _ = _run(paths)
+    sums = outcome.sums_path.read_bytes()
+    sig_bytes = outcome.sig_path.read_bytes()
+    assert sig_bytes.endswith(b"\n") and sig_bytes.count(b"\n") == 1
+    updater.verify_sums_signature(sums, sig_bytes, TEST_PUBLIC)  # raises Refused when it does not verify
+    with pytest.raises(updater.Refused, match="not signed by the Meridian release key"):
+        updater.verify_sums_signature(sums + b" ", sig_bytes, TEST_PUBLIC)
+
+
 def test_a_stale_signature_from_an_earlier_run_is_replaced(paths):
     _write(paths.out_dir / "SHA256SUMS.sig", base64.b64encode(bytes(64)).decode("ascii") + "\n")
     outcome, _ = _run(paths)

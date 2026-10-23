@@ -62,6 +62,7 @@ def _finish_staged_update() -> None:
             Path(sys.executable).resolve(),
             APP_VERSION,
             install.update_shortcut_writers(env),
+            record_apps_entry=install.apps_entry_recorder(env),
         )
     except Exception:  # noqa: BLE001 - a failed finish must never stop the app from starting
         return
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         store,
         update_transport=None if smoke else updater.urllib_transport,
         update_root=None if smoke else install.install_dir(os.environ),
+        record_apps_entry=None if smoke else install.apps_entry_recorder(os.environ),
     )
     tray = MeridianTray(window, app)
     window.show()
