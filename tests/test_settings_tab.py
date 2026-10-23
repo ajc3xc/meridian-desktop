@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import shiboken6
 from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton, QWidget
 
 from _fakes import FailingKeyring, MemoryKeyring
 from meridian_desktop import hosted_client, local_client
@@ -527,3 +527,101 @@ def test_token_text_is_never_in_the_settings_file_after_remove(qtbot, settings_p
     assert get_token(store=secrets) is None
     assert backend.snapshot() == {}
     assert not any(FAKE_TOKEN.encode() in p.read_bytes() for p in Path(settings_path).parent.rglob("*") if p.is_file())
+
+
+# ----------------------------------------------------------- shared delivery: foreign owner and stale generation
+
+
+def test_a_connection_result_with_a_foreign_owner_is_not_shown(qtbot, settings_path, secrets):
+    """A Delivered whose owner is another object is dropped, even when its generation is this tab's current one."""
+    from meridian_desktop.ui.delivery import Delivered, shared_delivery
+    from meridian_desktop.ui.settings_tab import _TestDone
+
+    tab = _tab(qtbot, settings_path, secrets)
+    result = _label(tab, "settings-test-result")
+    before = result.text()
+
+    shared_delivery().delivered.emit(Delivered(object(), _TestDone(tab._generation, "FOREIGN-RESULT-TEXT")))
+    qtbot.wait(50)
+
+    assert "FOREIGN-RESULT-TEXT" not in result.text()
+    assert result.text() == before
+
+
+def test_a_connection_result_with_a_stale_generation_is_not_shown(qtbot, settings_path, secrets):
+    """A Delivered from an earlier test is dropped, even when its owner is this tab's. A newer test has superseded it."""
+    from meridian_desktop.ui.delivery import Delivered, shared_delivery
+    from meridian_desktop.ui.settings_tab import _TestDone
+
+    tab = _tab(qtbot, settings_path, secrets)
+    result = _label(tab, "settings-test-result")
+    tab._generation = 2  # a newer connection test has started since the one below was run
+    before = result.text()
+
+    shared_delivery().delivered.emit(Delivered(tab._owner, _TestDone(1, "STALE-RESULT-TEXT")))
+    qtbot.wait(50)
+
+    assert "STALE-RESULT-TEXT" not in result.text()
+    assert result.text() == before
+
+
+# ------------------------------------------------------------------ a saved core path turns the launch switches off (amendment C)
+
+
+def _real_core(tmp_path):
+    """A core checkout folder with the meridian package, and a Python file, as the core setup checks them."""
+    checkout = tmp_path / "core"
+    (checkout / "meridian").mkdir(parents=True, exist_ok=True)
+    (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    return checkout, python
+
+
+def _box(tab, name):
+    return tab.findChild(QCheckBox, name)
+
+
+def test_saving_a_core_path_turns_both_launch_switches_off_and_says_so_in_the_status_line(qtbot, settings_path, secrets, tmp_path):
+    checkout, python = _real_core(tmp_path)
+    SettingsStore(settings_path).save(
+        Settings(
+            core_checkout=str(checkout),
+            core_python=str(python),
+            zotero_autostart=True,
+            local_server_autostart=True,
+            confirmed_zotero_exe=str(tmp_path / "zotero.exe"),
+            confirmed_core_python=str(python),
+            confirmed_core_checkout=str(checkout),
+        )
+    )
+    tab = _tab(qtbot, settings_path, secrets)
+    assert _box(tab, "settings-zotero-autostart").isChecked() is True
+    assert _box(tab, "settings-local-autostart").isChecked() is True
+
+    other_python = tmp_path / "other-python.exe"
+    other_python.write_text("", encoding="utf-8")
+    _field(tab, "client-setup-python").setText(str(other_python))
+    _button(tab, "client-setup-save-python").click()
+
+    saved = SettingsStore(settings_path).load().settings
+    assert saved.zotero_autostart is False
+    assert saved.local_server_autostart is False
+    assert saved.core_python == str(other_python)
+    status = _label(tab, "client-setup-settings-message").text()
+    assert "Python for Meridian core saved." in status
+    assert "switches are now off" in status
+    assert _box(tab, "settings-zotero-autostart").isChecked() is False
+    assert _box(tab, "settings-local-autostart").isChecked() is False
+
+
+def test_saving_a_core_path_with_no_launch_switch_on_says_nothing_about_them(qtbot, settings_path, secrets, tmp_path):
+    checkout, python = _real_core(tmp_path)
+    tab = _tab(qtbot, settings_path, secrets)
+
+    _field(tab, "client-setup-checkout").setText(str(checkout))
+    _button(tab, "client-setup-save-checkout").click()
+
+    status = _label(tab, "client-setup-settings-message").text()
+    assert status == "Meridian core checkout saved."
+    assert SettingsStore(settings_path).load().settings.core_checkout == str(checkout)

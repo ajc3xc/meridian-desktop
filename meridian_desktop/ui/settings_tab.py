@@ -15,6 +15,8 @@ file is picked with a file dialog, and only its path is saved.
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the
 main window calls refresh() after each save, so both always show the same saved mode.
 
+The runner block (ui/runner_section.py) sits above the client setup section. It holds the local server's
+state and its Start, Stop and Restart, and the two launch-time switches. Each control asks the owner first.
 The client setup section (ui/client_setup_section.py) is the last block on this tab. It manages the
 Meridian core checkout and its Python, and one row per client. Nothing in it runs until a button is pressed.
 """
@@ -37,6 +39,8 @@ from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_UR
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
+from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -165,6 +169,7 @@ class SettingsTab(QWidget):
         choose_database: FileChooser = _choose_database_file,
         secrets: SecretStore | None = None,
         list_hosted: ListHostedFn | None = None,
+        actions: RunnerActions | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
@@ -172,6 +177,7 @@ class SettingsTab(QWidget):
         self._choose_database = choose_database
         self._secrets = secrets if secrets is not None else KeyringSecretStore()
         self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
+        self._actions = actions if actions is not None else RunnerActions(settings_store)
         self._check = _ConnectionCheck(settings_store, self._secrets, self._list_hosted)
         # Identifies this tab's connection tests. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
@@ -267,9 +273,15 @@ class SettingsTab(QWidget):
         self._db_message.setVisible(False)
         layout.addWidget(self._db_message)
 
+        # The runner block: the local server's state and controls, and the two launch-time switches.
+        self._runner = RunnerSection(self._actions, self)
+        layout.addWidget(self._runner)
+
         # Client setup: the Meridian core checkout, then one row per client with Check, Apply and Remove.
         self._client_setup = ClientSetupSection(self._store, self)
         layout.addWidget(self._client_setup)
+        # A saved core path turns the launch switches off, so the runner block shows them as saved now.
+        self._client_setup.coreChanged.connect(self._runner.refresh_flags)
 
         self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
         self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
@@ -287,6 +299,7 @@ class SettingsTab(QWidget):
         self._mode.setText(mode_text(settings.mode))
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
         self._refresh_token_status()
+        self._runner.refresh_flags()
 
     def _refresh_token_status(self) -> None:
         """Show only whether a token is saved. The value is read here and never shown.

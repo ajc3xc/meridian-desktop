@@ -21,6 +21,7 @@ from meridian_desktop.token_store import (
     TokenStoreError,
     delete_token,
     get_token,
+    has_token,
     set_token,
 )
 
@@ -177,3 +178,31 @@ def test_importing_the_module_loads_no_keyring_and_no_qt():
     )
     result = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_has_token_says_only_whether_a_token_is_saved(store):
+    assert has_token(store=store) is False
+    set_token(FAKE_TOKEN, store=store)
+
+    assert has_token(store=store) is True
+    assert delete_token(store=store) is True
+    assert has_token(store=store) is False
+
+
+def test_has_token_returns_a_bool_and_never_the_value(store):
+    set_token(FAKE_TOKEN, store=store)
+
+    answer = has_token(store=store)
+
+    assert answer is True
+    assert not isinstance(answer, str)
+    assert FAKE_TOKEN not in repr(answer)
+
+
+def test_has_token_reads_a_backend_failure_as_no_token_and_never_shows_its_text():
+    store = KeyringSecretStore(backend=FailingKeyring(FAKE_TOKEN))
+
+    answer = has_token(store=store)
+
+    assert answer is False
+    assert FAKE_TOKEN not in repr(answer)

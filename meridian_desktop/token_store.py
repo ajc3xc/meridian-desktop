@@ -60,6 +60,14 @@ def get_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None 
         return None
 
 
+def has_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None = None) -> bool:
+    """True when a token is saved. The keychain API has no existence test, so the value is read here only to test it.
+
+    The value is dropped at once. Nothing is returned, shown or logged, and a failed read is False, as get_token gives.
+    """
+    return bool(get_token(account, store=store))
+
+
 def set_token(token: str, account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None = None) -> None:
     """Store the token in the keychain. Raise TokenStoreError when the save fails."""
     name = _account(account)
@@ -92,5 +100,6 @@ __all__ = [
     "TokenStoreError",
     "delete_token",
     "get_token",
+    "has_token",
     "set_token",
 ]

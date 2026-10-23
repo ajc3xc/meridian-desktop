@@ -17,11 +17,11 @@ from datetime import datetime
 
 import pytest
 from PySide6.QtCore import QThreadPool, Qt
-from PySide6.QtWidgets import QAbstractButton, QLabel
+from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton
 
 from _fakes import MemoryKeyring
 from _shared_delivery import emit, recording_deliveries
-from meridian_desktop import local_client, settings_store
+from meridian_desktop import local_client, settings_store, token_store
 from meridian_desktop.data_source import (
     NOT_SIGNED_IN_MESSAGE,
     STATE_NOT_SIGNED_IN,
@@ -324,7 +324,7 @@ def test_a_tunnel_that_is_not_running_says_how_to_start_it_and_that_the_desktop_
     detail = bar_texts(_status(NOT_RUNNING))[1]
     assert BY_HAND_NOT_STARTED in detail
     assert START_COMMAND in detail
-    assert "The desktop does not start or stop the tunnel." in detail
+    assert "The desktop starts or stops the tunnel only when you confirm it" in detail
     # A running tunnel gets no start instructions at all.
     assert START_COMMAND not in bar_texts(_status(RUNNING))[1]
 
@@ -594,20 +594,34 @@ def test_a_failed_save_on_the_switch_to_tunnel_runs_no_check(qtbot, settings_pat
 # ------------------------------------------------------------------ no start control, and plain labels
 
 
-def test_no_button_in_the_tunnel_part_of_the_window_starts_stops_or_restarts(qtbot, settings_path):
+def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_by_default(qtbot, settings_path):
     runner = RecordingRunner(reply=_status_reply("not_started"))
     window = _window(qtbot, settings_path, mode="tunnel", runner=runner)
     qtbot.waitUntil(lambda: _line(window).startswith("Tunnel not running. "), timeout=5000)
 
     buttons = _user_buttons(window)
     assert buttons  # the window has buttons, so the checks below are not empty
-    # The one start-like button in the window is the Zotero tab's "Start Zotero...", which asks first and is
-    # not a tunnel control. No button mentions the tunnel, and none starts, stops or restarts it.
-    assert [b.text() for b in buttons if START_WORDS.search(b.text())] == ["Start Zotero..."]
-    assert not any("tunnel" in b.text().lower() for b in buttons)
+    # The two launch-time switches are check boxes, not push buttons, so they are left out of the start-like list.
+    push_buttons = [b for b in buttons if isinstance(b, QPushButton)]
+    start_like = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
+    # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
+    # Settings, and the tunnel scope's three buttons on the Tunnel tab (docs/local-trust-contract.md).
+    assert start_like == [
+        "local-restart", "local-start", "local-stop",
+        "tunnel-restart", "tunnel-start", "tunnel-stop",
+        "zotero-start",
+    ]
+    # The tunnel controls are off until tunnel_control_enabled is true, which is the default here.
+    tunnel_buttons = [b for b in buttons if b.objectName().startswith("tunnel-")]
+    assert tunnel_buttons
+    assert all(not b.isEnabled() for b in tunnel_buttons)
 
-    # The Tunnel tab and the top bar hold no button at all.
-    assert _user_buttons(window.tabs.widget(_tab_index(window, "Tunnel"))) == []
+    # The tunnel controls are on the Tunnel tab only. The top bar holds no button, and no other tab holds a tunnel control.
+    tunnel_tab = window.tabs.widget(_tab_index(window, "Tunnel"))
+    assert all(b in _user_buttons(tunnel_tab) for b in tunnel_buttons)
+    for name in ("Projects", "Sessions", "Tools", "Writing", "Zotero", "Services", "Code", "Outputs", "Research", "Logs", "Settings"):
+        other = window.tabs.widget(_tab_index(window, name))
+        assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other)), name
     for widget in (window.mode_selector, window.tunnel_status_label, window.tunnel_detail, window.mode_description):
         assert _user_buttons(widget) == []
 
@@ -626,3 +640,63 @@ def test_the_new_labels_are_plain_selectable_text(qtbot, settings_path):
     for label in (window.mode_description, window.tunnel_status_label, window.tunnel_detail):
         assert label.textInteractionFlags() == SELECTABLE_TEXT
         assert label.textFormat() == Qt.TextFormat.PlainText
+
+
+# ----------------------------------------------------------- the launch mode in the mode bar (owner decision, 2026-10-23)
+
+LAUNCH_TOKEN = "sk_meridian_FAKE-mode-bar-0009"
+
+
+def _launch_window(qtbot, settings_path, *, with_token):
+    """A window started the way app.main starts it: the launch mode is resolved first, from a keychain with one token or none."""
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    if with_token:
+        token_store.set_token(LAUNCH_TOKEN, store=secrets)
+    store = SettingsStore(settings_path)
+    store.resolve_launch_mode(lambda: token_store.has_token(store=secrets))
+    window = MainWindow(
+        store,
+        secret_store=secrets,
+        data_sources=_window_sources(None),
+        tunnel_runner=None,
+    )
+    qtbot.addWidget(window)
+    return window
+
+
+def test_a_file_with_no_mode_and_a_saved_token_starts_and_shows_hosted_in_the_mode_bar(qtbot, settings_path):
+    _write_text(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == "hosted"
+    assert window.mode_description.text() == MODE_DESCRIPTIONS["hosted"]
+
+
+def test_a_file_with_no_mode_and_no_saved_token_starts_and_shows_local(qtbot, settings_path):
+    _write_text(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
+
+    window = _launch_window(qtbot, settings_path, with_token=False)
+
+    assert window.mode_selector.currentData() == "local"
+    assert window.mode_description.text() == MODE_DESCRIPTIONS["local"]
+
+
+def test_a_missing_file_with_a_saved_token_starts_and_shows_hosted(qtbot, settings_path):
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == "hosted"
+
+
+@pytest.mark.parametrize("mode", ["local", "tunnel"])
+def test_an_explicit_mode_in_the_file_is_shown_even_with_a_saved_token(qtbot, settings_path, mode):
+    _write_text(settings_path, json.dumps({"mode": mode}))
+
+    window = _launch_window(qtbot, settings_path, with_token=True)
+
+    assert window.mode_selector.currentData() == mode
+
+
+def _write_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")

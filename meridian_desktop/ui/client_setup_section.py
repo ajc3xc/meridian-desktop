@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -70,6 +70,10 @@ REMOVE_DIALOG_TITLE = "Remove Meridian's entries?"
 DEFAULT_STATUS_TEXT = "Press Check setup to read each client's settings file. Nothing is written."
 CHECKING_TEXT = "Checking the clients' settings files. Nothing is written."
 CHECKOUT_SAVED_TEXT = "Meridian core checkout saved."
+LAUNCH_STARTS_OFF_TEXT = (
+    "The Zotero and local server switches are now off, because the core setup changed. "
+    "Turn them on again to confirm the new setup."
+)
 PYTHON_SAVED_TEXT = "Python for Meridian core saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written."
 CANCELLED_TEXT = "Cancelled. Nothing was changed."
@@ -265,7 +269,12 @@ class _RowWidgets:
 
 
 class ClientSetupSection(QWidget):
-    """The client setup block for the Settings page. One section, one row per client."""
+    """The client setup block for the Settings page. One section, one row per client.
+
+    ``coreChanged`` is emitted after a core path is saved, so the runner block on the same tab shows its switches again.
+    """
+
+    coreChanged = Signal()
 
     def __init__(
         self,
@@ -462,6 +471,7 @@ class ClientSetupSection(QWidget):
         self._save_core(CORE_PYTHON_KEY, self._python_input.text(), PYTHON_SAVED_TEXT)
 
     def _save_core(self, key: str, value: str, saved_text: str) -> None:
+        before = self._store.load().settings
         try:
             self._store.set_core_path(key, value)
         except ValueError as exc:
@@ -471,8 +481,11 @@ class ClientSetupSection(QWidget):
         except OSError:
             _set_message(self._settings_message, NOT_WRITTEN_TEXT)
             return
-        _set_message(self._settings_message, saved_text)
+        # A saved core path turns both launch-time switches off (contract amendment C), and the status line says so.
+        turned_off = before.zotero_autostart or before.local_server_autostart
+        _set_message(self._settings_message, f"{saved_text} {LAUNCH_STARTS_OFF_TEXT}" if turned_off else saved_text)
         self._recompute()  # the other box keeps what the user typed, saved or not
+        self.coreChanged.emit()  # the runner block on this tab shows the switches as they are saved now
 
     @Slot()
     def _on_browse_checkout(self) -> None:

@@ -70,7 +70,8 @@ def settings_from_choices(current: Settings, *, mode: str, local_url: str, autos
     """``current`` with the three answers applied. Every other setting is kept as it is."""
     if mode not in VALID_MODES:
         raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
-    return replace(current, mode=mode, local_url=local_url.strip(), autostart=autostart)
+    # The owner answered the question, so the mode is explicit and a later launch keeps it.
+    return replace(current, mode=mode, mode_explicit=True, local_url=local_url.strip(), autostart=autostart)
 
 
 def save_first_run(
