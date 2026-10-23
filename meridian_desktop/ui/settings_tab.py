@@ -33,8 +33,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
-from PySide6.QtGui import QShowEvent
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Slot
+from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -84,7 +85,7 @@ LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
 TOOLS_SECTION = "Tools (full table)"
 DIAGNOSTICS_INTRO = (
     "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
-    "tunnel and runner logs. Nothing here starts a service."
+    "control, tunnel and runner logs. Nothing here starts a service."
 )
 SETTINGS_FILE_TEXT = "Settings file: {path}"
 LOAD_WARNING_TEXT = "Note from the settings file: {warning}"
@@ -132,6 +133,44 @@ def _choose_database_file(parent: QWidget, start_dir: str) -> str:
     """Ask for an existing file. Return its path, or "" when the dialog is cancelled."""
     path, _selected_filter = QFileDialog.getOpenFileName(parent, DB_DIALOG_TITLE, start_dir, DB_FILE_FILTER)
     return path
+
+
+class _FullHeightScroll(QScrollArea):
+    """A scroll area that is as tall as its content, so the page around it does the scrolling.
+
+    QScrollArea's own size hint is capped at 24 lines of text. Inside the Settings page that cap made this column
+    336 px tall, so the Client setup result line and the Diagnostics group were cut off behind a second, small scrollbar.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Never taller than the content, so the space left over in the page goes to the RunPod card, not to this box.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+
+    def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt naming
+        super().setWidget(widget)
+        widget.installEventFilter(self)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        widget = self.widget()
+        if widget is None:
+            return super().sizeHint()
+        hint = widget.sizeHint()
+        # Wrapped labels are taller at the width the page gives them, so the height is read for that width.
+        width = self.viewport().width() or hint.width()
+        wrapped = widget.heightForWidth(width) if widget.hasHeightForWidth() else -1
+        frame = 2 * self.frameWidth()
+        return QSize(hint.width() + frame, max(hint.height(), wrapped) + frame)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        # The parent layout caches the hint, so a new width or new content must tell it to ask again.
+        self.updateGeometry()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+        if watched is self.widget() and event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Resize):
+            self.updateGeometry()
+        return super().eventFilter(watched, event)
 
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -248,7 +287,7 @@ class SettingsTab(QWidget):
     def _build(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea(self)
+        scroll = _FullHeightScroll(self)
         scroll.setObjectName("settings-scroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)

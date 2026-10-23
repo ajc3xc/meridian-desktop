@@ -130,11 +130,12 @@ def _runner_ok(log_tail):
     )
 
 
-def _page(qtbot, *, tunnel, runner=None, desktop=None):
+def _page(qtbot, *, tunnel, runner=None, desktop=None, control=None):
     page = LogsPage(
         desktop_log=desktop if desktop is not None else Recorder(_tail_ok([], "desktop.log")),
         tunnel_log=tunnel,
         runner=runner if runner is not None else Recorder(_runner_ok("")),
+        control_log=control if control is not None else Recorder(_tail_ok([], "control.log")),
     )
     qtbot.addWidget(page)
     return page
@@ -423,6 +424,7 @@ def test_runner_not_configured_reads_not_available_and_starts_nothing(qtbot):
         desktop_log=Recorder(_tail_ok([], "desktop.log")),
         tunnel_log=Recorder(_tail_ok([])),
         runner=lambda: client.tail_log("scope-a"),
+        control_log=Recorder(_tail_ok([], "control.log")),
     )
     qtbot.addWidget(page)
 
@@ -436,7 +438,11 @@ def test_runner_not_configured_reads_not_available_and_starts_nothing(qtbot):
 
 
 def test_default_runner_read_is_not_configured(qtbot):
-    page = LogsPage(desktop_log=Recorder(_tail_ok([], "desktop.log")), tunnel_log=Recorder(_tail_ok([])))
+    page = LogsPage(
+        desktop_log=Recorder(_tail_ok([], "desktop.log")),
+        tunnel_log=Recorder(_tail_ok([])),
+        control_log=Recorder(_tail_ok([], "control.log")),
+    )
     qtbot.addWidget(page)
 
     _press(qtbot, page)
@@ -458,6 +464,7 @@ def test_runner_pane_passes_only_the_tail_log_verb(qtbot):
         desktop_log=Recorder(_tail_ok([], "desktop.log")),
         tunnel_log=Recorder(_tail_ok([])),
         runner=lambda: client.tail_log("scope-a"),
+        control_log=Recorder(_tail_ok([], "control.log")),
     )
     qtbot.addWidget(page)
 
@@ -514,6 +521,7 @@ def test_runner_error_text_is_shown_as_the_runner_client_wrote_it(qtbot):
         desktop_log=Recorder(_tail_ok([], "desktop.log")),
         tunnel_log=Recorder(_tail_ok([])),
         runner=lambda: client.tail_log("scope-a"),
+        control_log=Recorder(_tail_ok([], "control.log")),
     )
     qtbot.addWidget(page)
 
@@ -734,6 +742,7 @@ def test_a_pass_still_running_when_the_page_is_deleted_does_not_keep_the_page(qt
             desktop_log=Recorder(_tail_ok([], "desktop.log")),
             tunnel_log=tunnel,
             runner=Recorder(_runner_ok("")),
+            control_log=Recorder(_tail_ok([], "control.log")),
             parent=container,
         )
         page.findChild(QPushButton, "logs-refresh").click()

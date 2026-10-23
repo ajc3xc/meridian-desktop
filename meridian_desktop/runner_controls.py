@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from meridian_desktop.log_tail import DEFAULT_MAX_BYTES, LogTail, read_log_tail
 from meridian_desktop.settings_store import default_settings_path
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, UNKNOWN
 
@@ -282,6 +283,11 @@ def default_log_path(settings_path: Path | None = None) -> Path:
     """The control log, beside the settings file: %LOCALAPPDATA%\\meridian-desktop, or ~/.meridian-desktop."""
     base = settings_path if settings_path is not None else default_settings_path()
     return base.parent / LOG_NAME
+
+
+def read_control_log_tail(path: Path | None = None, *, max_bytes: int = DEFAULT_MAX_BYTES) -> LogTail:
+    """The bounded, redacted tail of the control log, for the Diagnostics view. It only reads the file."""
+    return read_log_tail(path if path is not None else default_log_path(), max_bytes=max_bytes)
 
 
 def _append_line(path: Path, line: str) -> None:
