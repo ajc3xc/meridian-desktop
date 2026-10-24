@@ -198,11 +198,6 @@ def _line_reporter(label: QLabel) -> Callable[[str], None]:
     return report
 
 
-class ProjectsUnavailable(Exception):
-    """The Projects resolver found no source to read. The Sessions tab then says the projects could not be read,
-    in plain words that name no class and no path."""
-
-
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
     """The local URL as saved now, read by the Search tab when a search runs.
 
@@ -243,9 +238,10 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
 def _saved_projects(store: SettingsStore, sources: DataSources) -> ProjectsProvider:
     """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
 
-    When the resolver found no source to read, the provider raises data_source.ProjectsUnresolved with the resolver's
-    own message, and the Sessions tab shows that message. The provider also names the database file the Sessions
-    file read uses, and the settings that choose it. It holds the store, never the window.
+    When the resolver gives no rows (no source to read, or a failed read such as a hosted 401), the provider raises
+    data_source.ProjectsUnresolved with the resolver's own message, and the Sessions tab shows that message. The
+    provider also names the database file the Sessions file read uses, and the settings that choose it. It holds the
+    store, never the window.
     """
 
     def load() -> Settings:

@@ -252,9 +252,12 @@ class ProjectsTab(QWidget):
         self._fill()
         where = SOURCE_TEXT.get(outcome.source or "", "Meridian")
         if self._rows:
-            self._status.setText(f"Showing {len(self._rows)} project(s) from {where}.")
+            text = f"Showing {len(self._rows)} project(s) from {where}."
         else:
-            self._status.setText(f"No projects found in {where}.")
+            text = f"No projects found in {where}."
+        # A read of the core folder's file carries its snapshot label (data_source.file_note), shown after the count,
+        # as the Sessions tab shows it. Other ok results carry no message.
+        self._status.setText(f"{text} {outcome.message}" if outcome.message else text)
 
     def _fill(self) -> None:
         self._table.setRowCount(len(self._rows))

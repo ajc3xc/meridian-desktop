@@ -1,9 +1,10 @@
 """Tests for the local data fallback: the core folder's data/meridian.db, read read-only, for Projects and Sessions.
 
 Symptom D: with no database file chosen, Projects and Sessions said no local data was found without looking in the
-core folder. These tests cover the search, the source order (local server, then hosted when a token is saved, then the
-file), the snapshot label, the no-data message, the Sessions file reader wiring, the Sessions re-read when the file
-settings change, and the Settings database chooser.
+core folder. These tests cover the search, the source order both tabs share (local server, then hosted when a token is
+saved, then the file only when no token is saved; hosted and tunnel modes read hosted only), the snapshot label on
+both tabs, the hosted errors that a file must never hide, the no-data message, the Sessions file reader wiring, the
+Sessions re-read when the file settings change, and the Settings database chooser.
 
 Every database is built in tmp_path (see test_sessions_reader.make_core_db). No test opens the real core database,
 reaches the network, reads the real keychain or starts a server. Offscreen Qt, from conftest.
@@ -21,7 +22,9 @@ import pytest
 from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget
 
 from _fakes import MemoryKeyring
-from meridian_desktop import local_client, projects_reader, sessions_client as sc
+from meridian_desktop import hosted_client, local_client, projects_reader, sessions_client as sc, sessions_reader
+from meridian_desktop import token_store
+from meridian_desktop.claude_processes import LISTED, ClaudeProcessesResult
 from meridian_desktop.data_source import (
     NO_LOCAL_DATA_MESSAGE,
     SOURCE_FILE,
@@ -42,8 +45,9 @@ from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus
-from meridian_desktop.ui import sessions_panel
+from meridian_desktop.ui import main_window, sessions_panel
 from meridian_desktop.ui.main_window import MainWindow
+from meridian_desktop.ui.projects_tab import ProjectsTab
 from meridian_desktop.ui.sessions_panel import PROJECTS_FAILED_TEXT, SessionsPanel, status_text
 from meridian_desktop.ui.settings_tab import NOT_CHOSEN_TEXT, USING_CORE_FILE_TEXT, SettingsTab
 from test_sessions_reader import OTHER_PID, PID, folder_state, make_core_db
@@ -53,18 +57,25 @@ HOSTED_URL = "https://hosted.test"
 FAKE_TOKEN = "sk_meridian_fake-fallback-0099"
 SERVER_ROWS = [{"id": "srv-1", "name": "From server"}]
 HOSTED_ROWS = [{"id": "hosted-1", "name": "From hosted"}]
+# Hosted projects whose ids the sessions client accepts, so the Sessions tab asks hosted for their sessions.
+HOSTED_PROJECT_ROWS = [{"id": PID, "name": "Alpha"}]
 # 12 October 2026 at noon, local time, so the date reads the same in every time zone.
 WRITTEN = datetime(2026, 10, 12, 12, 0, 0)
 WRITTEN_NOTE = "Read-only copy from the core folder, last written 12 October 2026. The local server is not running."
+# The hosted failures a saved token can meet: refused (401), forbidden (403), no route (404), down (503), and a
+# connection that is refused before any reply.
+HOSTED_FAILURES = [401, 403, 404, 503, "refused"]
 
 
 class Recorder:
     """Fake DataSources. The file reader is the real read-only reader. Each call is recorded by name."""
 
-    def __init__(self, *, probe_state=local_client.HEALTH_NOT_RUNNING, token=None, hosted_error=None):
+    def __init__(self, *, probe_state=local_client.HEALTH_NOT_RUNNING, token=None, hosted_error=None,
+                 hosted_rows=None):
         self.probe_state = probe_state
         self.token = token
         self.hosted_error = hosted_error
+        self.hosted_rows = HOSTED_ROWS if hosted_rows is None else hosted_rows
         self.calls: list[str] = []
         self.read_paths: list[Path] = []
 
@@ -98,7 +109,7 @@ class Recorder:
         self.calls.append("list_hosted")
         if self.hosted_error is not None:
             raise self.hosted_error
-        return list(HOSTED_ROWS)
+        return [dict(row) for row in self.hosted_rows]
 
 
 def core_folder(tmp_path: Path, *, keep=("-wal", "-shm"), now=None) -> Path:
@@ -182,16 +193,17 @@ def test_a_chosen_file_that_is_gone_does_not_fall_back_to_the_core_folder_file(t
 
 
 @pytest.mark.parametrize(
-    ("case", "expected_source", "expected_calls"),
+    ("case", "expected_state", "expected_source", "expected_calls"),
     [
-        ("server", SOURCE_SERVER, ["probe", "read_server"]),
-        ("hosted", SOURCE_HOSTED, ["probe", "get_token", "list_hosted"]),
-        ("hosted_fails", SOURCE_FILE, ["probe", "get_token", "list_hosted", "read_file"]),
-        ("no_token", SOURCE_FILE, ["probe", "get_token", "read_file"]),
+        ("server", STATE_OK, SOURCE_SERVER, ["probe", "read_server"]),
+        ("hosted", STATE_OK, SOURCE_HOSTED, ["probe", "get_token", "list_hosted"]),
+        # A saved token means hosted is in use: its failure is the answer, and the file is never read over it.
+        ("hosted_fails", STATE_READ_FAILED, SOURCE_HOSTED, ["probe", "get_token", "list_hosted"]),
+        ("no_token", STATE_OK, SOURCE_FILE, ["probe", "get_token", "read_file"]),
     ],
 )
-def test_the_source_order_is_server_then_hosted_with_a_token_then_the_file(tmp_path, case, expected_source,
-                                                                         expected_calls):
+def test_the_source_order_is_server_then_hosted_with_a_token_else_the_file(tmp_path, case, expected_state,
+                                                                         expected_source, expected_calls):
     core = core_folder(tmp_path)
     fakes = Recorder(
         probe_state=local_client.HEALTH_RUNNING if case == "server" else local_client.HEALTH_NOT_RUNNING,
@@ -201,10 +213,58 @@ def test_the_source_order_is_server_then_hosted_with_a_token_then_the_file(tmp_p
 
     result = resolve(local(core), fakes.sources())
 
-    assert result.state == STATE_OK
+    assert result.state == expected_state
     assert result.source == expected_source
     assert fakes.calls == expected_calls
     assert FAKE_TOKEN not in repr(result)
+
+
+def _hosted_failure(status) -> FakeHosted:
+    """A hosted transport that answers ``status``, or refuses the connection for "refused"."""
+    return FakeHosted(refused=True) if status == "refused" else FakeHosted(status=status)
+
+
+@pytest.mark.parametrize("status", HOSTED_FAILURES)
+def test_a_hosted_error_with_a_token_is_shown_on_projects_and_the_core_file_is_not_read(tmp_path, status):
+    core = core_folder(tmp_path)
+    before = folder_state(core / "data")
+    fakes = Recorder(token=FAKE_TOKEN)
+    failing = _hosted_failure(status)
+    sources = dataclasses.replace(
+        fakes.sources(), list_hosted=lambda url, token: hosted_client.list_projects(url, token, transport=failing)
+    )
+    with pytest.raises(hosted_client.HostedError) as raised:
+        hosted_client.list_projects(HOSTED_URL, FAKE_TOKEN, transport=_hosted_failure(status))
+
+    result = resolve(local(core), sources)
+
+    assert result.state == STATE_READ_FAILED
+    assert result.source == SOURCE_HOSTED
+    assert result.rows == []
+    # The hosted client's own words, exactly as a hosted-mode failure shows them.
+    assert result.message == f"Hosted Meridian projects could not be loaded. {raised.value}"
+    assert len(failing.calls) == 1
+    assert "read_file" not in fakes.calls
+    assert FAKE_TOKEN not in repr(result)
+    assert folder_state(core / "data") == before
+
+
+def test_with_a_token_saved_and_a_database_file_chosen_the_order_is_server_then_hosted(tmp_path):
+    """The answer to "what is the local order with a token and a db_path": the server, then hosted. The chosen file is
+    not read while a token is saved, whether hosted answers or fails."""
+    chosen = make_core_db(tmp_path / "chosen")
+    answered = Recorder(token=FAKE_TOKEN)
+    failed = Recorder(token=FAKE_TOKEN, hosted_error=hosted_client.HostedUnreachable())
+    running = Recorder(token=FAKE_TOKEN, probe_state=local_client.HEALTH_RUNNING)
+
+    assert resolve(local(db_path=chosen), answered.sources()).source == SOURCE_HOSTED
+    assert resolve(local(db_path=chosen), failed.sources()).state == STATE_READ_FAILED
+    assert resolve(local(db_path=chosen), running.sources()).source == SOURCE_SERVER
+
+    assert answered.calls == ["probe", "get_token", "list_hosted"]
+    assert failed.calls == ["probe", "get_token", "list_hosted"]
+    assert running.calls == ["probe", "read_server"]
+    assert answered.read_paths == failed.read_paths == running.read_paths == []
 
 
 def test_a_failed_hosted_read_with_no_file_reports_the_hosted_failure(tmp_path):
@@ -286,16 +346,33 @@ def _not_running(base_url, path, timeout):
 
 
 class FakeHosted:
-    def __init__(self, status=200, body=b"[]"):
+    """A hosted transport for both hosted clients. It answers one status, or refuses the connection."""
+
+    def __init__(self, status=200, body=b"[]", refused=False):
         self.status = status
         self.body = body
+        self.refused = refused
         self.calls = []
 
     def __call__(self, request, timeout):
-        from meridian_desktop import hosted_client
-
         self.calls.append(request)
+        if self.refused:
+            raise ConnectionRefusedError("nothing listens at the hosted address")
         return hosted_client.Reply(self.status, self.body)
+
+
+@pytest.fixture
+def file_session_reads(monkeypatch):
+    """Each project id the Sessions tab asked the database file for. The real reader still answers."""
+    reads: list[str] = []
+    real = sessions_reader.file_sessions
+
+    def recording(path, project_id, **options):
+        reads.append(project_id)
+        return real(path, project_id, **options)
+
+    monkeypatch.setattr(sessions_reader, "file_sessions", recording)
+    return reads
 
 
 def _panel(qtbot, settings_box, *, token=None, hosted=None, sources=None):
@@ -361,25 +438,160 @@ def test_sessions_read_the_file_when_the_server_and_hosted_are_unavailable(qtbot
     assert hosted.calls == []
 
 
-def test_sessions_prefer_hosted_when_a_token_is_saved_and_fall_back_to_the_file_when_it_fails(qtbot, tmp_path):
+@pytest.mark.parametrize("status", HOSTED_FAILURES)
+def test_sessions_with_a_token_show_the_hosted_error_exactly_and_never_the_file_rows(qtbot, tmp_path,
+                                                                                    file_session_reads, status):
     core = core_folder(tmp_path, now=datetime.now(timezone.utc))
-    # The projects come from the file (no token on the resolver), the sessions try hosted with the saved token.
-    refused = FakeHosted(status=401)
-    panel, _calls, hosted = _panel(qtbot, [local(core)], token=FAKE_TOKEN, hosted=refused)
+    # The projects come from hosted with the saved token, as the window wires it. Their sessions read fails.
+    sources = Recorder(token=FAKE_TOKEN, hosted_rows=HOSTED_PROJECT_ROWS).sources()
+    failing = _hosted_failure(status)
+    expected = sc.hosted_sessions(HOSTED_URL, PID, FAKE_TOKEN, transport=_hosted_failure(status))
+    assert expected.state != sc.SESSIONS
+    panel, _calls, hosted = _panel(qtbot, [local(core)], token=FAKE_TOKEN, hosted=failing, sources=sources)
 
     panel.show()
     settle(qtbot, panel)
 
     assert len(hosted.calls) == 1
-    assert [row[0] for row in rows_of(panel)] == ["fresh-active", "stale-active", "already-idle"]
+    # The hosted error is shown as the sessions client words it, as it was before the file reader existed.
+    assert status_of(panel) == expected.message
+    assert rows_of(panel) == []
+    assert file_session_reads == []
+    assert "database file" not in status_of(panel)
     assert FAKE_TOKEN not in status_of(panel)
 
+
+def test_sessions_with_a_token_read_hosted_rows_and_not_the_file(qtbot, tmp_path, file_session_reads):
+    core = core_folder(tmp_path, now=datetime.now(timezone.utc))
+    sources = Recorder(token=FAKE_TOKEN, hosted_rows=HOSTED_PROJECT_ROWS).sources()
     answering = FakeHosted(body=b'[{"name": "from-hosted", "status": "active", "last_seen": ""}]')
-    panel2, _calls2, hosted2 = _panel(qtbot, [local(core)], token=FAKE_TOKEN, hosted=answering)
-    panel2.show()
-    settle(qtbot, panel2)
-    assert [row[0] for row in rows_of(panel2)] == ["from-hosted"]
-    assert status_of(panel2).startswith("1 session(s) from hosted Meridian.")
+    panel, _calls, hosted = _panel(qtbot, [local(core)], token=FAKE_TOKEN, hosted=answering, sources=sources)
+
+    panel.show()
+    settle(qtbot, panel)
+
+    assert len(hosted.calls) == 1
+    assert [row[0] for row in rows_of(panel)] == ["from-hosted"]
+    assert status_of(panel).startswith("1 session(s) from hosted Meridian.")
+    assert file_session_reads == []
+
+
+@pytest.mark.parametrize("mode", ["hosted", "tunnel"])
+def test_hosted_and_tunnel_sessions_never_read_the_file_or_the_local_server(qtbot, tmp_path, file_session_reads,
+                                                                            mode):
+    core = core_folder(tmp_path, now=datetime.now(timezone.utc))
+    sources = Recorder(token=FAKE_TOKEN, hosted_rows=HOSTED_PROJECT_ROWS).sources()
+    down = FakeHosted(status=503)
+    local_asks: list[str] = []
+
+    def local_server(base_url, path, timeout):
+        local_asks.append(path)
+        return SimpleNamespace(status=200, body=b'[{"name": "from-local", "status": "active", "last_seen": ""}]')
+
+    provider = ProjectsProvider(lambda: dataclasses.replace(local(core), mode=mode), sources)
+    panel = SessionsPanel(
+        lambda: LOCAL_URL,
+        lambda: (HOSTED_URL, FAKE_TOKEN),
+        provider,
+        lambda: mode,
+        local_transport=local_server,
+        hosted_transport=down,
+        process_lister=lambda: ClaudeProcessesResult(LISTED, "", ()),
+    )
+    qtbot.addWidget(panel)
+    panel.show()
+    settle(qtbot, panel)
+
+    assert len(down.calls) == 1
+    assert status_of(panel) == sc.HTTP_STATUS_MESSAGE.format(503)
+    assert rows_of(panel) == []
+    assert local_asks == []
+    assert file_session_reads == []
+
+
+# ----------------------------------------------------------------- one source order for both tabs
+
+_SESSIONS_SOURCE = {sc.SOURCE_LOCAL: SOURCE_SERVER, sc.SOURCE_HOSTED: SOURCE_HOSTED, sessions_reader.SOURCE_FILE: SOURCE_FILE}
+
+
+def _expected_order(mode, server_up, token, with_file):
+    """The sources a read asks, in order: the rule both tabs must follow."""
+    if mode != "local":
+        return [SOURCE_HOSTED] if token else []
+    if server_up:
+        return [SOURCE_SERVER]
+    if token:
+        return [SOURCE_SERVER, SOURCE_HOSTED]
+    return [SOURCE_SERVER, SOURCE_FILE] if with_file else [SOURCE_SERVER]
+
+
+@pytest.mark.parametrize("with_file", [True, False], ids=["file", "no-file"])
+@pytest.mark.parametrize("hosted_ok", [True, False], ids=["hosted-ok", "hosted-401"])
+@pytest.mark.parametrize("token", [FAKE_TOKEN, None], ids=["token", "no-token"])
+@pytest.mark.parametrize("server_up", [True, False], ids=["server-up", "server-down"])
+@pytest.mark.parametrize("mode", ["local", "hosted", "tunnel"])
+def test_projects_and_sessions_ask_the_same_sources_in_the_same_order(tmp_path, file_session_reads, mode,
+                                                                      server_up, token, hosted_ok, with_file):
+    settings = dataclasses.replace(local(core_folder(tmp_path) if with_file else None), mode=mode)
+
+    projects_asked: list[str] = []
+
+    def probe(url):
+        projects_asked.append(SOURCE_SERVER)
+        return local_client.HEALTH_RUNNING if server_up else local_client.HEALTH_NOT_RUNNING
+
+    def list_hosted(url, saved):
+        projects_asked.append(SOURCE_HOSTED)
+        if not hosted_ok:
+            raise hosted_client.NotSignedIn(hosted_client.REJECTED_TEXT, 401)
+        return [dict(row) for row in HOSTED_PROJECT_ROWS]
+
+    def read_file(path):
+        projects_asked.append(SOURCE_FILE)
+        return projects_reader.list_projects(path)
+
+    sources = DataSources(
+        probe=probe,
+        read_server=lambda url: [dict(row) for row in HOSTED_PROJECT_ROWS],
+        read_file=read_file,
+        get_token=lambda: token,
+        list_hosted=list_hosted,
+    )
+    projects = resolve(settings, sources)
+
+    sessions_asked: list[str] = []
+
+    def local_server(base_url, path, timeout):
+        sessions_asked.append(SOURCE_SERVER)
+        if not server_up:
+            raise LocalClientError("not_running", "nothing listens")
+        return SimpleNamespace(status=200, body=b"[]")
+
+    def hosted_server(request, timeout):
+        sessions_asked.append(SOURCE_HOSTED)
+        return hosted_client.Reply(200 if hosted_ok else 401, b"[]")
+
+    reads = sessions_panel._Reads(  # noqa: SLF001 - the read the Sessions tab runs on its worker
+        lambda: LOCAL_URL,
+        lambda: (HOSTED_URL, token),
+        ProjectsProvider(lambda: settings, sources),
+        lambda: mode,
+        local_server,
+        hosted_server,
+        lambda: ClaudeProcessesResult(LISTED, "", ()),
+    )
+    sessions = reads._read_sessions(PID)  # noqa: SLF001
+    sessions_asked.extend(SOURCE_FILE for _ in file_session_reads)
+
+    expected = _expected_order(mode, server_up, token, with_file)
+    assert projects_asked == expected
+    assert sessions_asked == expected
+    # Both tabs show the same source: the last one asked, unless that was a local server that did not answer.
+    shown = None if not expected or (expected[-1] == SOURCE_SERVER and not server_up) else expected[-1]
+    assert projects.source == shown
+    sessions_source = None if sessions.state == sc.NOT_RUNNING or not sessions.source else _SESSIONS_SOURCE[
+        sessions.source]
+    assert sessions_source == shown
 
 
 def test_another_project_picked_then_refresh_reads_that_project_from_the_file(qtbot, tmp_path):
@@ -549,8 +761,11 @@ def test_the_window_shows_the_core_file_on_projects_and_sessions(qtbot, settings
 
     projects = window.tabs.widget(names.index("Projects"))
     projects_status = projects.findChild(QLabel, "projects-status")
-    qtbot.waitUntil(lambda: projects_status.text().startswith("Showing 2 project(s) from the database file."),
-                    timeout=5000)
+    # The Projects screen carries the same snapshot label as Sessions, after the count.
+    qtbot.waitUntil(
+        lambda: projects_status.text() == f"Showing 2 project(s) from the database file. {WRITTEN_NOTE}", timeout=5000
+    )
+    assert projects_status.isVisible()
 
     window.tabs.setCurrentIndex(names.index("Sessions"))
     sessions = window.tabs.widget(names.index("Sessions"))
@@ -560,3 +775,112 @@ def test_the_window_shows_the_core_file_on_projects_and_sessions(qtbot, settings
         f"3 session(s) from the database file. {WRITTEN_NOTE}"
     )
     assert local_calls and hosted_calls == []
+
+
+def test_a_hosted_401_shows_on_projects_and_sessions_while_the_core_file_exists(qtbot, settings_path, tmp_path,
+                                                                               monkeypatch, file_session_reads):
+    core = core_folder(tmp_path, now=datetime.now(timezone.utc))
+    before = folder_state(core / "data")
+    SettingsStore(settings_path).save(local(core))
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    token_store.set_token(FAKE_TOKEN, store=secrets)
+    refusing = FakeHosted(status=401)
+    file_reads: list[Path] = []
+    local_calls: list[str] = []
+
+    def read_file(path):
+        file_reads.append(path)
+        return projects_reader.list_projects(path)
+
+    def fake_local(base_url, project_id, *, transport=None, timeout=None):
+        local_calls.append(project_id)
+        return sc.SessionsResult(sc.NOT_RUNNING, sc.NOT_RUNNING_MESSAGE, sc.SOURCE_LOCAL)
+
+    def refusing_sessions(base_url, project_id, token, *, transport=None, timeout=None):
+        return sc.hosted_sessions(base_url, project_id, token, transport=refusing)
+
+    monkeypatch.setattr(sessions_panel, "local_sessions", fake_local)
+    monkeypatch.setattr(sessions_panel, "hosted_sessions", refusing_sessions)
+    monkeypatch.setattr(sessions_panel.claude_processes, "list_claude_processes",
+                        lambda run=None: ClaudeProcessesResult(LISTED, "", ()))
+    # The real wiring of the token and the hosted client, with the hosted host answering 401 to every request.
+    sources = DataSources(
+        probe=lambda url: local_client.HEALTH_NOT_RUNNING,
+        read_server=lambda url: (_ for _ in ()).throw(AssertionError("server not running")),
+        read_file=read_file,
+        get_token=lambda: token_store.get_token(store=secrets),
+        list_hosted=lambda url, token: hosted_client.list_projects(url, token, transport=refusing),
+    )
+    window = MainWindow(
+        SettingsStore(settings_path),
+        secret_store=secrets,
+        data_sources=sources,
+        tools_status=lambda: ToolsStatus(rows=()),
+    )
+    qtbot.addWidget(window)
+    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    window.tabs.setCurrentIndex(names.index("Projects"))
+    window.show()
+    qtbot.waitExposed(window)
+
+    expected = f"Hosted Meridian projects could not be loaded. {hosted_client.REJECTED_TEXT}"
+    projects = window.tabs.widget(names.index("Projects"))
+    projects_status = projects.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: projects_status.text() == expected, timeout=5000)
+    assert projects.findChild(QTableWidget, "projects-table").rowCount() == 0
+
+    window.tabs.setCurrentIndex(names.index("Sessions"))
+    sessions = window.tabs.widget(names.index("Sessions"))
+    sessions_status = sessions.findChild(QLabel, "sessions-status")
+    qtbot.waitUntil(lambda: sessions_status.text() == expected, timeout=5000)
+    assert sessions.findChild(QTableWidget, "sessions-table").rowCount() == 0
+    assert "HTTP 401" in projects_status.text() and "HTTP 401" in sessions_status.text()
+
+    # The core file is there, and neither tab read it over the hosted refusal.
+    assert file_reads == []
+    assert file_session_reads == []
+    assert local_calls == []
+    assert len(refusing.calls) >= 2
+    assert folder_state(core / "data") == before
+    assert FAKE_TOKEN not in projects_status.text() + sessions_status.text()
+
+
+def _projects_tab(qtbot, settings_path, sources):
+    tab = ProjectsTab(SettingsStore(settings_path), sources)
+    qtbot.addWidget(tab)
+    tab.show()
+    qtbot.waitExposed(tab)
+    return tab, tab.findChild(QLabel, "projects-status")
+
+
+def test_the_projects_screen_shows_the_snapshot_label_for_the_core_file(qtbot, settings_path, tmp_path):
+    core = core_folder(tmp_path)
+    SettingsStore(settings_path).save(local(core))
+
+    tab, status = _projects_tab(qtbot, settings_path, Recorder().sources())
+
+    expected = f"Showing 2 project(s) from the database file. {WRITTEN_NOTE}"
+    qtbot.waitUntil(lambda: status.text() == expected, timeout=5000)
+    assert status.isVisible()
+    assert tab.findChild(QTableWidget, "projects-table").rowCount() == 2
+
+
+def test_the_projects_screen_labels_an_empty_core_file_and_not_a_chosen_file(qtbot, settings_path, tmp_path):
+    core = core_folder(tmp_path)
+    SettingsStore(settings_path).save(local(core))
+    empty = dataclasses.replace(Recorder().sources(), read_file=lambda path: [])
+
+    _tab, status = _projects_tab(qtbot, settings_path, empty)
+    qtbot.waitUntil(lambda: status.text() == f"No projects found in the database file. {WRITTEN_NOTE}", timeout=5000)
+
+    # A database file the owner chose is not the core folder's copy, so it carries no label.
+    SettingsStore(settings_path).save(local(core, make_core_db(tmp_path / "chosen")))
+    _tab2, chosen_status = _projects_tab(qtbot, settings_path, Recorder().sources())
+    qtbot.waitUntil(lambda: chosen_status.text() == "Showing 2 project(s) from the database file.", timeout=5000)
+
+
+def test_the_window_has_no_projects_unavailable_path():
+    # The Sessions tab gets the resolver's own message through data_source.ProjectsUnresolved. The window's old
+    # ProjectsUnavailable exception was never raised, so it is gone.
+    assert not hasattr(main_window, "ProjectsUnavailable")
+    assert issubclass(ProjectsUnresolved, Exception)

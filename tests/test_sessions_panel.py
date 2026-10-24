@@ -558,11 +558,7 @@ def test_no_projects_says_so_and_sends_nothing(qtbot):
     assert local.calls == []
 
 
-class ProjectsUnavailable(Exception):
-    """Stands in for the window's exception. Its class name must never reach the status line."""
-
-
-@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), ProjectsUnavailable("/home/x/secret.db")])
+@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), OSError("/home/x/secret.db")])
 def test_a_failed_project_list_says_so_in_plain_words_and_sends_nothing(qtbot, failure):
     def broken():
         raise failure
@@ -719,7 +715,7 @@ def test_a_refresh_press_makes_exactly_one_project_read_and_one_sessions_read(qt
     settle(qtbot, panel)
     assert counts.projects == projects + 1
     assert counts.hosted == hosted_reads + 1
-    assert len(local.calls) == local_calls + 1
+    assert len(local.calls) == local_calls  # hosted mode reads hosted only, as the Projects tab does
     assert len(hosted.calls) == hosted_calls + 1
     assert button.isEnabled()
 

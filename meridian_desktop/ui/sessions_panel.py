@@ -8,10 +8,12 @@ and a result from an older read is dropped once a newer one has started. There a
 
 - A full read lists the projects, then reads the sessions of the picked project. It runs the first time the tab is
   shown, when Refresh is pressed, and on a later show when the database file settings (db_path or core_checkout)
-  changed since the last full read. The sessions come from the local server first. The hosted host is asked only
-  when the local server is not running and a hosted token is saved. When hosted gives no sessions list too, the
-  database file is read, read-only (sessions_reader), and its rows carry the snapshot label in the status line. The
-  Refresh button is disabled while a full read runs.
+  changed since the last full read. The sessions follow data_source.read_in_order, the order the Projects tab uses.
+  In local mode they come from the local server first. The hosted host is asked only when the local server is not
+  running and a hosted token is saved, and its answer is shown as it is, an error (401, 403, 404, 503, refused)
+  included. Only when no token is saved is the database file read, read-only (sessions_reader), and its rows carry
+  the snapshot label in the status line. In hosted and tunnel modes the sessions come from hosted only: the local
+  server and the database file are not read. The Refresh button is disabled while a full read runs.
 - A local read asks the local server only, for the picked project, and only in local mode. It never lists the
   projects and never calls the hosted host. The 5-second timer starts one on each tick while the tab is visible,
   and a change of project starts one. A local server that does not answer gives nothing new, so the table and the
@@ -29,7 +31,8 @@ The four providers are called on the worker thread, never on the UI thread:
   PROJECTS_FAILED_TEXT. The window passes a data_source.ProjectsProvider, which also has local_file() (the database
   file and its snapshot label, for the file read) and watch_key() (the settings that choose that file). A provider
   without them reads no file and never reads again on show.
-- mode_provider() -> str: the mode saved in Settings. Only "local" allows a local read.
+- mode_provider() -> str: the mode saved in Settings. Only "local" allows a local read, and a full read follows the
+  source order of that mode.
 
 Only names, status, last seen (as an age) and the client name reach the table. Session summaries, task log bodies
 and notes are never read by the client, so they cannot reach this panel.
@@ -63,14 +66,16 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import claude_processes, hosted_client, sessions_reader
 from meridian_desktop.claude_processes import ClaudeProcessesResult
-from meridian_desktop.data_source import ProjectsUnresolved
+from meridian_desktop.data_source import ProjectsUnresolved, read_in_order
 from meridian_desktop.sessions_client import (
     ERROR,
     NO_PROJECT,
+    NO_TOKEN_MESSAGE,
     NOT_RUNNING,
     SESSIONS,
     SOURCE_HOSTED,
     SOURCE_LOCAL,
+    UNAUTHORISED,
     SessionRow,
     SessionsResult,
     hosted_sessions,
@@ -328,23 +333,45 @@ class _Reads:
         return tuple((pid.strip(), _plain(name) or pid.strip()) for pid, name in pairs), ""
 
     def _read_sessions(self, project_id: str) -> SessionsResult:
-        """The local server first. Hosted only when the local server is not running and a token is saved. Then the
-        database file, read-only, when hosted gave no sessions list either and a file is found."""
-        local = local_sessions(self._local_url(), project_id, transport=self._local_transport)
-        if local.state != NOT_RUNNING:
+        """The picked project's sessions, in data_source.read_in_order: the order the Projects tab uses too.
+
+        Local mode: the local server first. When it is not running, hosted when a token is saved, and its answer is
+        shown as it is, an error included. Only with no token saved is the database file read, read-only. Hosted and
+        tunnel modes: hosted only, never the local server or the file.
+        """
+        saved: list[tuple[str, str | None]] = []
+        not_running: list[SessionsResult] = []
+
+        def hosted_pair() -> tuple[str, str | None]:
+            # The hosted URL and the token, read once per read and only when hosted may be asked.
+            if not saved:
+                saved.append(self._hosted())
+            return saved[0]
+
+        def server() -> SessionsResult | None:
+            local = local_sessions(self._local_url(), project_id, transport=self._local_transport)
+            if local.state == NOT_RUNNING:
+                not_running.append(local)
+                return None
             return local
-        fallback = local
-        hosted_url, token = self._hosted()
-        if isinstance(token, str) and token.strip():
-            hosted = hosted_sessions(hosted_url, project_id, token, transport=self._hosted_transport)
-            if hosted.state == SESSIONS:
-                return hosted
-            fallback = hosted
-        found = self._local_file() if self._local_file is not None else None
-        if found is None:
-            return fallback
-        path, note = found
-        return sessions_reader.file_sessions(path, project_id, note=note)
+
+        def hosted(token: str) -> SessionsResult:
+            return hosted_sessions(hosted_pair()[0], project_id, token, transport=self._hosted_transport)
+
+        def database_file() -> SessionsResult | None:
+            found = self._local_file() if self._local_file is not None else None
+            if found is None:
+                return None
+            path, note = found
+            return sessions_reader.file_sessions(path, project_id, note=note)
+
+        result = read_in_order(
+            self._mode(), lambda: hosted_pair()[1], server=server, hosted=hosted, file=database_file
+        )
+        if result is not None:
+            return result
+        # Nothing answered. In local mode, the local server's own not-running line. Outside it, no token is saved.
+        return not_running[0] if not_running else SessionsResult(UNAUTHORISED, NO_TOKEN_MESSAGE)
 
 
 # ----------------------------------------------------------------- panel

@@ -265,6 +265,87 @@ def test_unknown_mode_is_refused(db_file):
         resolve(settings, FakeSources().sources())
 
 
+@pytest.mark.parametrize(
+    "hosted_error",
+    [None, RuntimeError("offline"), hosted_client.NotSignedIn(hosted_client.REJECTED_TEXT, 401)],
+    ids=["hosted-ok", "hosted-raises", "hosted-401"],
+)
+def test_local_mode_with_a_token_never_reads_the_file(db_file, hosted_error):
+    # A saved token means hosted is in use. Its answer, rows or error, is the result, and the file is not read.
+    fakes = FakeSources(token=FAKE_TOKEN, hosted_error=hosted_error)
+
+    result = resolve(local_settings(db_file), fakes.sources())
+
+    assert result.source == SOURCE_HOSTED
+    assert result.state == (STATE_OK if hosted_error is None else STATE_READ_FAILED)
+    assert fakes.calls == ["probe", "get_token", "list_hosted"]
+    assert fakes.read_paths == []
+
+
+class OrderSteps:
+    """The three steps a tab gives read_in_order. Each records its name, and answers as the test sets it."""
+
+    def __init__(self, *, server=None, hosted="hosted-answer", file="file-answer", token=None):
+        self.answers = {"server": server, "hosted": hosted, "file": file}
+        self.token = token
+        self.calls: list[str] = []
+
+    def get_token(self):
+        self.calls.append("get_token")
+        return self.token
+
+    def server(self):
+        self.calls.append("server")
+        return self.answers["server"]
+
+    def hosted(self, token):
+        self.calls.append(f"hosted:{token}")
+        return self.answers["hosted"]
+
+    def file(self):
+        self.calls.append("file")
+        return self.answers["file"]
+
+    def run(self, mode):
+        return data_source.read_in_order(mode, self.get_token, server=self.server, hosted=self.hosted, file=self.file)
+
+
+@pytest.mark.parametrize(
+    ("mode", "steps", "expected", "calls"),
+    [
+        # Local mode: a server that answers is final, an error included. The token is not even read.
+        ("local", {"server": "server-answer", "token": FAKE_TOKEN}, "server-answer", ["server"]),
+        # No server: hosted when a token is saved, and its answer is final whatever it is.
+        ("local", {"token": FAKE_TOKEN}, "hosted-answer", ["server", "get_token", f"hosted:{FAKE_TOKEN}"]),
+        ("local", {"token": FAKE_TOKEN, "hosted": "hosted-error"}, "hosted-error",
+         ["server", "get_token", f"hosted:{FAKE_TOKEN}"]),
+        # No server and no token (or a blank one): the file, and nothing when there is none.
+        ("local", {}, "file-answer", ["server", "get_token", "file"]),
+        ("local", {"token": "   "}, "file-answer", ["server", "get_token", "file"]),
+        ("local", {"file": None}, None, ["server", "get_token", "file"]),
+        # Hosted and tunnel: hosted with a token, nothing without one. The server and the file are never asked.
+        ("hosted", {"token": FAKE_TOKEN, "server": "server-answer"}, "hosted-answer",
+         ["get_token", f"hosted:{FAKE_TOKEN}"]),
+        ("tunnel", {"token": FAKE_TOKEN}, "hosted-answer", ["get_token", f"hosted:{FAKE_TOKEN}"]),
+        ("hosted", {"server": "server-answer"}, None, ["get_token"]),
+        ("tunnel", {}, None, ["get_token"]),
+    ],
+)
+def test_read_in_order_is_the_one_source_order(mode, steps, expected, calls):
+    order = OrderSteps(**steps)
+
+    assert order.run(mode) == expected
+    assert order.calls == calls
+
+
+def test_read_in_order_refuses_an_unknown_mode():
+    order = OrderSteps(server="server-answer", token=FAKE_TOKEN)
+
+    with pytest.raises(ValueError):
+        order.run("cloud")
+    assert order.calls == []
+
+
 @pytest.fixture
 def health_url():
     """A loopback stub that answers GET /health with a Meridian health body."""

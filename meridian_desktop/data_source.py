@@ -1,20 +1,22 @@
-"""Choose the data source for the Projects view. Pure Python: no Qt import.
+"""Choose the data source for the Projects and Sessions views. Pure Python: no Qt import.
 
-``resolve`` reads the mode from Settings and returns one source, never two.
+``read_in_order`` is the one source order both tabs use: the Projects tab through ``resolve``, and the Sessions tab
+for the picked project's sessions. ``resolve`` reads the mode from Settings and returns one source, never two.
 
 Local mode, in this order:
-- the local Meridian server, when its probe state is running: source "server".
-- otherwise hosted Meridian, only when a hosted token is saved: source "hosted". A failed hosted read goes on to the file.
-- otherwise the database file, read-only: source "file". A db_path chosen in Settings always wins. With no db_path, the
-  file is <core_checkout>/data/meridian.db, the core's default database, which the core opens from its checkout. That
-  file is a snapshot, so its Resolution carries the snapshot_note as its message. A chosen db_path that is gone is not
-  replaced by the core file.
-- otherwise state "no_local_data", with a message that names each place checked. When a hosted read failed and no file
-  was found, that hosted failure is returned instead.
+- the local Meridian server, when its probe state is running: source "server". Its answer is final, an error included.
+- otherwise hosted Meridian, only when a hosted token is saved: source "hosted". A saved token means hosted is in use,
+  so its answer is final too: a failed hosted read is shown as it is, and the database file is not read in its place.
+- otherwise, with no token saved, the database file, read-only: source "file". A db_path chosen in Settings always
+  wins. With no db_path, the file is <core_checkout>/data/meridian.db, the core's default database, which the core
+  opens from its checkout. That file is a snapshot, so its Resolution carries the snapshot_note as its message, and the
+  Projects tab shows it after the count. A chosen db_path that is gone is not replaced by the core file.
+- otherwise state "no_local_data", with a message that names each place checked.
 
 Hosted mode:
 - no stored token: state "not_signed_in". Nothing is probed, read or fetched.
-- a stored token: the rows from the hosted client, source "hosted".
+- a stored token: the rows from the hosted client, source "hosted". The local server and the database file are never
+  read in hosted mode.
 
 Tunnel mode reads exactly as hosted mode does. Hosted tools reach this computer through the
 tunnel, so the projects come from the same hosted client with the same token. The tunnel's
@@ -40,14 +42,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from meridian_desktop import local_client, projects_reader
 from meridian_desktop.hosted_client import HostedError
 from meridian_desktop.settings_store import VALID_MODES, Settings
 
+LOCAL_MODE = "local"
 # The modes whose projects come from the hosted client: hosted, and tunnel (reached through the tunnel).
 HOSTED_PATH_MODES = ("hosted", "tunnel")
+
+# What one tab's read gives back: a Resolution for Projects, a SessionsResult for Sessions.
+T = TypeVar("T")
 
 SOURCE_SERVER = "server"
 SOURCE_FILE = "file"
@@ -207,46 +213,74 @@ def _read(source: str, load: Callable[[], list[Row]]) -> Resolution:
     return Resolution(STATE_OK, source, rows=rows)
 
 
-def _resolve_local(settings: Settings, sources: DataSources) -> Resolution:
-    if sources.probe(settings.local_url) == local_client.HEALTH_RUNNING:
-        # A running server wins. The file is not read, so the result holds one source only.
-        return _read(SOURCE_SERVER, lambda: sources.read_server(settings.local_url))
-    hosted_failed: Resolution | None = None
-    token = sources.get_token()
-    if _usable_token(token):
-        hosted = _read(SOURCE_HOSTED, lambda: sources.list_hosted(settings.hosted_url, token))
-        if hosted.state == STATE_OK:
-            return hosted
-        hosted_failed = hosted
-    database = local_database(settings)
-    if database is not None:
-        outcome = _read(SOURCE_FILE, lambda: sources.read_file(database.path))
-        if outcome.state == STATE_OK:
-            return replace(outcome, message=file_note(database, sources.last_written))
-        return outcome
-    if hosted_failed is not None:
-        return hosted_failed
-    return Resolution(STATE_NO_LOCAL_DATA, None, message=no_local_data_message(settings))
+def read_in_order(
+    mode: str,
+    get_token: Callable[[], object],
+    *,
+    server: Callable[[], T | None],
+    hosted: Callable[[str], T],
+    file: Callable[[], T | None],
+) -> T | None:
+    """The one source order of the Projects and Sessions tabs. Return the first answer, or None when none answered.
 
+    Each tab passes its own three reads. Local mode asks them in this order:
 
-def _resolve_hosted(settings: Settings, sources: DataSources) -> Resolution:
-    token = sources.get_token()
-    if not _usable_token(token):
-        # No token: return now. The probe, the file and the hosted client are never called.
-        return Resolution(STATE_NOT_SIGNED_IN, None, message=NOT_SIGNED_IN_MESSAGE)
-    return _read(SOURCE_HOSTED, lambda: sources.list_hosted(settings.hosted_url, token))
+    1. ``server()``, the local Meridian server. None means no local server answered, so the next source is asked. Any
+       other answer is final, an error included.
+    2. ``hosted(token)``, only when a hosted token is saved. A saved token means hosted is in use, so its answer is
+       final, an error (401, 403, 404, 503, a refused connection) included. The database file is never read over it.
+    3. ``file()``, only when no token is saved. None means no database file was found.
+
+    Hosted and tunnel modes ask ``hosted(token)`` when a token is saved, and nothing else: the local server and the
+    database file are never asked. ``get_token`` is called at most once, and not at all when the local server answered.
+    Raise ValueError when the mode is not one of VALID_MODES, before anything is asked.
+    """
+    if mode == LOCAL_MODE:
+        answered = server()
+        if answered is not None:
+            return answered
+        token = get_token()
+        if isinstance(token, str) and _usable_token(token):
+            return hosted(token)
+        return file()
+    if mode in HOSTED_PATH_MODES:
+        token = get_token()
+        return hosted(token) if isinstance(token, str) and _usable_token(token) else None
+    raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
 
 
 def resolve(settings: Settings, sources: DataSources) -> Resolution:
     """Return the one source the mode uses, with its rows, or the state that says why there is none.
 
-    "hosted" and "tunnel" both read through the hosted path. Raise ValueError when the mode is not one of VALID_MODES.
+    The order is read_in_order's. "hosted" and "tunnel" both read through the hosted path. Raise ValueError when the
+    mode is not one of VALID_MODES.
     """
-    if settings.mode == "local":
-        return _resolve_local(settings, sources)
-    if settings.mode in HOSTED_PATH_MODES:
-        return _resolve_hosted(settings, sources)
-    raise ValueError(f"mode must be one of {VALID_MODES}, got {settings.mode!r}")
+
+    def server() -> Resolution | None:
+        if sources.probe(settings.local_url) != local_client.HEALTH_RUNNING:
+            return None
+        # A running server wins. The file is not read, so the result holds one source only.
+        return _read(SOURCE_SERVER, lambda: sources.read_server(settings.local_url))
+
+    def hosted(token: str) -> Resolution:
+        return _read(SOURCE_HOSTED, lambda: sources.list_hosted(settings.hosted_url, token))
+
+    def database_file() -> Resolution | None:
+        database = local_database(settings)
+        if database is None:
+            return None
+        outcome = _read(SOURCE_FILE, lambda: sources.read_file(database.path))
+        if outcome.state == STATE_OK:
+            return replace(outcome, message=file_note(database, sources.last_written))
+        return outcome
+
+    outcome = read_in_order(settings.mode, sources.get_token, server=server, hosted=hosted, file=database_file)
+    if outcome is not None:
+        return outcome
+    if settings.mode == LOCAL_MODE:
+        return Resolution(STATE_NO_LOCAL_DATA, None, message=no_local_data_message(settings))
+    # Hosted or tunnel mode with no token: the probe, the file and the hosted client were never called.
+    return Resolution(STATE_NOT_SIGNED_IN, None, message=NOT_SIGNED_IN_MESSAGE)
 
 
 class ProjectsUnresolved(Exception):
@@ -261,8 +295,9 @@ class ProjectsProvider:
     """The Sessions tab's view of the Projects resolve. It holds a settings loader and the sources, never a window.
 
     Calling it returns the resolved projects as (id, name) pairs, or raises ProjectsUnresolved with the resolver's
-    message. local_file names the database file the tab's file read uses, with its snapshot label. watch_key is the
-    two settings that choose that file, so the tab can read again when either one changes.
+    message (no source, or a failed read such as a hosted 401). local_file names the database file the tab's file read
+    uses, with its snapshot label; the tab asks for it only where read_in_order reaches the file. watch_key is the two
+    settings that choose that file, so the tab can read again when either one changes.
     """
 
     def __init__(self, load_settings: Callable[[], Settings], sources: DataSources) -> None:
@@ -296,6 +331,8 @@ class ProjectsProvider:
 
 __all__ = [
     "CORE_DATA_FILE",
+    "HOSTED_PATH_MODES",
+    "LOCAL_MODE",
     "NOT_SIGNED_IN_MESSAGE",
     "NO_LOCAL_DATA_MESSAGE",
     "SNAPSHOT_NOTE",
@@ -315,6 +352,7 @@ __all__ = [
     "file_note",
     "local_database",
     "no_local_data_message",
+    "read_in_order",
     "resolve",
     "snapshot_note",
 ]
