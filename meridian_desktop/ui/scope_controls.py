@@ -13,23 +13,35 @@ The buttons are enabled only when the gate says so. For the tunnel the gate also
 again by "Find it again" in Settings. The gate's text is shown when the buttons are off, so the owner sees why, and a
 button next to the text does the one thing that turns them on: Choose the Meridian core folder, or Turn on the tunnel
 controls. The buttons read the setup again whenever RunnerActions.coreChanged is emitted. After each finished call,
-after_action runs on the GUI thread, so the owner can read the state again.
+actionFinished and RunnerActions.runnerStateChanged are emitted on the GUI thread, so the owner and Home read the
+state again.
+
+A confirmed start is read from the status the runner prints as it starts the child, before the child can exit. So the
+widget reads the status again about 3 and 20 seconds later (runner_controls.START_CHECK_DELAYS_SECONDS). A child that
+is no longer running replaces the success line with "Started, but it stopped straight after. Check the control log.",
+and the later check is dropped. A state that cannot be read takes the success line down too. These checks only read.
+Any newer Start or Stop on the same scope, from this widget or another one, cancels them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop.runner_controls import (
     SCOPE_LABELS,
     START,
+    START_CHECK_DELAYS_SECONDS,
+    START_CHECK_UNKNOWN_MESSAGE,
     STOP,
+    STOPPED_AFTER_START,
+    STOPPED_AFTER_START_MESSAGE,
     ControlResult,
     confirmation_text,
 )
+from meridian_desktop.tunnel_status import RUNNING
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import CoreSetup, RunnerActions, submit
 from meridian_desktop.ui.text import make_selectable
@@ -101,8 +113,9 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
 class ScopeControls(QWidget):
     """The Start, Stop and Restart buttons for one scope, with the gate note and the last result. It runs one call at a time.
 
-    ``actionFinished`` is emitted on the GUI thread after each finished call. The owner connects to it, so the owner
-    can read the state again. A signal, not a callback, keeps this widget from holding its owner in memory.
+    ``actionFinished`` is emitted on the GUI thread after each finished call, a start check included. The owner connects
+    to it, so the owner can read the state again. A signal, not a callback, keeps this widget from holding its owner in
+    memory. RunnerActions.runnerStateChanged is emitted at the same moments, for views that do not hold this widget.
     """
 
     actionFinished = Signal()
@@ -126,12 +139,22 @@ class ScopeControls(QWidget):
         self._enabled_by_gate = False
         # The button that turns the controls on, when the gate is off: FIX_CHOOSE_CORE, FIX_TURN_ON_TUNNEL, or None.
         self._fix_kind: str | None = None
-        # The call in flight: (python, working folder, "start" when a restart still has its start to do, or None).
-        self._pending: tuple[str, str, str | None] | None = None
+        # The call in flight: (python, working folder, "start" when a restart still has its start to do, or None, and the
+        # step's number from RunnerActions.begin_action).
+        self._pending: tuple[str, str, str | None, int] | None = None
         # Identifies this widget's calls. A plain object, so a job can hold it without holding the widget.
         self._owner = object()
         self._generation = 0
         shared_delivery().delivered.connect(self._on_delivered)
+        # The status checks after a confirmed start: their own owner token and generation, the Python and folder the start
+        # used, the start's step number, its success line, and one single-shot timer per check still to run.
+        self._check_owner = object()
+        self._check_generation = 0
+        self._check_with: tuple[str, str] | None = None
+        self._check_serial = 0
+        self._started_text = ""
+        self._check_timers: list[QTimer] = []
+        shared_delivery().delivered.connect(self._on_check_delivered)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -190,7 +213,12 @@ class ScopeControls(QWidget):
 
     def _finish(self) -> None:
         self._set_buttons()
+        self._changed()
+
+    def _changed(self) -> None:
+        """Tell the owner and every other view that a call finished, so each one reads the state again."""
         self.actionFinished.emit()
+        self._actions.notify_runner_state_changed()
 
     def _start_allowed(self, python: str, cwd: str) -> bool:
         """True when the second step of a restart may start with these values.
@@ -256,8 +284,11 @@ class ScopeControls(QWidget):
         self._submit(first, core.python, core.cwd, then=START if restart else None, restart=restart)
 
     def _submit(self, subcommand: str, python: str, cwd: str, *, then: str | None, restart: bool = False) -> None:
+        # A new step makes any check of an earlier start meaningless, here and in every other control of this scope.
+        self._cancel_start_checks()
+        serial = self._actions.begin_action(self._scope)
         self._busy = True
-        self._pending = (python, cwd, then)
+        self._pending = (python, cwd, then, serial)
         self._generation += 1
         generation = self._generation
         if restart:
@@ -278,7 +309,7 @@ class ScopeControls(QWidget):
         generation, (result, failure) = item.value
         if generation != self._generation or not self._busy or self._pending is None:
             return
-        python, cwd, then = self._pending
+        python, cwd, then, serial = self._pending
         self._busy = False
         self._pending = None
         if failure is not None or not isinstance(result, ControlResult):
@@ -308,7 +339,76 @@ class ScopeControls(QWidget):
             self._submit(START, python, cwd, then=None)
             return
         self._show(result.message)
+        if result.action == START and result.confirmed:
+            self._schedule_start_checks(python, cwd, serial, result.message)
         self._finish()
+
+    # ----------------------------------------------------------- the checks after a confirmed start
+
+    def _schedule_start_checks(self, python: str, cwd: str, serial: int, started_text: str) -> None:
+        """Read the status again at each of START_CHECK_DELAYS_SECONDS after the start. Each check only reads."""
+        self._cancel_start_checks()
+        self._check_with = (python, cwd)
+        self._check_serial = serial
+        self._started_text = started_text
+        for seconds in START_CHECK_DELAYS_SECONDS:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(int(seconds * 1000))
+            timer.timeout.connect(self._run_start_check)
+            timer.start()
+            self._check_timers.append(timer)
+
+    def _cancel_start_checks(self) -> None:
+        """Stop every check still to run, and drop the answer of one still running."""
+        for timer in self._check_timers:
+            timer.stop()
+            timer.deleteLater()
+        self._check_timers = []
+        self._check_with = None
+        self._check_generation += 1
+
+    def _check_superseded(self) -> bool:
+        """True when a newer Start or Stop on this scope has begun since the start being checked, from any control."""
+        return self._actions.action_serial(self._scope) != self._check_serial
+
+    @Slot()
+    def _run_start_check(self) -> None:
+        if self._check_with is None or self._busy:
+            return
+        if self._check_superseded():
+            self._cancel_start_checks()
+            return
+        python, cwd = self._check_with
+        self._check_generation += 1
+        generation = self._check_generation
+        control = self._actions.control(python, cwd)
+        scope = self._scope
+        submit(self._check_owner, generation, lambda: control.check_start(scope))
+
+    @Slot(object)
+    def _on_check_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A check for another widget, a superseded check, or one a newer step cancelled is dropped.
+        if not isinstance(item, Delivered) or item.owner is not self._check_owner:
+            return
+        generation, (result, failure) = item.value
+        if generation != self._check_generation or self._check_with is None or self._busy:
+            return
+        if self._check_superseded():
+            self._cancel_start_checks()
+            return
+        readable = failure is None and isinstance(result, ControlResult)
+        if readable and result.outcome == STOPPED_AFTER_START:
+            # The child is gone, so a later check has nothing to add.
+            self._show(STOPPED_AFTER_START_MESSAGE)
+            self._cancel_start_checks()
+        elif readable and result.confirmed and result.state == RUNNING:
+            self._show(self._started_text)
+        else:
+            self._show(START_CHECK_UNKNOWN_MESSAGE)
+        if not any(timer.isActive() for timer in self._check_timers):
+            self._cancel_start_checks()
+        self._changed()
 
 
 __all__ = [

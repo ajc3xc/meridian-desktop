@@ -675,6 +675,8 @@ class ClientSetupSection(QWidget):
 
     def _after_change(self, pending: _Pending, result: object) -> None:
         assert isinstance(result, CommandResult)
+        # The change may have written a client's file, whatever it reports, so Home reads its Tools card again.
+        self._actions.notify_client_setup_changed()
         label = LABELS.get(pending.client, pending.client)
         if not result.ok:
             _set_message(self._result, result.message)

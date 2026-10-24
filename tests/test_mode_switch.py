@@ -605,8 +605,10 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     push_buttons = [b for b in push_buttons if b.objectName() != "update-notice-restart"]
     start_like = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
     # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
-    # Settings, and the tunnel scope's three buttons on the Tunnel tab (docs/local-trust-contract.md).
+    # Settings and on Home's local card, and the tunnel scope's three buttons on the Tunnel tab
+    # (docs/local-trust-contract.md).
     assert start_like == [
+        "home-local-restart", "home-local-start", "home-local-stop",
         "local-restart", "local-start", "local-stop",
         "tunnel-restart", "tunnel-start", "tunnel-stop",
         "zotero-start",

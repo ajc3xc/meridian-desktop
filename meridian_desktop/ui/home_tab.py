@@ -2,11 +2,15 @@
 
 The cards are the local Meridian server, the tunnel, the services (the LaTeX engine and the slot ports), Zotero, the
 AI clients and their tools, and the updates. Each card runs its check when the window first shows, again every five
-minutes while Home is showing, and when Check now is pressed. No button starts the first check.
+minutes while Home is showing, and when Check now is pressed. No button starts the first check. Each later show reads
+the quick cards (local, tunnel, services, Zotero) again, after SHOW_DEBOUNCE_MS. A runner action or a start check
+(RunnerActions.runnerStateChanged), from Home or Settings, reads the Local, Tunnel and Tools cards again, and a client
+setup change (RunnerActions.clientSetupChanged) reads the Tools card again: at once while Home shows, or on its next
+show. A check asked while a card's read runs waits for that read and then runs.
 
-The checks read only, with two exceptions the owner confirms first. The tunnel's Start, Stop and Restart use the
-runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero panel uses.
-The Settings buttons only switch to the Settings tab.
+The checks read only, with two exceptions the owner confirms first. The tunnel's and the local server's Start, Stop and
+Restart use the runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero
+panel uses. The Settings buttons only switch to the Settings tab.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -38,7 +42,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
 )
 
-from meridian_desktop import local_client, zotero_client
+from meridian_desktop import local_client, runner_client, zotero_client
+from meridian_desktop.client_setup_runner import COMMAND_TIMEOUT_SECONDS
 from meridian_desktop.home_status import (
     ACTION_CHECK_TOOLS,
     ACTION_LAUNCH_ZOTERO,
@@ -62,14 +67,14 @@ from meridian_desktop.home_status import (
 )
 from meridian_desktop.latex_client import EngineStatus
 from meridian_desktop.runner_client import RunnerResult
-from meridian_desktop.runner_controls import SCOPE_TUNNEL
+from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
-from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
+from meridian_desktop.ui.scope_controls import ScopeControls, local_gate, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
 from meridian_desktop.ui.text import (
     BlockLine,
@@ -85,8 +90,16 @@ from meridian_desktop.ui.zotero_panel import ask_start
 # Every card checks again this often while Home is showing (seconds, for the monotonic clock).
 CHECK_INTERVAL_SECONDS = 5 * 60
 CHECK_INTERVAL_MS = CHECK_INTERVAL_SECONDS * 1000
-# A check that has not finished after this many seconds stops blocking its card (see the module docstring).
-STALL_SECONDS = 60
+# A check that has not finished after this many seconds stops blocking its card (see the module docstring). The Tools
+# read is the longest: the core's client setup plan, then the local server probe (which can take up to twice its
+# timeout, see local_client._get), then the tunnel status call, one after the other. The stall comes only after all of
+# them could have run to their timeouts, with a margin, so a slow read still within its timeouts never shows Still checking.
+STALL_MARGIN_SECONDS = 15
+STALL_SECONDS = int(
+    COMMAND_TIMEOUT_SECONDS + 2 * local_client.DEFAULT_TIMEOUT + runner_client.DEFAULT_TIMEOUT + STALL_MARGIN_SECONDS
+)
+# Showing Home again reads the quick cards after this pause, so a few quick tab switches run one read, not several.
+SHOW_DEBOUNCE_MS = 300
 INTRO_TEXT = (
     "Each card checks its part of Meridian on its own: when this window opens, and again every five minutes while "
     "Home is showing. The checks only read. Launch Zotero and the tunnel buttons ask before they act."
@@ -237,6 +250,8 @@ class _Card(QFrame):
         self._render = render
         self._on_action = on_action
         self._busy = False
+        # A check asked while a read runs. It runs once that read has answered.
+        self._queued = False
         self._generation = 0
         self._owner = object()
         self._action_key = ""
@@ -298,17 +313,27 @@ class _Card(QFrame):
         """Put a widget (the tunnel's control buttons) under the card's text."""
         self._body.addWidget(widget)
 
+    @property
+    def busy(self) -> bool:
+        """True while this card's read runs and has not stalled."""
+        return self._busy
+
     def check(self, *, replace: bool = False) -> None:
         """Run this card's read on the thread pool. A read already running is not doubled, and a stalled one is replaced.
 
-        ``replace`` starts a new read even when one is running. The older answer is then dropped when it arrives, because
-        the generation has moved on, so a read that began before the core was found cannot show after the newer one.
+        A check asked while a read runs is queued, not dropped: it runs once that read has answered. ``replace`` starts a
+        new read even when one is running. The older answer is then dropped when it arrives, because the generation has
+        moved on, so a read that began before the core was found, or before a start or stop, cannot show after the newer one.
 
         A card that already shows an answer keeps it, and its checked line says Checking until the new answer arrives, so
         a selection in the card stays. A card with no answer yet shows Checking as its headline.
         """
-        if self._work is None or (self._busy and not replace):
+        if self._work is None:
             return
+        if self._busy and not replace:
+            self._queued = True
+            return
+        self._queued = False
         self._busy = True
         self._generation += 1
         generation = self._generation
@@ -457,8 +482,11 @@ class _Card(QFrame):
         checked = checked_text(datetime.now())
         if failure is not None or self._render is None:
             self.show_view(failed_view(failure or "NoResult", checked))
-            return
-        self.show_view(self._render(value, checked))
+        else:
+            self.show_view(self._render(value, checked))
+        if self._queued:
+            # A check was asked while this read ran, so it runs now and reads after the answer it waited for.
+            self.check()
 
     @Slot(object)
     def _on_action_delivered(self, item: object) -> None:
@@ -527,6 +555,13 @@ class HomeTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(CHECK_INTERVAL_MS)
         self._timer.timeout.connect(self.check_all)
+        # Each later show reads the quick cards again once this short pause has passed (SHOW_DEBOUNCE_MS).
+        self._show_timer = QTimer(self)
+        self._show_timer.setSingleShot(True)
+        self._show_timer.setInterval(SHOW_DEBOUNCE_MS)
+        self._show_timer.timeout.connect(self._recheck_on_show)
+        # Cards a runner action or a client setup change touched while Home was hidden. They read again on the next show.
+        self._stale: set[_Card] = set()
 
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -631,19 +666,26 @@ class HomeTab(QWidget):
         self._refresh_updates()
 
     def _controls_row(self) -> None:
-        """The tunnel's Start, Stop and Restart (ScopeControls, which asks first) and an Open Settings button when they are off."""
+        """The tunnel's and the local server's Start, Stop and Restart (ScopeControls, which asks first), and an Open
+        Settings button on the Tunnel card when its buttons are off."""
         deps = self._deps
         if deps.actions is None:
             return
         self._tunnel_controls = ScopeControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
-        self._tunnel_controls.actionFinished.connect(self._tunnel.check)
         self._tunnel.add_body(self._tunnel_controls)
         self._tunnel_settings = QPushButton(OPEN_SETTINGS_TEXT, self._tunnel)
         self._tunnel_settings.setObjectName("home-tunnel-settings")
         self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
         self._tunnel.add_body(self._tunnel_settings)
+        # The same local controls Settings has, with the same confirmation. Settings keeps its own.
+        self._local_controls = ScopeControls(SCOPE_LOCAL, deps.actions, local_gate, prefix="home-local", parent=self._local)
+        self._local.add_body(self._local_controls)
         # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
         deps.actions.coreChanged.connect(self._on_core_changed)
+        # A Start, Stop or Restart here or in Settings, each check after a start, and a client setup change. Home only
+        # reads on these. It never emits coreChanged back, so nothing loops.
+        deps.actions.runnerStateChanged.connect(self._on_runner_state_changed)
+        deps.actions.clientSetupChanged.connect(self._on_client_setup_changed)
 
     def _on_core_changed(self) -> None:
         """The core search finished, or the core setup was saved: the tunnel buttons and the Tunnel and Tools cards read again.
@@ -658,23 +700,74 @@ class HomeTab(QWidget):
         self._tunnel.check(replace=True)
         self._tools.check(replace=True)
 
+    @Slot()
+    def _on_runner_state_changed(self) -> None:
+        """A runner action or a start check finished, here or in Settings: Local, Tunnel and Tools read again."""
+        self._mark_changed((self._local, self._tunnel, self._tools))
+
+    @Slot()
+    def _on_client_setup_changed(self) -> None:
+        """A client setup Apply or Remove finished in Settings: Tools reads again."""
+        self._mark_changed((self._tools,))
+
+    def _mark_changed(self, cards: Sequence[_Card]) -> None:
+        """Read these cards again, replacing any read that began before the change. While Home is hidden, they wait for
+        the next show, which reads them the same way."""
+        self._stale.update(cards)
+        if self.isVisible():
+            self._read_stale()
+
+    def _read_stale(self) -> None:
+        stale, self._stale = self._stale, set()
+        for card in self._cards():
+            if card in stale:
+                card.check(replace=True)
+
+    def _cards(self) -> tuple[_Card, ...]:
+        """The cards that run a read, in their order on the tab."""
+        return (self._local, self._tunnel, self._services, self._zotero, self._tools)
+
     def refresh_tunnel_gate(self) -> None:
-        """Read the saved core setup again. The tunnel buttons are on only when the gate allows, and Open Settings shows when they are off."""
+        """Read the saved core setup again. The tunnel and local buttons are on only when their gate allows, and Open
+        Settings shows when the tunnel buttons are off."""
         deps = self._deps
         if deps.actions is None:
             return
         self._tunnel_controls.refresh_enabled()
+        self._local_controls.refresh_enabled()
         enabled, _note = tunnel_gate(deps.actions.core())
         self._tunnel_settings.setVisible(not enabled)
 
     # ------------------------------------------------------------ checks
 
     def check_all(self) -> None:
-        """Run every card's check now. The Updates card reads the one startup check, so it makes no request."""
+        """Run every card's check now. The Updates card reads the one startup check, so it makes no request.
+
+        A card a change touched replaces its running read. Any other card that is still reading queues this check.
+        """
         self._last_run = time.monotonic()
-        for card in (self._local, self._tunnel, self._services, self._zotero, self._tools):
-            card.check()
+        stale, self._stale = self._stale, set()
+        for card in self._cards():
+            card.check(replace=card in stale)
         self._refresh_updates()
+
+    @Slot()
+    def _recheck_on_show(self) -> None:
+        """Home was shown again within five minutes. The quick cards read again, and Tools only after a change.
+
+        A quick card that is still reading keeps that read, because it began moments ago. A card a change touched
+        replaces its read.
+        """
+        if not self.isVisible():
+            return
+        stale, self._stale = self._stale, set()
+        for card in (self._local, self._tunnel, self._services, self._zotero):
+            if card in stale:
+                card.check(replace=True)
+            elif not card.busy:
+                card.check()
+        if self._tools in stale:
+            self._tools.check(replace=True)
 
     def _refresh_updates(self) -> None:
         deps = self._deps
@@ -740,17 +833,22 @@ class HomeTab(QWidget):
         self.refresh_tunnel_gate()
         stale = self._last_run is None or time.monotonic() - self._last_run >= CHECK_INTERVAL_SECONDS
         if stale:
+            self._show_timer.stop()
             self.check_all()
+        else:
+            self._show_timer.start()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt naming
         super().hideEvent(event)
         self._timer.stop()
+        self._show_timer.stop()
 
 
 __all__ = [
     "CHECK_INTERVAL_MS",
     "CHECK_INTERVAL_SECONDS",
     "CHECK_NOW_TEXT",
+    "SHOW_DEBOUNCE_MS",
     "STALL_SECONDS",
     "HomeDeps",
     "HomeTab",
