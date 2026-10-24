@@ -15,9 +15,12 @@ from datetime import datetime
 
 from meridian_desktop import local_client, tunnel_status, updater
 from meridian_desktop.latex_client import (
+    BACKUP_NOTE,
     ENGINE_CONNECTED,
     ENGINE_NOT_ANSWERING,
     ENGINE_NOT_RUNNING,
+    OVERLEAF_LEAD,
+    START_HELP,
     EngineStatus,
     port_text,
 )
@@ -192,17 +195,17 @@ class ServiceFacts:
     ports_failure: str = ""
 
 
+# LaTeX normally runs in Overleaf in the browser, so the LaTeX row leads with that. The local engine is a backup that is
+# off unless the owner turns it on, so off is an idle state, not a fault.
 _ENGINE_HEADLINE = {
-    ENGINE_CONNECTED: "LaTeX engine running",
-    ENGINE_NOT_RUNNING: "LaTeX engine not running",
+    ENGINE_CONNECTED: "LaTeX backup engine running",
+    ENGINE_NOT_RUNNING: "LaTeX backup engine off",
     ENGINE_NOT_ANSWERING: "Another program answers on the engine port",
 }
 _ENGINE_DETAIL = {
-    ENGINE_CONNECTED: "The engine answered its health and extension-version checks.",
-    ENGINE_NOT_RUNNING: (
-        "Nothing listens on that port. Start the LaTeX engine you installed on this computer if you need it."
-    ),
-    ENGINE_NOT_ANSWERING: "Something else answers on that port, not the LaTeX engine.",
+    ENGINE_CONNECTED: "The backup engine answered its health and extension-version checks.",
+    ENGINE_NOT_RUNNING: f"Nothing listens on that port. {BACKUP_NOTE} To turn it on, {START_HELP}",
+    ENGINE_NOT_ANSWERING: "Something else answers on that port, not the LaTeX backup engine.",
 }
 PORTS_NOTE = "A listening port only shows that something accepts a connection. It does not show that Meridian is healthy."
 
@@ -214,13 +217,18 @@ def services_view(facts: ServiceFacts | None, failure: str = "", checked: str = 
     port = port_text(facts.engine_url)
     if facts.engine is None:
         headline, tone = COULD_NOT_CHECK_HEADLINE, TONE_ATTENTION
-        rows.append(RowView(text=f"LaTeX engine on port {port}: not checked.", detail=_failed_engine_text(facts)))
+        rows.append(
+            RowView(
+                text=f"{OVERLEAF_LEAD} Local backup engine on port {port}: not checked.",
+                detail=_failed_engine_text(facts),
+            )
+        )
     else:
         state = facts.engine.state
         headline = _ENGINE_HEADLINE.get(state, COULD_NOT_CHECK_HEADLINE)
         tone = {ENGINE_CONNECTED: TONE_OK, ENGINE_NOT_RUNNING: TONE_IDLE}.get(state, TONE_ATTENTION)
         detail = _ENGINE_DETAIL.get(state, "The engine check got no usable answer.")
-        rows.append(RowView(text=f"LaTeX engine on port {port}.", detail=detail))
+        rows.append(RowView(text=f"{OVERLEAF_LEAD} Local backup engine on port {port}.", detail=detail))
     if facts.ports is None:
         rows.append(RowView(text="Slot ports: not checked.", detail=FAILED_TEMPLATE.format(facts.ports_failure or "unknown error")))
     else:

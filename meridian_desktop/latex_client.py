@@ -4,7 +4,17 @@ The engine is a separate program the owner runs on this computer. The desktop ne
 bundles, copies or reads its files. The probe asks two routes in order, GET /health and
 then GET /extension-version. The engine counts as connected only when both answer with
 HTTP 200 and a JSON object. The version each route reports is shown as sent when it is
-a plain version string, and as "not reported" otherwise.
+a plain version string. The engine's /extension-version sends a hash of the extension
+files instead ({"hash": "<sha256 hex>"}), and that is shown in short form. Anything else
+reads "not reported".
+
+The normal way to use LaTeX is Overleaf in the browser. This engine is an optional local
+backup copy, for raw .tex files and local projects, and it is off unless the owner turns it
+on. OVERLEAF_LEAD and BACKUP_NOTE say so in one place, for every LaTeX surface.
+
+The HTTP engine is started by hand with node dist/server.js from its engine folder.
+START_HELP says so in one place, for every not-running text. The meridian-latex tools in
+Claude run a separate stdio server (dist/mcp-server.js), which never listens on this port.
 
 The requests go through the loopback GET in local_client, so they keep its limits: an
 http URL on 127.0.0.1, localhost or ::1, no redirects, no proxy, a response size cap
@@ -43,8 +53,31 @@ UNREACHABLE_MESSAGE = "The LaTeX engine could not be reached."
 TOO_LARGE_MESSAGE = "The LaTeX engine sent a response that is too large to read."
 UNCHECKED_ERROR_MESSAGE = "The LaTeX engine could not be checked."
 
+# How to start the HTTP engine. The one text every not-running message uses: the LaTeX panel, the Services page and
+# the Home card. It starts lowercase, so each surface can put it after its own words.
+START_COMMAND = "node dist/server.js"
+START_HELP = (
+    f"run {START_COMMAND} in a terminal opened in the engine folder of meridian-latex (the folder that holds dist, "
+    "next to the extension folder). The meridian-latex tools in Claude use a separate stdio server and do not start "
+    "this one."
+)
+
+# Overleaf in the browser is the normal way to use LaTeX, and the local engine is a backup. Every LaTeX surface (the
+# LaTeX panel, the Services page and the Home card) leads with OVERLEAF_LEAD and calls the engine a backup with
+# BACKUP_NOTE. BACKUP_START offers the start command as a choice, because a backup that is off is not a fault.
+OVERLEAF_LEAD = "LaTeX normally runs in Overleaf in your browser."
+BACKUP_NOTE = (
+    "The local engine is an optional backup copy for raw .tex files and local projects, "
+    "and it is off unless you turn it on."
+)
+BACKUP_START = f"if you want the local backup, {START_HELP}"
+
 # A reported version is a short token such as 1.4.0 or 0.9.2-beta. Anything else is not shown.
 _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
+# The engine's /extension-version hash: hex only, between a short git-style hash and a sha512. Shown as its first
+# HASH_SHORT_LENGTH characters.
+_HASH = re.compile(r"[0-9A-Fa-f]{7,128}")
+HASH_SHORT_LENGTH = 12
 
 _ERROR_MESSAGES = {
     "not_running": (ENGINE_NOT_RUNNING, NOT_RUNNING_MESSAGE),
@@ -91,10 +124,34 @@ def _json_answer(reply: Any) -> dict[str, Any]:
 
 
 def _version(payload: dict[str, Any]) -> str:
+    """A plain version string, else the short form of a hex hash, else NOT_REPORTED."""
     value = payload.get("version")
     if isinstance(value, str) and _VERSION.fullmatch(value):
         return value
+    digest = payload.get("hash")
+    if isinstance(digest, str) and _HASH.fullmatch(digest):
+        return f"{digest[:HASH_SHORT_LENGTH].lower()} (hash)"
     return NOT_REPORTED
+
+
+def address_text(base_url: object) -> str | None:
+    """The host and port of a loopback engine address, such as 127.0.0.1:8471, or None for any other address.
+
+    Only an address the probe would send to is named, and only its host and port, so a user name or another host is
+    never shown. An address with no port is named by its host alone.
+    """
+    if not isinstance(base_url, str):
+        return None
+    try:
+        local_client.assert_loopback(base_url)
+        parts = urllib.parse.urlsplit(base_url)
+        host, port = parts.hostname, parts.port
+    except (LocalClientError, ValueError):
+        return None
+    if host is None:
+        return None
+    shown = f"[{host}]" if ":" in host else host
+    return shown if port is None else f"{shown}:{port}"
 
 
 def port_text(base_url: object) -> str:
@@ -147,16 +204,23 @@ def probe_engine(base_url: str, timeout: float = PROBE_TIMEOUT, get: Callable[..
 
 
 __all__ = [
+    "BACKUP_NOTE",
+    "BACKUP_START",
     "ENGINE_CONNECTED",
     "ENGINE_ERROR",
     "ENGINE_NOT_ANSWERING",
     "ENGINE_NOT_RUNNING",
     "EXTENSION_VERSION_PATH",
+    "HASH_SHORT_LENGTH",
     "HEALTH_PATH",
     "NOT_REPORTED",
+    "OVERLEAF_LEAD",
     "PROBE_TIMEOUT",
+    "START_COMMAND",
+    "START_HELP",
     "UNKNOWN_PORT",
     "EngineStatus",
+    "address_text",
     "port_text",
     "probe_engine",
 ]
