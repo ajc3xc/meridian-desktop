@@ -2,7 +2,8 @@
 
 At the old default (about 506 px wide) the eight tab labels did not fit, so Qt hid some
 tabs behind scroll arrows and cut off one label. The window also opened too small for the
-Settings panel. These tests pin the fix.
+Settings panel. These tests pin the fix. The window now also fits the usable area of its
+screen, so on a small screen its size floor is its share of that area.
 """
 
 import dataclasses
@@ -13,11 +14,12 @@ from _fakes import MemoryKeyring
 from meridian_desktop import local_client
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
-from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, STATUS_MESSAGE, MainWindow
+from meridian_desktop.ui.main_window import DEFAULT_WINDOW_SIZE, SCREEN_SHARE, STATUS_MESSAGE, MainWindow
 from meridian_desktop.ui.projects_tab import default_sources
 from meridian_desktop.zotero_client import API_NOT_RUNNING, NOT_RUNNING_MESSAGE, ApiCheck, ZoteroStatus
 
-# The Settings panel's key row and pods table need at least this much room on first show.
+# The Settings panel's key row and pods table need at least this much room on first show, when the screen has it.
+# A smaller screen gives the window its full share instead (SCREEN_SHARE of the usable area, see test_window_placement).
 MIN_DEFAULT_WIDTH = 900
 MIN_DEFAULT_HEIGHT = 600
 
@@ -77,9 +79,13 @@ def _clipped_tabs(bar):
 
 
 def test_default_window_is_large_enough(qtbot, settings_path):
+    # The offscreen screen is 800 x 800, too small for 900 px, so here the frame must take its whole 90 percent share.
     window = _shown_window(qtbot, settings_path)
-    assert window.width() >= MIN_DEFAULT_WIDTH
-    assert window.height() >= MIN_DEFAULT_HEIGHT
+    available = window.screen().availableGeometry()
+    frame = window.frameGeometry()
+    assert available.contains(frame), f"the window frame {frame} is not inside the usable area {available}"
+    assert frame.width() >= min(MIN_DEFAULT_WIDTH, int(available.width() * SCREEN_SHARE))
+    assert frame.height() >= min(MIN_DEFAULT_HEIGHT, int(available.height() * SCREEN_SHARE))
 
 
 def test_every_tab_label_is_visible_at_the_default_size(qtbot, settings_path):
