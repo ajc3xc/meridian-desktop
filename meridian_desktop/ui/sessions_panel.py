@@ -20,8 +20,10 @@ and a result from an older read is dropped once a newer one has started. There a
   status line keep what they show.
 
 Whether the local server answered is decided in one place for both tabs: data_source.local_server_answers, the
-/health probe the Projects tab's resolve uses, reached through the provider's local_server_answers(url). The tab has
-no check of its own. When the probe says the server answered, the sessions route's answer is final, an error included.
+/health probe the Projects tab's resolve uses. A full read takes that answer from the same resolve that lists the
+projects (the provider's resolve_with_local_check), so one full read asks the local server once. A tick asks it once,
+through the provider's local_server_answers(url). The tab has no check of its own. When the probe says the server
+answered, the sessions route's answer is final, an error included.
 
 Outside local mode a change of project clears the table and says to press Refresh. It reads nothing. The status
 line names the source the rows came from.
@@ -281,6 +283,11 @@ class _Reads:
         # the same probe, so both tabs choose the same source. A plain callable has no probe, so its server is asked.
         answers: Callable[[str], bool] | None = getattr(project_provider, "local_server_answers", None)
         self._local_answers: Callable[[str], bool] = answers if answers is not None else (lambda _url: True)
+        # The projects and the local-server answer of one resolve. A full read reuses that answer, so it asks the server
+        # once. A plain callable gives no answer, so its full read asks the check itself.
+        self._resolve_with_check: Callable[[], tuple[Sequence[tuple[str, str]], bool]] | None = getattr(
+            project_provider, "resolve_with_local_check", None
+        )
 
     def watch_key(self) -> object:
         """The settings that choose the database file, as saved now, or None when the provider does not say."""
@@ -292,9 +299,12 @@ class _Reads:
             return None
 
     def collect_full(self, generation: int, selected: str) -> _Snapshot:
-        """Runs on a worker. Lists the projects once, then reads the sessions of the chosen project."""
+        """Runs on a worker. Lists the projects once, then reads the sessions of the chosen project.
+
+        The local-server answer of that project list is passed on, so the sessions read does not check the server again.
+        """
         claude = self._claude()
-        choices, failure = self._read_projects()
+        choices, failure, local_answered = self._read_projects()
         chosen = selected if choices is None else choose_project(selected, choices)
         if not chosen:
             if failure:
@@ -304,7 +314,7 @@ class _Reads:
             else:
                 message = PICK_TEXT
             return _Snapshot(generation, choices, "", SessionsResult(NO_PROJECT, message), claude)
-        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen), claude)
+        return _Snapshot(generation, choices, chosen, self._read_sessions(chosen, local_answered), claude)
 
     def collect_local(self, generation: int, selected: str) -> _Snapshot:
         """Runs on a worker. A local read: the local server only, for the picked project, and only in local mode.
@@ -331,26 +341,32 @@ class _Reads:
         except Exception:  # noqa: BLE001 - a listing must never fail the sessions read
             return ClaudeProcessesResult(claude_processes.UNAVAILABLE, claude_processes.UNAVAILABLE_MESSAGE)
 
-    def _read_projects(self) -> tuple[tuple[tuple[str, str], ...] | None, str]:
-        """(choices, "") on success. (None, message) when the project list could not be read.
+    def _read_projects(self) -> tuple[tuple[tuple[str, str], ...] | None, str, bool | None]:
+        """(choices, "", local_answered) on success, or (None, message, local_answered) when the list could not be read.
 
+        local_answered is whether the local server answered in the same resolve, or None when the provider does not say.
         The resolver's own message is shown as it is. Any other failure is named in plain words, never by class or value.
         """
         try:
-            pairs = [(pid, name) for pid, name in self._projects() if isinstance(pid, str) and pid.strip()]
+            if self._resolve_with_check is not None:
+                found, local_answered = self._resolve_with_check()
+            else:
+                found, local_answered = self._projects(), None
+            pairs = [(pid, name) for pid, name in found if isinstance(pid, str) and pid.strip()]
         except ProjectsUnresolved as exc:
-            return None, exc.message or PROJECTS_FAILED_TEXT
+            return None, exc.message or PROJECTS_FAILED_TEXT, exc.local_answered
         except Exception:  # noqa: BLE001 - a failed read is named in plain words, never by class or value
-            return None, PROJECTS_FAILED_TEXT
-        return tuple((pid.strip(), _plain(name) or pid.strip()) for pid, name in pairs), ""
+            return None, PROJECTS_FAILED_TEXT, None
+        return tuple((pid.strip(), _plain(name) or pid.strip()) for pid, name in pairs), "", local_answered
 
-    def _read_sessions(self, project_id: str) -> SessionsResult:
+    def _read_sessions(self, project_id: str, local_answered: bool | None = None) -> SessionsResult:
         """The picked project's sessions, in data_source.read_in_order: the order the Projects tab uses too.
 
-        Local mode: the local server first, when data_source.local_server_answers says it answered (the Projects tab's
-        check); its sessions answer is then final, an error included. Otherwise hosted when a token is saved, and its
-        answer is shown as it is, an error included. Only with no token saved is the database file read, read-only.
-        Hosted and tunnel modes: hosted only, never the local server or the file.
+        Local mode: the local server first, when it answered; its sessions answer is then final, an error included.
+        local_answered is the answer the project list read gave in the same refresh, so the check is not asked again.
+        None means that read gave no answer, so the check (data_source.local_server_answers) is asked here. Otherwise
+        hosted when a token is saved, and its answer is shown as it is, an error included. Only with no token saved is
+        the database file read, read-only. Hosted and tunnel modes: hosted only, never the local server or the file.
         """
         saved: list[tuple[str, str | None]] = []
         mode = self._mode()
@@ -363,7 +379,8 @@ class _Reads:
 
         def server() -> SessionsResult | None:
             url = self._local_url()
-            if not self._local_answers(url):
+            answered = self._local_answers(url) if local_answered is None else local_answered
+            if not answered:
                 return None
             return local_sessions(url, project_id, transport=self._local_transport)
 

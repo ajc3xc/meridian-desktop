@@ -722,9 +722,19 @@ def test_projects_and_sessions_choose_the_same_source_for_each_local_server_stat
         projects_tab.default_sources(secrets),
         list_hosted=lambda hosted_url, saved: hosted_client.list_projects(hosted_url, saved, transport=hosted),
     )
+    # Every local-server check, from either tab, is counted. The real probe still runs underneath.
+    checks = []
+    real_probe = sources.probe
 
-    # The Projects tab: the resolve its worker runs.
+    def counted_probe(probed_url):
+        checks.append(probed_url)
+        return real_probe(probed_url)
+
+    sources = dataclasses.replace(sources, probe=counted_probe)
+
+    # The Projects tab: the resolve its worker runs. It checks the local server once.
     projects = projects_tab._settings_resolution(store, sources)  # noqa: SLF001
+    projects_checks = len(checks)
     # The Sessions tab: the reads its worker runs, wired as the window wires them.
     reads = sessions_panel._Reads(  # noqa: SLF001
         main_window._saved_local_url(store),  # noqa: SLF001
@@ -736,7 +746,12 @@ def test_projects_and_sessions_choose_the_same_source_for_each_local_server_stat
         lambda: ClaudeProcessesResult(LISTED, "", ()),
     )
     full = reads.collect_full(1, "")
+    full_checks = len(checks) - projects_checks
     tick = reads.collect_local(2, PID)
+    tick_checks = len(checks) - projects_checks - full_checks
+    # Each refresh asks the local server once: the Projects tab, the Sessions full read (its project list read gives the
+    # answer, and the sessions read reuses it), and the Sessions tick. Nothing asks it a second time.
+    assert (projects_checks, full_checks, tick_checks) == (1, 1, 1)
 
     expected = _EXPECTED_SOURCE.get(state, SOURCE_HOSTED if token else SOURCE_FILE)
     assert projects.state == STATE_OK

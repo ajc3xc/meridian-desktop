@@ -32,9 +32,10 @@ local_client.list_projects, projects_reader.list_projects, token_store.get_token
 projects_reader.last_written), and tests pass fakes. The token goes only to the hosted client. It never appears in a
 Resolution, a message or an error.
 
-ProjectsProvider is the Sessions tab's view of the same resolve: the (id, name) pairs for its picker, the local-server
-check its local reads use, the database file its file read uses, and the two settings that name that file, so the tab
-can read again when either changes.
+ProjectsProvider is the Sessions tab's view of the same resolve: the (id, name) pairs for its picker, with the
+local-server answer of that same resolve (resolve_with_local_check), so a full read asks the server only once. It also
+has the local-server check its local reads use, the database file its file read uses, and the two settings that name
+that file, so the tab can read again when either changes.
 
 A failed read gives state "read_failed", with the chosen source and no rows. A HostedError
 (from hosted_client) gives its own fixed text, which holds no token, body or path. Any other
@@ -300,11 +301,15 @@ def resolve(settings: Settings, sources: DataSources) -> Resolution:
 
 
 class ProjectsUnresolved(Exception):
-    """The resolver found no projects to list. ``message`` is the resolver's own plain text, safe to show as it is."""
+    """The resolver found no projects to list. ``message`` is the resolver's own plain text, safe to show as it is.
 
-    def __init__(self, message: str) -> None:
+    ``local_answered`` is whether the local server answered in that resolve, or None when the resolve did not say.
+    """
+
+    def __init__(self, message: str, *, local_answered: bool | None = None) -> None:
         super().__init__(message)
         self.message = message
+        self.local_answered = local_answered
 
 
 class ProjectsProvider:
@@ -322,16 +327,28 @@ class ProjectsProvider:
         self._sources = sources
 
     def __call__(self) -> list[tuple[str, str]]:
+        pairs, _local_answered = self.resolve_with_local_check()
+        return pairs
+
+    def resolve_with_local_check(self) -> tuple[list[tuple[str, str]], bool]:
+        """The resolved projects as (id, name) pairs, and whether the local server answered in this one resolve.
+
+        One resolve asks the local server once. Its answer is returned here, so the Sessions full read reuses it and
+        does not ask again. Raises ProjectsUnresolved, carrying the same answer, when the resolve found no projects.
+        """
         outcome = resolve(self._load(), self._sources)
+        # A running server is the only source whose resolution names SOURCE_SERVER: resolve returns it only when the
+        # check answered, and asks no other source in that case.
+        local_answered = outcome.source == SOURCE_SERVER
         if outcome.state != STATE_OK:
-            raise ProjectsUnresolved(outcome.message)
+            raise ProjectsUnresolved(outcome.message, local_answered=local_answered)
         pairs: list[tuple[str, str]] = []
         for row in outcome.rows:
             pid = row.get("id")
             if isinstance(pid, str) and pid.strip():
                 name = row.get("name")
                 pairs.append((pid, name if isinstance(name, str) else ""))
-        return pairs
+        return pairs, local_answered
 
     def local_server_answers(self, local_url: str) -> bool:
         """data_source.local_server_answers with the probe resolve uses, so Sessions decides as Projects does.
