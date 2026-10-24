@@ -57,10 +57,10 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop import token_store, updater, zotero_client
-from meridian_desktop.data_source import STATE_OK, DataSources, resolve
+from meridian_desktop.data_source import DataSources, ProjectsProvider
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
@@ -159,26 +159,18 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
     return read
 
 
-def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str]]]:
+def _saved_projects(store: SettingsStore, sources: DataSources) -> ProjectsProvider:
     """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
 
-    When the resolver found no source to read, the provider raises ProjectsUnavailable. The Sessions tab then
-    says the projects could not be read, rather than that no projects exist.
+    When the resolver found no source to read, the provider raises data_source.ProjectsUnresolved with the resolver's
+    own message, and the Sessions tab shows that message. The provider also names the database file the Sessions
+    file read uses, and the settings that choose it. It holds the store, never the window.
     """
 
-    def read() -> list[tuple[str, str]]:
-        outcome = resolve(store.load().settings, sources)
-        if outcome.state != STATE_OK:
-            raise ProjectsUnavailable(outcome.message)
-        pairs: list[tuple[str, str]] = []
-        for row in outcome.rows:
-            pid = row.get("id")
-            if isinstance(pid, str) and pid.strip():
-                name = row.get("name")
-                pairs.append((pid, name if isinstance(name, str) else ""))
-        return pairs
+    def load() -> Settings:
+        return store.load().settings
 
-    return read
+    return ProjectsProvider(load, sources)
 
 
 def _saved_tools_status(store: SettingsStore) -> Callable[[], ToolsStatus]:

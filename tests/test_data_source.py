@@ -20,7 +20,6 @@ import pytest
 from _fakes import MemoryKeyring, QuietServer
 from meridian_desktop import data_source, hosted_client, local_client
 from meridian_desktop.data_source import (
-    NO_LOCAL_DATA_MESSAGE,
     NOT_SIGNED_IN_MESSAGE,
     SOURCE_FILE,
     SOURCE_HOSTED,
@@ -30,6 +29,7 @@ from meridian_desktop.data_source import (
     STATE_OK,
     STATE_READ_FAILED,
     DataSources,
+    no_local_data_message,
     resolve,
 )
 from meridian_desktop.settings_store import Settings
@@ -176,9 +176,9 @@ def test_local_mode_without_server_or_file_has_no_local_data(tmp_path, db_choice
     assert result.state == STATE_NO_LOCAL_DATA
     assert result.source is None
     assert result.rows == []
-    assert result.message == NO_LOCAL_DATA_MESSAGE
-    # Nothing is read, because there is no server and no file to read.
-    assert fakes.calls == ["probe"]
+    assert result.message == no_local_data_message(local_settings(db_path))
+    # Nothing is read, because there is no server, no hosted token and no file to read.
+    assert fakes.calls == ["probe", "get_token"]
 
 
 def test_hosted_mode_without_token_is_not_signed_in_and_makes_no_network_call(db_file, monkeypatch):

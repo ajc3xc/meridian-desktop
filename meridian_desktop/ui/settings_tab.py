@@ -16,7 +16,8 @@ shows the result in plain words.
 
 The local URL is checked with local_client.assert_loopback before anything is written. A value that is not an http
 loopback URL is refused inline, and the settings file is not touched. The database file is picked with a file dialog, and
-only its path is saved.
+only its path is saved. With no file chosen, the line names the core folder's data/meridian.db when it is there, since
+local mode then reads that file, and the dialog starts in that data folder.
 
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the main window calls
 refresh() after each save, so both always show the same saved mode.
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import hosted_client, token_store
 from meridian_desktop.api_keys import ApiKeys
+from meridian_desktop.data_source import core_database_path
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
@@ -93,6 +95,8 @@ LOAD_WARNING_TEXT = "Note from the settings file: {warning}"
 DB_DIALOG_TITLE = "Choose the Meridian database file"
 DB_FILE_FILTER = "SQLite database (*.db *.sqlite *.sqlite3);;All files (*)"
 NOT_CHOSEN_TEXT = "No database file chosen yet."
+# No file chosen, but the core folder's data/meridian.db is there, so local mode reads it.
+USING_CORE_FILE_TEXT = "Not chosen. Using {path}."
 LOCAL_URL_SAVED_TEXT = "Local URL saved."
 DB_SAVED_TEXT = "Database file saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
@@ -457,6 +461,8 @@ class SettingsTab(QWidget):
         self._save_url.clicked.connect(self._on_save_url_clicked)
         self._local_url.returnPressed.connect(self._on_save_url_clicked)
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
+        # A core folder found or chosen later changes which file local mode reads, so the database line reads it again.
+        self._actions.coreChanged.connect(self._show_db_path)
         # A saved core path turns the launch switches off, so the runner block on this tab shows them as saved now.
         self._client_setup.coreChanged.connect(self._runner.refresh_flags)
         self._actions.coreChanged.connect(self._on_core_changed)
@@ -472,7 +478,7 @@ class SettingsTab(QWidget):
         self._auto_update.blockSignals(True)  # showing the saved value must not save it again
         self._auto_update.setChecked(settings.auto_update)
         self._auto_update.blockSignals(False)
-        self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
+        self._show_db_path()
         self._refresh_token_status()
         self._runner.refresh_flags()
         self._keys.refresh()
@@ -600,9 +606,29 @@ class SettingsTab(QWidget):
         _set_message(self._url_message, LOCAL_URL_SAVED_TEXT)
 
     @Slot()
+    def _show_db_path(self) -> None:
+        """The chosen database file. With none chosen, the core folder's data/meridian.db when it is there."""
+        settings = self._store.load().settings
+        if settings.db_path:
+            self._db_path.setText(settings.db_path)
+            return
+        core_file = core_database_path(settings)
+        if core_file is not None and core_file.is_file():
+            self._db_path.setText(USING_CORE_FILE_TEXT.format(path=core_file))
+        else:
+            self._db_path.setText(NOT_CHOSEN_TEXT)
+
+    @Slot()
     def _on_choose_db_clicked(self) -> None:
-        current = self._store.load().settings.db_path
-        start_dir = str(Path(current).parent) if current else ""
+        settings = self._store.load().settings
+        current = settings.db_path
+        core_file = core_database_path(settings)
+        if current:
+            start_dir = str(Path(current).parent)
+        elif core_file is not None and core_file.parent.is_dir():
+            start_dir = str(core_file.parent)  # <core_checkout>/data, where the core keeps its database
+        else:
+            start_dir = ""
         chosen = self._choose_database(self, start_dir)
         if not chosen:
             return  # the dialog was cancelled, so nothing changes
@@ -627,6 +653,7 @@ __all__ = [
     "TEST_UNEXPECTED_TEXT",
     "TOKEN_NOT_SET_TEXT",
     "TOKEN_SET_TEXT",
+    "USING_CORE_FILE_TEXT",
     "SettingsTab",
     "describe_test_failure",
     "mode_text",
