@@ -16,16 +16,17 @@ is not cancelled, and if it finishes, its answer still shows unless a newer chec
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QHideEvent, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QHideEvent, QShowEvent, QTextDocument
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -43,8 +44,10 @@ from meridian_desktop.home_status import (
     ACTION_LAUNCH_ZOTERO,
     ACTION_RELEASE_PAGE,
     ACTION_SETTINGS,
+    CHECKING_HEADLINE,
     CardView,
     LocalFacts,
+    RowView,
     ServiceFacts,
     checked_text,
     checking_view,
@@ -68,7 +71,14 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
 from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import (
+    BlockLine,
+    block_html,
+    enable_widget_copy,
+    make_selectable,
+    paragraph_tops,
+    set_label_text,
+)
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, open_release_page
 from meridian_desktop.ui.zotero_panel import ask_start
 
@@ -90,15 +100,24 @@ LAUNCH_FAILED_TEXT = "Zotero did not launch ({}). Press Check now to see its sta
 API_READY_TEXT = "The local API answers now."
 API_NOT_READY_TEXT = "The local API is not answering yet. Zotero can take a little while to open. Press Check now in a moment."
 
-# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state.
+# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state. A card that has
+# focus (for Ctrl+C) shows it on its other three sides.
 CARD_STYLE = """
 QFrame[homeCard="true"] { border: 1px solid palette(mid); border-left-width: 4px; border-radius: 6px; }
+QFrame[homeCard="true"]:focus {
+    border-top-color: palette(highlight); border-right-color: palette(highlight); border-bottom-color: palette(highlight);
+}
 QFrame[homeCard="true"][tone="ok"] { border-left-color: #2e7d32; }
 QFrame[homeCard="true"][tone="attention"] { border-left-color: #b26a00; }
 QFrame[homeCard="true"][tone="checking"] { border-left-color: #1565c0; }
 QFrame[homeCard="true"][tone="off"] { border-left-color: palette(mid); }
 QFrame[homeCard="true"][tone="idle"] { border-left-color: palette(mid); }
 """
+# The gaps a card's rows had when each line was a label of its own: between a row and its detail line, between one row
+# and the next, and between a row and its button (pixels).
+ROW_DETAIL_GAP = 2
+ROW_GAP = 6
+ROW_BUTTON_GAP = 6
 
 
 # ----------------------------------------------------------------- the reads (run on the thread pool)
@@ -160,14 +179,6 @@ def _launch_zotero(client: Any, exe: str) -> tuple[str, bool]:
 
 # ----------------------------------------------------------------- one card
 
-def _clear(layout: QVBoxLayout) -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        if widget is not None:
-            widget.deleteLater()
-
-
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     label = QLabel(text, parent)
     label.setObjectName(name)
@@ -176,11 +187,35 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     return make_selectable(label)
 
 
+def _headline_point_size(font: QFont) -> float:
+    return font.pointSizeF() * 1.15 if font.pointSizeF() > 0 else 11.0
+
+
+def _line_height(text: str, font: QFont) -> int:
+    """The height ``text`` takes on lines of its own with no wrapping, as a label of its own showed it."""
+    document = QTextDocument()
+    document.setDocumentMargin(0)
+    document.setDefaultFont(font)
+    document.setPlainText(text)
+    return math.ceil(document.size().height())
+
+
 class _Card(QFrame):
-    """One status card: a title, a headline, a detail sentence, the time checked, rows, one action and a note.
+    """One status card: a title, a headline, a detail sentence, the time checked, a note, rows, and one action.
 
     ``work`` runs off the UI thread and returns the card's value. ``render`` turns that value and the time checked
     into a CardView. A card with no ``work`` is drawn by its owner (the Updates card reads a bar, and reads no thread).
+
+    A drag cannot cross from one label to the next, so every line of the card (title, headline, detail, checked line,
+    note and rows) is one selectable text block, home-<key>-text. Each line is a paragraph with the font and the gaps it
+    had as a label of its own, so one drag from the first line to the last selects them all and Ctrl+C copies them. A
+    row's button sits at the block's right edge, level with the row's first line, and the row's text keeps that room
+    free. Widgets put under the text (the tunnel's buttons) and the action button are not part of the block.
+
+    Each line also keeps a label of its own under its old name (home-<key>-headline and so on), never shown, for code
+    that reads one line. The card has a Copy action of its own too: in its right-click menu, and on Ctrl+C while the card
+    has focus. It copies the text the card shows, never a hidden line or a button's text. A redraw keeps a selection
+    whose text is still there (set_label_text).
     """
 
     def __init__(
@@ -209,6 +244,12 @@ class _Card(QFrame):
         self._action_generation = 0
         self._action_owner = object()
         self._action_done: Callable[[Any, str], None] | None = None
+        # True once the card shows a check's answer. A new check then keeps that answer on screen until the next one.
+        self._has_answer = False
+        self._shown_rows: tuple[RowView, ...] = ()
+        # Each row's button by row number, and the paragraph of the text block where each row starts.
+        self._row_buttons: dict[int, QPushButton] = {}
+        self._row_paragraphs: list[int] = []
 
         self._stall = QTimer(self)
         self._stall.setSingleShot(True)
@@ -217,39 +258,39 @@ class _Card(QFrame):
         shared_delivery().delivered.connect(self._on_delivered)
         shared_delivery().delivered.connect(self._on_action_delivered)
 
+        enable_widget_copy(self)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        heading = QLabel(title, self)
-        heading.setObjectName(f"home-{key}-title")
-        heading.setTextFormat(Qt.TextFormat.PlainText)
-        font = heading.font()
-        font.setBold(True)
-        heading.setFont(font)
-        layout.addWidget(make_selectable(heading))
-        self._headline = _label(self, f"home-{key}-headline")
-        headline_font = self._headline.font()
-        headline_font.setBold(True)
-        headline_font.setPointSizeF(headline_font.pointSizeF() * 1.15 if headline_font.pointSizeF() > 0 else 11.0)
-        self._headline.setFont(headline_font)
-        self._detail = _label(self, f"home-{key}-detail")
-        self._checked = _label(self, f"home-{key}-checked")
-        self._note = _label(self, f"home-{key}-note")
-        self._note.hide()
-        layout.addWidget(self._headline)
-        layout.addWidget(self._detail)
-        layout.addWidget(self._checked)
-        layout.addWidget(self._note)
+        # The one text block. A right-click on it opens the card's own menu, whose Copy copies the whole card.
+        self._text = make_selectable(QLabel(self))
+        self._text.setObjectName(f"home-{key}-text")
+        self._text.setTextFormat(Qt.TextFormat.RichText)
+        self._text.setWordWrap(True)
+        self._text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._text.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._text.installEventFilter(self)
+        layout.addWidget(self._text)
+        self._title = self._line("title", title)
+        self._headline = self._line("headline")
+        self._detail = self._line("detail")
+        self._checked = self._line("checked")
+        self._note = self._line("note")
         self._body = QVBoxLayout()
         layout.addLayout(self._body)
-        self._rows = QVBoxLayout()
-        self._rows.setSpacing(6)
-        layout.addLayout(self._rows)
         self._action = QPushButton(self)
         self._action.setObjectName(f"home-{key}-action")
         self._action.hide()
         self._action.clicked.connect(lambda _checked=False: self._on_action(self._action_key))
         layout.addWidget(self._action, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
+        self._draw_text()
+
+    def _line(self, name: str, text: str = "") -> QLabel:
+        """One line's own label, under its old name. It is never shown: the text block shows the line."""
+        label = _label(self, f"home-{self._key}-{name}", text)
+        label.hide()
+        return label
 
     # ------------------------------------------------------------ public
 
@@ -262,6 +303,9 @@ class _Card(QFrame):
 
         ``replace`` starts a new read even when one is running. The older answer is then dropped when it arrives, because
         the generation has moved on, so a read that began before the core was found cannot show after the newer one.
+
+        A card that already shows an answer keeps it, and its checked line says Checking until the new answer arrives, so
+        a selection in the card stays. A card with no answer yet shows Checking as its headline.
         """
         if self._work is None or (self._busy and not replace):
             return
@@ -269,7 +313,11 @@ class _Card(QFrame):
         self._generation += 1
         generation = self._generation
         self._stall.start()
-        self.show_view(checking_view())
+        if self._has_answer:
+            set_label_text(self._checked, CHECKING_HEADLINE)
+            self._draw_text()
+        else:
+            self.show_view(checking_view())
         submit(self._owner, generation, self._work)
 
     def run_action(self, work: Callable[[], Any], done: Callable[[Any, str], None]) -> None:
@@ -283,40 +331,112 @@ class _Card(QFrame):
         submit(self._action_owner, self._action_generation, work)
 
     def set_note(self, text: str) -> None:
-        self._note.setText(text)
-        self._note.setVisible(bool(text))
+        set_label_text(self._note, text)
+        self._draw_text()
 
     def show_view(self, view: CardView) -> None:
-        """Draw a CardView. Every field is plain text."""
-        self._headline.setText(view.headline)
-        self._detail.setText(view.detail)
-        self._detail.setVisible(bool(view.detail))
-        self._checked.setText(view.checked)
-        self._checked.setVisible(bool(view.checked))
-        self.setProperty("tone", view.tone)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        _clear(self._rows)
-        for index, row in enumerate(view.rows):
-            self._rows.addLayout(self._row(index, row.text, row.detail, row.action, row.action_label))
+        """Draw a CardView. Every field is plain text.
+
+        The text block is set again only when a line changed, and the row buttons are rebuilt only when the rows
+        changed, so a redraw that changes nothing keeps a selection, and one that changes a line keeps it when its text
+        is still there.
+        """
+        set_label_text(self._headline, view.headline)
+        set_label_text(self._detail, view.detail)
+        set_label_text(self._checked, view.checked)
+        if self.property("tone") != view.tone:
+            self.setProperty("tone", view.tone)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        if view.rows != self._shown_rows:
+            self._set_rows(view.rows)
+        self._draw_text()
         self._action_key = view.action
-        self._action.setText(view.action_label)
+        if self._action.text() != view.action_label:
+            self._action.setText(view.action_label)
         self._action.setVisible(bool(view.action))
 
-    def _row(self, index: int, text: str, detail: str, action: str, action_label: str) -> QHBoxLayout:
-        line = QHBoxLayout()
-        block = QVBoxLayout()
-        block.setSpacing(2)
-        block.addWidget(_label(self, f"home-{self._key}-row-{index}", text))
-        if detail:
-            block.addWidget(_label(self, f"home-{self._key}-row-{index}-detail", detail))
-        line.addLayout(block, 1)
-        if action:
-            button = QPushButton(action_label, self)
+    def _set_rows(self, rows: tuple[RowView, ...]) -> None:
+        """Replace the row buttons. An old button is hidden at once, so nothing presses it before it is deleted."""
+        for button in self._row_buttons.values():
+            button.hide()
+            button.deleteLater()
+        self._row_buttons = {}
+        for index, row in enumerate(rows):
+            if not row.action:
+                continue
+            button = QPushButton(row.action_label, self)
             button.setObjectName(f"home-{self._key}-row-{index}-action")
-            button.clicked.connect(lambda _checked=False, key=action: self._on_action(key))
-            line.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
-        return line
+            button.clicked.connect(lambda _checked=False, key=row.action: self._on_action(key))
+            button.resize(button.sizeHint())
+            button.show()
+            self._row_buttons[index] = button
+        self._shown_rows = rows
+
+    def _draw_text(self) -> None:
+        """Draw every line the card shows into its one text block, then put each row's button beside its row.
+
+        The gaps are the ones the lines had as labels of their own: the card's spacing between its lines, ROW_DETAIL_GAP
+        between a row and its detail, and ROW_GAP between rows. A row with a button keeps the button's width and
+        ROW_BUTTON_GAP free at its right, and is at least as tall as its button.
+        """
+        font = self._text.font()
+        spacing = max(self.layout().spacing(), 0)
+        lines = [
+            BlockLine(text, bold=bold, point_size=size, wrap=wrap)
+            for text, bold, size, wrap in (
+                (self._title.text(), True, 0.0, False),
+                (self._headline.text(), True, _headline_point_size(font), True),
+                (self._detail.text(), False, 0.0, True),
+                (self._checked.text(), False, 0.0, True),
+                (self._note.text(), False, 0.0, True),
+            )
+            if text
+        ]
+        lines = [replace(line, space_after=spacing) for line in lines]
+        if lines and not self._shown_rows:
+            lines[-1] = replace(lines[-1], space_after=0)
+        self._row_paragraphs = []
+        for index, row in enumerate(self._shown_rows):
+            button = self._row_buttons.get(index)
+            right = 0
+            pad = 0
+            if button is not None:
+                hint = button.sizeHint()
+                right = hint.width() + ROW_BUTTON_GAP
+                height = _line_height(row.text, font)
+                if row.detail:
+                    height += ROW_DETAIL_GAP + _line_height(row.detail, font)
+                pad = max(hint.height() - height, 0)
+            after = (ROW_GAP if index < len(self._shown_rows) - 1 else 0) + pad
+            self._row_paragraphs.append(len(lines))
+            if row.detail:
+                lines.append(BlockLine(row.text, space_after=ROW_DETAIL_GAP, right_margin=right))
+                lines.append(BlockLine(row.detail, space_after=after, right_margin=right))
+            else:
+                lines.append(BlockLine(row.text, space_after=after, right_margin=right))
+        set_label_text(self._text, block_html(lines, font))
+        self._place_row_buttons()
+
+    def _place_row_buttons(self) -> None:
+        """Put each row's button at the right edge of the text block, level with the first line of its row."""
+        if not self._row_buttons:
+            return
+        tops = paragraph_tops(self._text)
+        area = self._text.geometry()
+        for index, button in self._row_buttons.items():
+            if index >= len(self._row_paragraphs) or self._row_paragraphs[index] >= len(tops):
+                continue
+            size = button.sizeHint()
+            top = area.top() + tops[self._row_paragraphs[index]]
+            button.setGeometry(area.right() + 1 - size.width(), top, size.width(), size.height())
+            button.raise_()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+        # The text block moved or changed size, so its rows moved: the row buttons follow them.
+        if watched is self._text and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            self._place_row_buttons()
+        return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------ results (GUI thread)
 
@@ -332,6 +452,7 @@ class _Card(QFrame):
             return
         self._stall.stop()
         self._busy = False
+        self._has_answer = True
         value, failure = payload
         checked = checked_text(datetime.now())
         if failure is not None or self._render is None:
@@ -357,6 +478,8 @@ class _Card(QFrame):
         if not self._busy:
             return
         self._busy = False
+        # The stalled line is not an answer, so the next check shows Checking as its headline again.
+        self._has_answer = False
         self.show_view(stalled_view(STALL_SECONDS))
 
 

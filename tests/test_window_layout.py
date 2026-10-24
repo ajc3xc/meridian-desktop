@@ -103,13 +103,13 @@ def test_the_home_status_line_shows_on_home_and_does_not_stick_on_another_tab(qt
     qtbot.addWidget(window)
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
     home, settings = names.index("Home"), names.index("Settings")
-    assert window.statusBar().currentMessage() == STATUS_MESSAGE
+    assert window.status_message() == STATUS_MESSAGE
 
     window.tabs.setCurrentIndex(settings)
-    assert window.statusBar().currentMessage() == "", "Home's line is cleared on another tab"
+    assert window.status_message() == "", "Home's line is cleared on another tab"
 
     window.tabs.setCurrentIndex(home)
-    assert window.statusBar().currentMessage() == STATUS_MESSAGE
+    assert window.status_message() == STATUS_MESSAGE
 
 
 def test_home_zotero_card_checks_on_boot_and_keeps_the_window_size(qtbot, settings_path):

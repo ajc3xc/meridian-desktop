@@ -284,7 +284,7 @@ def test_failed_mode_save_reverts_selector(qtbot, settings_path, monkeypatch):
 
 def test_status_bar_text(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    assert window.statusBar().currentMessage() == STATUS
+    assert window.status_message() == STATUS
 
 
 def test_smoke_flag_returns_zero_and_prints_ok(settings_path, capsys):

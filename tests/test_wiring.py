@@ -413,7 +413,7 @@ def test_a_refused_check_hides_the_bar_and_says_why_in_the_status_bar(
     qtbot.waitUntil(lambda: bar.check_finished, timeout=5000)
 
     assert not _shown(bar)
-    assert window.statusBar().currentMessage() == "The update is not signed by the Meridian release key."
+    assert window.status_message() == "The update is not signed by the Meridian release key."
 
 
 def test_later_hides_the_staged_bar_until_the_next_launch(qtbot, settings_path, tmp_path, monkeypatch, frozen):
