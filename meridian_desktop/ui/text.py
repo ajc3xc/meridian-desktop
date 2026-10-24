@@ -4,25 +4,42 @@ Every label that shows text gets TextSelectableByMouse and TextSelectableByKeybo
 can highlight it and copy it. A read-only table gets a Copy action (Ctrl+C, and the right-click
 menu) that copies the selected cells as tab-separated text. Editable fields are not touched.
 
-A drag cannot cross from one label to the next, so a block made of several labels (a Home card)
-gets its own Copy action that copies all the text it shows. A label whose text is set again to
-the same text keeps its selection, so a redraw that changes nothing does not clear it. The labels
-of a message box are made selectable the same way, because the windows11 style lets the owner
-click only links in them.
+A drag cannot cross from one label to the next, so text that is read as one block (a Home card)
+is one label: block_html turns its lines into one rich-text document, each line a paragraph with
+the look it had as a label of its own. A block also gets its own Copy action that copies all the
+text it shows. set_label_text keeps a selection when the text changes elsewhere, so a redraw does
+not clear it. The labels of a message box are made selectable the same way, because the windows11
+style lets the owner click only links in them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from array import array
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TypeVar
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QTextDocumentFragment
+from PySide6.QtGui import (
+    QAction,
+    QFont,
+    QGuiApplication,
+    QKeySequence,
+    QTextBlockFormat,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextDocumentFragment,
+    QTextOption,
+)
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import QLabel, QLayout, QMessageBox, QPlainTextEdit, QTableWidget, QWidget
 
 SELECTABLE_TEXT = Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
 COPY_TEXT = "Copy"
+# A line break inside one paragraph, and a space no line breaks at. Copied text has a newline and a space for them.
+LINE_BREAK = "\u2028"
+NO_BREAK_SPACE = "\u00a0"
 
 _TextWidget = TypeVar("_TextWidget", QLabel, QPlainTextEdit)
 
@@ -36,10 +53,146 @@ def make_selectable(widget: _TextWidget) -> _TextWidget:
     return widget
 
 
+def _utf16(text: str) -> array:
+    """The text as UTF-16 code units, which is how Qt counts positions in it."""
+    return array("H", text.encode("utf-16-le"))
+
+
+def _kept_range(old: str, new: str, start: int, end: int) -> tuple[int, int] | None:
+    """Where the selection ``start``..``end`` of ``old`` falls in ``new``, or None when its text is gone.
+
+    The texts share a start and an end, and differ in one span between them. A selection before or after that span keeps
+    its text, so it moves with it. A selection that reaches into the span grows to cover the new span. A selection that
+    lies inside the span is dropped, because the text it selected is no longer there.
+    """
+    before, after = _utf16(old), _utf16(new)
+    prefix = 0
+    limit = min(len(before), len(after))
+    while prefix < limit and before[prefix] == after[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and before[-1 - suffix] == after[-1 - suffix]:
+        suffix += 1
+    changed_end = len(before) - suffix
+    if prefix <= start and end <= changed_end and prefix < changed_end:
+        return None
+    shift = len(after) - len(before)
+
+    def place(position: int, *, is_end: bool) -> int:
+        if position <= prefix:
+            return position
+        if position >= changed_end:
+            return position + shift
+        return changed_end + shift if is_end else prefix
+
+    return place(start, is_end=False), place(end, is_end=True)
+
+
 def set_label_text(label: QLabel, text: str) -> None:
-    """Show ``text`` in the label. The same text again is left alone, so a selection in it stays."""
-    if label.text() != text:
+    """Show ``text`` in the label. The same text again is left alone, so a selection in it stays.
+
+    New text keeps a selection whose text is still there: it moves with that text, and one that reaches into the part
+    that changed grows to cover it (see _kept_range). So a redraw that changes one line does not clear a selection.
+    """
+    if label.text() == text:
+        return
+    if not label.hasSelectedText():
         label.setText(text)
+        return
+    old_plain = _label_text(label)
+    start = label.selectionStart()
+    end = start + len(_utf16(label.selectedText()))
+    label.setText(text)
+    kept = _kept_range(old_plain, _label_text(label), start, end)
+    # setSelection lays the new text out first. A dropped selection is cleared the same way, because until the label
+    # lays out its new text, hasSelectedText still reports the old selection.
+    if kept is not None and kept[1] > kept[0]:
+        label.setSelection(kept[0], kept[1] - kept[0])
+    else:
+        label.setSelection(0, 0)
+
+
+@dataclass(frozen=True)
+class BlockLine:
+    """One line of a text block, drawn as one paragraph. ``text`` is plain text, and is shown as it is.
+
+    ``point_size`` 0 keeps the label's own size. ``wrap`` False keeps the line on one line. ``space_after`` is the gap
+    below the paragraph and ``right_margin`` the room kept free at its right (for a button beside it), in pixels.
+    """
+
+    text: str
+    bold: bool = False
+    point_size: float = 0.0
+    wrap: bool = True
+    space_after: float = 0.0
+    right_margin: float = 0.0
+
+
+def block_html(lines: Sequence[BlockLine], font: QFont) -> str:
+    """The lines as one rich-text document, for a QLabel in RichText format, in the label's ``font``.
+
+    Each line is inserted as plain text, so nothing in it is read as markup. A newline in a line is a line break inside
+    its paragraph, with no gap, as a plain-text label shows it.
+    """
+    document = QTextDocument()
+    document.setDocumentMargin(0)
+    document.setDefaultFont(font)
+    cursor = QTextCursor(document)
+    for index, line in enumerate(lines):
+        block_format = QTextBlockFormat()
+        block_format.setTopMargin(0)
+        block_format.setLeftMargin(0)
+        block_format.setBottomMargin(line.space_after)
+        block_format.setRightMargin(line.right_margin)
+        char_format = QTextCharFormat()
+        if line.bold:
+            char_format.setFontWeight(QFont.Weight.Bold)
+        if line.point_size > 0:
+            char_format.setFontPointSize(line.point_size)
+        if index == 0:
+            cursor.setBlockFormat(block_format)
+            cursor.setBlockCharFormat(char_format)
+        else:
+            cursor.insertBlock(block_format, char_format)
+        text = line.text.replace("\r\n", "\n").replace("\n", LINE_BREAK)
+        if not line.wrap:
+            text = text.replace(" ", NO_BREAK_SPACE)
+        cursor.insertText(text, char_format)
+    return document.toHtml()
+
+
+def paragraph_tops(label: QLabel) -> list[int]:
+    """Where each paragraph of a rich-text label starts, in the label's own coordinates.
+
+    The text is laid out as QLabel lays out its own: in the label's font, with no margin round the document, with the
+    label's wrap and alignment, and as wide as its contents less its margin. A label with an indent is not handled.
+    """
+    document = QTextDocument()
+    document.setDefaultFont(label.font())
+    document.setHtml(label.text())
+    option = document.defaultTextOption()
+    option.setAlignment(label.alignment())
+    option.setWrapMode(QTextOption.WrapMode.WordWrap if label.wordWrap() else QTextOption.WrapMode.ManualWrap)
+    document.setDefaultTextOption(option)
+    frame_format = document.rootFrame().frameFormat()
+    frame_format.setMargin(0)
+    document.rootFrame().setFrameFormat(frame_format)
+    margin = label.margin()
+    area = label.contentsRect().adjusted(margin, margin, -margin, -margin)
+    document.setTextWidth(area.width())
+    offset = 0.0
+    height = document.documentLayout().documentSize().height()
+    if label.alignment() & Qt.AlignmentFlag.AlignVCenter:
+        offset = max((area.height() - height) / 2, 0.0)
+    elif label.alignment() & Qt.AlignmentFlag.AlignBottom:
+        offset = max(area.height() - height, 0.0)
+    layout = document.documentLayout()
+    tops: list[int] = []
+    block = document.begin()
+    while block.isValid():
+        tops.append(area.top() + round(offset + layout.blockBoundingRect(block).top()))
+        block = block.next()
+    return tops
 
 
 def make_box_selectable(box: QMessageBox) -> QMessageBox:

@@ -6,13 +6,14 @@ no process, no real settings or keychain, and no modal dialog waits for an answe
 """
 
 import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication
+from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -37,12 +39,12 @@ from meridian_desktop.tools_status import YES, ToolRow, ToolsStatus
 from meridian_desktop.ui import app as ui_app
 from meridian_desktop.ui import client_setup_section, confirm, sessions_panel
 from meridian_desktop.ui.first_run import FirstRunOutcome
-from meridian_desktop.ui.home_tab import HomeDeps, HomeTab, _Card
+from meridian_desktop.ui.home_tab import API_NOT_READY_TEXT, LAUNCH_CANCELLED_TEXT, HomeDeps, HomeTab, _Card
 from meridian_desktop.ui.main_window import STATUS_MESSAGE, MainWindow
 from meridian_desktop.ui.projects_tab import ProjectsTab
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.sessions_panel import SessionsPanel
-from meridian_desktop.ui.text import SELECTABLE_TEXT, visible_text
+from meridian_desktop.ui.text import SELECTABLE_TEXT, set_label_text, visible_text
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
 LEFT = Qt.MouseButton.LeftButton
@@ -219,6 +221,14 @@ def _settled(qtbot, card, key, headline=None):
         return text not in ("", CHECKING_HEADLINE) and checked.startswith("Checked at")
 
     qtbot.waitUntil(done, timeout=5000)
+    _laid_out(qtbot, card, key)
+
+
+def _laid_out(qtbot, card, key) -> None:
+    """Wait until the card's layout has given its text block the height its text needs, so a drag lands on the lines."""
+    block = card.findChild(QLabel, f"home-{key}-text")
+    if block is not None:
+        qtbot.waitUntil(lambda: block.height() == block.heightForWidth(block.width()), timeout=5000)
 
 
 def _copy_action(widget):
@@ -227,41 +237,190 @@ def _copy_action(widget):
     return copies[0]
 
 
+def _block(card, key) -> QLabel:
+    """The card's one text block: every line of the card, selectable in one drag."""
+    block = card.findChild(QLabel, f"home-{key}-text")
+    assert block is not None, key
+    return block
+
+
+def _plain(text: str) -> str:
+    """A label's selected text as the clipboard gets it: paragraph and line breaks as newlines, no-break spaces as spaces."""
+    return text.replace("\u2029", "\n").replace("\u2028", "\n").replace("\u00a0", " ")
+
+
+def _first_and_last_line(card, key) -> tuple[QLabel, QLabel]:
+    """The labels that show the card's first line (its title) and its last line, as they sit on the card.
+
+    Only the card's own lines count (object names home-<key>-...), not the tunnel buttons' result line below them.
+    """
+    shown = [
+        label
+        for label in card.findChildren(QLabel)
+        if label.objectName().startswith(f"home-{key}-") and label.isVisible() and label.text()
+    ]
+    shown.sort(key=lambda label: (label.mapTo(card, QPoint(0, 0)).y(), label.mapTo(card, QPoint(0, 0)).x()))
+    return shown[0], shown[-1]
+
+
+def _scroll_into_view(card) -> None:
+    """Scroll Home so the whole card shows, as the owner does before dragging over it."""
+    scroll = card.parent()
+    while scroll is not None and not isinstance(scroll, QScrollArea):
+        scroll = scroll.parent()
+    scroll.ensureWidgetVisible(card, 0, 0)
+    QApplication.processEvents()
+
+
+def _drag_whole_card(window, card, key) -> None:
+    """Press on the first character of the card's first line and release at the end of its last line."""
+    _scroll_into_view(card)
+    first, last = _first_and_last_line(card, key)
+    end = QPoint(last.width() - 2, last.height() - 2)
+    _drag(window, first, QPoint(1, 3), last, end)
+
+
+CHECKED = r"Checked at \d\d:\d\d:\d\d\."
+
+# For each block type, the lines a drag over the whole card copies, top to bottom. Each entry is a regular expression.
+WHOLE_CARD_LINES = {
+    # headline, detail and checked line
+    "local": ["Local Meridian server", "Not running", r"Nothing listens on port 7878\. .+", CHECKED],
+    # the tunnel's buttons sit under its lines, and are not copied
+    "tunnel": ["Tunnel", "Not checked", r"The tunnel cannot be checked until .+", CHECKED],
+    # rows without buttons, each with a detail line
+    "services": [
+        "Services", "LaTeX engine not running", CHECKED,
+        r"LaTeX engine on port 8471\.", ".+",
+        r"Slot ports: 0 of 1 listening on 127\.0\.0\.1\.", r"A listening port only shows .+",
+    ],
+    "zotero": ["Zotero", "Not installed", r"Zotero was not found .+", CHECKED],
+    # rows with a button each
+    "tools": [
+        "AI clients and tools", "1 need attention", r"Checked\. No tool is started or stopped\.", CHECKED,
+        r"Codex: Meridian entries\. Not configured\.", r"Not in Codex's settings yet\.",
+        r"This computer: Local Meridian server\. Live\.", r"The local server answers\.",
+    ],
+    # no checked line: the Updates card reads the status bar's one check
+    "updates": ["Updates", r"Version 0\.2\.0", r"Update checks are off\. .+"],
+}
+
+
+def _assert_lines(copied: str, expected: list[str]) -> None:
+    lines = copied.split("\n")
+    assert len(lines) == len(expected), lines
+    for line, pattern in zip(lines, expected):
+        assert re.fullmatch(pattern, line), (pattern, line)
+
+
+@pytest.mark.parametrize("key", list(WHOLE_CARD_LINES))
+def test_one_drag_from_the_first_line_to_the_last_selects_the_whole_card_and_ctrl_c_copies_it(qtbot, tmp_path, key):
+    tab = _home(qtbot, tmp_path)
+    # Every card has its answer, so no card above this one still grows and moves it.
+    for other in ("local", "tunnel", "services", "zotero", "tools"):
+        _settled(qtbot, _card(tab, other), other)
+    card = _card(tab, key)
+    _laid_out(qtbot, card, key)
+
+    _drag_whole_card(tab, card, key)
+    copied = _ctrl_c(tab)
+
+    _assert_lines(copied, WHOLE_CARD_LINES[key])
+    block = _block(card, key)
+    assert QApplication.focusWidget() is block
+    assert _plain(block.selectedText()) == copied
+    for button in card.findChildren(QPushButton):
+        if button.text():
+            assert button.text() not in copied.split("\n"), button.objectName()
+
+
+@pytest.mark.parametrize(
+    "note",
+    [LAUNCH_CANCELLED_TEXT, f"Started Zotero.\n{API_NOT_READY_TEXT}"],
+    ids=["one-line-note", "two-line-note"],
+)
+def test_a_card_note_is_part_of_the_one_drag(qtbot, tmp_path, note):
+    tab = _home(qtbot, tmp_path)
+    card = _card(tab, "zotero")
+    _settled(qtbot, card, "zotero")
+    card.set_note(note)
+    _laid_out(qtbot, card, "zotero")
+
+    _drag_whole_card(tab, card, "zotero")
+    copied = _ctrl_c(tab)
+
+    _assert_lines(copied, WHOLE_CARD_LINES["zotero"] + [re.escape(line) for line in note.split("\n")])
+    assert _part(card, "zotero", "note").text() == note
+
+
+def test_row_buttons_sit_level_with_their_rows_at_the_right_and_a_click_runs_the_row_action(qtbot, tmp_path):
+    reads = []
+
+    def tools():
+        reads.append(1)
+        return _tools_with_rows()
+
+    tab = _home(qtbot, tmp_path, tools=tools)
+    card = _card(tab, "tools")
+    _settled(qtbot, card, "tools", "1 need attention")
+    block = _block(card, "tools")
+    # The label's own document, as QLabel laid it out, places each paragraph. Rows start at paragraph 4.
+    document = block.findChild(QTextDocument)
+    assert document is not None
+    layout = document.documentLayout()
+    paragraphs = []
+    paragraph = document.begin()
+    while paragraph.isValid():
+        paragraphs.append(paragraph)
+        paragraph = paragraph.next()
+    assert [p.text() for p in paragraphs[4:]] == [
+        "Codex: Meridian entries. Not configured.",
+        "Not in Codex's settings yet.",
+        "This computer: Local Meridian server. Live.",
+        "The local server answers.",
+    ]
+    block_box = block.geometry()
+    for index, first_paragraph in ((0, paragraphs[4]), (1, paragraphs[6])):
+        button = card.findChild(QPushButton, f"home-tools-row-{index}-action")
+        assert button.isVisible()
+        box = button.geometry()
+        assert box.top() == block_box.top() + round(layout.blockBoundingRect(first_paragraph).top())
+        assert box.right() == block_box.right()
+        # The row's text keeps the button's width free, so no word runs under the button.
+        assert first_paragraph.blockFormat().rightMargin() >= box.width()
+    # The last row ends below its button, so the button stays on the card.
+    last = card.findChild(QPushButton, "home-tools-row-1-action")
+    assert last.geometry().bottom() <= block_box.bottom()
+
+    # A real click on a row's button runs its action (Check again reads the tools once more).
+    _scroll_into_view(card)
+    _click(tab, last, last.rect().center())
+    qtbot.waitUntil(lambda: len(reads) == 2, timeout=5000)
+
+
 def test_a_home_card_copies_its_visible_text_from_the_right_click_menu(qtbot, tmp_path):
     tab = _home(qtbot, tmp_path)
     card = _card(tab, "tools")
     _settled(qtbot, card, "tools", "1 need attention")
     assert card.contextMenuPolicy() == Qt.ContextMenuPolicy.ActionsContextMenu
-    # A right-click on any of the card's lines opens the card's menu, so Copy is there wherever the owner clicks.
-    for label in card.findChildren(QLabel):
-        if label.objectName().startswith("home-tools-"):
-            assert label.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu, label.objectName()
+    # A right-click on the card's text opens the card's menu, so Copy is there wherever the owner clicks.
+    block = _block(card, "tools")
+    assert block.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu
 
     clipboard = QGuiApplication.clipboard()
     clipboard.setText(BEFORE)
     _copy_action(card).trigger()
     copied = clipboard.text()
 
-    lines = copied.split("\n")
-    assert lines[:3] == ["AI clients and tools", "1 need attention", "Checked. No tool is started or stopped."]
-    assert lines[3].startswith("Checked at ")
-    assert lines[4:] == [
-        "Codex: Meridian entries. Not configured.",
-        "Not in Codex's settings yet.",
-        "This computer: Local Meridian server. Live.",
-        "The local server answers.",
-    ]
+    _assert_lines(copied, WHOLE_CARD_LINES["tools"])
     # Button text and hidden widgets are never copied.
-    for button in card.findChildren(QPushButton):
-        if button.text():
-            assert button.text() not in lines, button.objectName()
     assert _part(card, "tools", "note").isHidden()
     assert copied == visible_text(card)
 
     # A right-click on a row's line opens the card's menu, and its Copy copies the whole card. The mouse's context menu
-    # event goes to the line itself: offscreen QTest sometimes hands the one it makes from a click to the top-level
-    # widget instead. The probe in the report makes the real right-click through the window.
-    row = _part(card, "tools", "row-1-detail")
+    # event goes to the text block itself: offscreen QTest sometimes hands the one it makes from a click to the
+    # top-level widget instead. The probe in the report makes the real right-click through the window.
+    row = block
     seen = []
 
     def use_open_menu():
@@ -277,7 +436,7 @@ def test_a_home_card_copies_its_visible_text_from_the_right_click_menu(qtbot, tm
     timer.timeout.connect(use_open_menu)
     timer.start()
     clipboard.setText(BEFORE)
-    point = QPoint(4, 4)
+    point = QPoint(4, row.height() - 4)
     event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, row.mapToGlobal(point))
     try:
         QApplication.sendEvent(row, event)  # the menu runs until the timer has used it
@@ -298,16 +457,36 @@ def test_ctrl_c_copies_the_whole_card_when_the_card_has_focus_and_only_the_selec
     assert QApplication.focusWidget() is card
     copied = _ctrl_c(tab)
     assert copied == visible_text(card)
-    assert copied.startswith("Local Meridian server\nNot running\n")
+    _assert_lines(copied, WHOLE_CARD_LINES["local"])
 
-    # Inside one line, Ctrl+C copies what was selected there, not the whole card.
+    # Inside the text, Ctrl+C copies what was selected there, not the whole card.
     detail = _part(card, "local", "detail")
-    _drag_over(tab, detail)
-    assert QApplication.focusWidget() is detail
+    _drag_over_paragraph(tab, _block(card, "local"), 2)
+    assert QApplication.focusWidget() is _block(card, "local")
     assert _ctrl_c(tab) == detail.text()
 
 
-def test_a_recheck_keeps_the_headline_and_a_selection_and_says_checking_in_the_checked_line(qtbot, tmp_path):
+def _paragraph_box(block: QLabel, index: int):
+    """Where paragraph ``index`` sits in the block, from the label's own document as QLabel laid it out."""
+    document = block.findChild(QTextDocument)
+    paragraph = document.begin()
+    for _ in range(index):
+        paragraph = paragraph.next()
+    return document.documentLayout().blockBoundingRect(paragraph).toAlignedRect()
+
+
+def _drag_over_paragraph(window, block: QLabel, index: int) -> None:
+    """Drag from the first character of one paragraph of the block to the end of its last line.
+
+    A press inside a selection drags the selected text, as in any text field, so a click below the text clears the
+    selection first.
+    """
+    _click(window, block, QPoint(block.width() - 2, block.height() - 1))
+    box = _paragraph_box(block, index)
+    _drag(window, block, QPoint(box.left() + 1, box.top() + 3), block, QPoint(box.right() - 1, box.bottom() - 2))
+
+
+def test_a_recheck_keeps_a_whole_card_selection_and_a_selection_of_one_line(qtbot, tmp_path):
     gate = threading.Event()
     calls = []
 
@@ -320,23 +499,63 @@ def test_a_recheck_keeps_the_headline_and_a_selection_and_says_checking_in_the_c
     tab = _home(qtbot, tmp_path, probe=probe)
     card = _card(tab, "local")
     _settled(qtbot, card, "local", "Not running")
-    detail = _part(card, "local", "detail")
-    _drag_over(tab, detail)
-    assert detail.hasSelectedText()
+    block = _block(card, "local")
+    _drag_whole_card(tab, card, "local")
+    assert _plain(block.selectedText()) == visible_text(card)
 
+    # The check runs: the checked line says Checking, and the whole card stays selected.
     card.check()
     assert _part(card, "local", "headline").text() == "Not running"
     assert _part(card, "local", "checked").text() == CHECKING_HEADLINE
-    assert detail.hasSelectedText()
+    assert visible_text(card).endswith("\n" + CHECKING_HEADLINE)
+    assert _plain(block.selectedText()) == visible_text(card)
 
+    # Its answer comes back with a new time, and the whole card is still selected.
     gate.set()
     _settled(qtbot, card, "local", "Not running")
     assert len(calls) == 2
-    assert detail.hasSelectedText(), "the same answer again leaves the selection alone"
-    assert _ctrl_c(tab) == detail.text()
+    assert _plain(block.selectedText()) == visible_text(card)
+    _assert_lines(_ctrl_c(tab), WHOLE_CARD_LINES["local"])
+
+    # A selection of one line above the checked line stays on that line through the next check.
+    _drag_over_paragraph(tab, block, 2)
+    detail = _part(card, "local", "detail").text()
+    assert _plain(block.selectedText()) == detail
+    card.check()
+    _settled(qtbot, card, "local", "Not running")
+    assert len(calls) == 3
+    assert _plain(block.selectedText()) == detail
+    assert _ctrl_c(tab) == detail
 
 
-def test_unchanged_rows_are_kept_and_changed_rows_replace_the_old_ones(qtbot):
+def test_new_label_text_keeps_a_selection_whose_text_is_still_there(qtbot):
+    label = QLabel()
+    qtbot.addWidget(label)
+    label.setTextInteractionFlags(SELECTABLE_TEXT)
+    label.setText("Status: ok.\nChecked at 10:00:00.\nLast line.")
+
+    label.setSelection(label.text().index("Last"), len("Last line."))
+    set_label_text(label, "Status: ok.\nChecked at 10:05:00 after a retry.\nLast line.")
+    assert label.selectedText() == "Last line."  # after the change: moved with its text
+
+    label.setSelection(label.text().index("10:05"), len("10:05:00"))
+    set_label_text(label, "Status: ok.\nChecking...\nLast line.")
+    assert not label.hasSelectedText(), "the selected words are gone, so nothing stays selected"
+
+    label.setSelection(0, len("Status: ok."))
+    set_label_text(label, "Status: ok.\nChecked at 10:06:00.\nLast line.")
+    assert label.selectedText() == "Status: ok."  # before the change: kept where it was
+
+    label.setSelection(label.text().index("Checked"), len("Checked at 10:06:00."))
+    set_label_text(label, "Status: ok.\nChecked at 10:07:30.\nLast line.")
+    assert label.selectedText() == "Checked at 10:07:30.", "a selected line whose time changed stays selected"
+
+    label.setSelection(0, len(label.text()))
+    set_label_text(label, "Status: down.\nChecked at 10:07:00.\nLast line.")
+    assert _plain(label.selectedText()) == label.text(), "a selection round a change grows with it"
+
+
+def test_unchanged_rows_keep_their_buttons_and_changed_rows_replace_the_old_ones(qtbot):
     parent = QWidget()
     qtbot.addWidget(parent)
     card = _Card("tools", "Tools", work=None, render=None, on_action=lambda key: None, parent=parent)
@@ -346,16 +565,16 @@ def test_unchanged_rows_are_kept_and_changed_rows_replace_the_old_ones(qtbot):
 
     first = CardView(headline="A", rows=(RowView("row a", action="x", action_label="Go"), RowView("row b")))
     card.show_view(first)
-    row = card.findChild(QLabel, "home-tools-row-0")
+    button = card.findChild(QPushButton, "home-tools-row-0-action")
+    assert button is not None and button.isVisible()
     card.show_view(first)
     _deferred_deletes()
-    assert card.findChild(QLabel, "home-tools-row-0") is row, "the same rows are not rebuilt"
+    assert card.findChild(QPushButton, "home-tools-row-0-action") is button, "the same rows are not rebuilt"
+    assert visible_text(card) == "Tools\nA\nrow a\nrow b"
 
     card.show_view(CardView(headline="B", rows=(RowView("row c"),)))
-    assert "row a" not in visible_text(card)
+    assert visible_text(card) == "Tools\nB\nrow c"
     _deferred_deletes()
-    rows = [label.text() for label in card.findChildren(QLabel) if label.objectName().startswith("home-tools-row-")]
-    assert rows == ["row c"]
     assert card.findChildren(QPushButton, "home-tools-row-0-action") == []
 
 
