@@ -354,7 +354,10 @@ def test_sessions_read_the_file_when_the_server_and_hosted_are_unavailable(qtbot
         ("already-idle", "idle", "claude-desktop"),
     ]
     status = status_of(panel)
-    assert status.startswith(f"3 session(s) from the database file. {WRITTEN_NOTE} Checked at ")
+    # The status line carries the snapshot note, and the time it was checked is on its own line below it.
+    assert status.startswith(f"3 session(s) from the database file. {WRITTEN_NOTE}")
+    assert "Checked at" not in status
+    assert panel.findChild(QLabel, "sessions-checked").text().startswith("Checked at ")
     assert hosted.calls == []
 
 
