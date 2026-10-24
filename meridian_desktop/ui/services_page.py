@@ -1,4 +1,7 @@
-"""Services tab: a read-only look at the local server, the LaTeX engine, the runner and the slot ports.
+"""Services tab: a read-only look at the local server, the LaTeX backup engine, the runner and the slot ports.
+
+The normal way to use LaTeX is Overleaf in the browser, so the LaTeX row leads with that, and calls the
+local engine what it is: an optional backup copy, off unless the owner turns it on.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The page makes no request,
 starts no timer and polls nothing when it is built. It checks each time it is shown, so a service
@@ -61,7 +64,7 @@ NOT_CHECKED = "not checked yet"
 CHECK_BUTTON_TEXT = "Check services"
 CHECKING_TEXT = "checking..."
 UNCHECKED_TEXT = (
-    "This page checks the local server, the LaTeX engine, the runner and the slot ports each time it "
+    "This page checks the local server, the LaTeX backup engine, the runner and the slot ports each time it "
     "is shown, and when you press Check services. Nothing here starts or stops a service."
 )
 FAILED_TEXT = "The {} check failed unexpectedly ({})."
@@ -77,7 +80,9 @@ STATE_NOT_MERIDIAN = "not Meridian"
 STATE_COULD_NOT_CHECK = "could not check"
 
 LOCAL_TITLE = "Local server health"
-ENGINE_TITLE = "LaTeX engine"
+ENGINE_TITLE = "LaTeX backup engine"
+# The LaTeX row's first line: Overleaf in the browser is the normal way, and the engine is a backup.
+ENGINE_LEAD = f"{latex_client.OVERLEAF_LEAD} {latex_client.BACKUP_NOTE}"
 RUNNER_TITLE = "Runner"
 FAILURE_LABELS = {
     "health": "local server health",
@@ -101,7 +106,8 @@ LOCAL_START = {
 }
 LOCAL_START_UNCHECKED = "start Meridian on this computer if it is not running, then press Check services."
 
-# LaTeX engine. The port comes from the engine address in the desktop settings.
+# LaTeX backup engine. The port comes from the engine address in the desktop settings. It is off unless the owner turns
+# it on, so not running offers the start command as a choice.
 ENGINE_SEEN = {
     STATE_RUNNING: "Port {port} is listening, and the engine answered both its health and extension-version checks.",
     STATE_NOT_RUNNING: "Port {port} is not listening, so no LaTeX engine is running there.",
@@ -109,15 +115,15 @@ ENGINE_SEEN = {
 }
 ENGINE_START = {
     STATE_RUNNING: "it is already running, so there is nothing to start.",
-    STATE_NOT_RUNNING: f"{latex_client.START_HELP} Then press Check services.",
-    STATE_NOT_MERIDIAN: "stop the other program on port {port}, then start the LaTeX engine you installed and press Check services.",
-    STATE_COULD_NOT_CHECK: "check that the LaTeX engine you installed is running on this computer, then press Check services.",
+    STATE_NOT_RUNNING: f"{latex_client.BACKUP_START} Then press Check services.",
+    STATE_NOT_MERIDIAN: f"stop the other program on port {{port}}, then {latex_client.START_HELP} Then press Check services.",
+    STATE_COULD_NOT_CHECK: "check that the local backup engine is running on this computer, then press Check services.",
 }
 ENGINE_START_LOOPBACK = (
     "change the engine address in the desktop settings to one on this computer, "
     "such as http://127.0.0.1:8471, then press Check services."
 )
-ENGINE_START_UNCHECKED = "start the LaTeX engine you installed on this computer if it is not running, then press Check services."
+ENGINE_START_UNCHECKED = f"{latex_client.BACKUP_START} Then press Check services."
 
 # Runner. The runner check runs one status command and names no port.
 RUNNER_PORT = "none (the runner check runs a status command)"
@@ -421,8 +427,10 @@ class _ChecksJob(QRunnable):
 
 
 # The lines of one row, in the order they are shown. A line's key is the row's prefix plus its suffix, so the state line
-# of the services-engine row is services-engine and its port line is services-engine-port.
+# of the services-engine row is services-engine and its port line is services-engine-port. Only the LaTeX row has a lead
+# line. An empty line is not shown.
 _ROW_LINES = (
+    ("lead", "-lead"),
     ("state", ""),
     ("port", "-port"),
     ("seen", "-seen"),
@@ -441,7 +449,7 @@ class _RowBlock:
     block: TextBlock
 
     def set(self, **lines: str) -> None:
-        """Set lines by field name (state, port, seen, version, checked, how_to_start). An empty line is not shown."""
+        """Set lines by field name (lead, state, port, seen, version, checked, how_to_start). An empty line is not shown."""
         suffixes = dict(_ROW_LINES)
         self.block.set_lines({f"{self.prefix}{suffixes[field]}": text for field, text in lines.items()})
 
@@ -487,7 +495,7 @@ class ServicesPage(QWidget):
         layout.addWidget(self._intro)
 
         self._local = self._row(layout, "services-health", LOCAL_TITLE, LOCAL_START_UNCHECKED)
-        self._engine_row = self._row(layout, "services-engine", ENGINE_TITLE, ENGINE_START_UNCHECKED)
+        self._engine_row = self._row(layout, "services-engine", ENGINE_TITLE, ENGINE_START_UNCHECKED, lead=ENGINE_LEAD)
         self._runner_row = self._row(layout, "services-runner", RUNNER_TITLE, RUNNER_START_UNCHECKED)
 
         self._ports_status = _label(self, "services-ports-status", f"Slot ports: {NOT_CHECKED}")
@@ -509,11 +517,12 @@ class ServicesPage(QWidget):
 
         self._check_button.clicked.connect(self._on_check_clicked)
 
-    def _row(self, layout: QVBoxLayout, prefix: str, title: str, unchecked_start: str) -> _RowBlock:
+    def _row(self, layout: QVBoxLayout, prefix: str, title: str, unchecked_start: str, lead: str = "") -> _RowBlock:
         frame = QFrame(self)
         frame.setObjectName(f"{prefix}-row")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         unchecked = {
+            "lead": lead,
             "state": f"{title}: {NOT_CHECKED}",
             "port": f"Port checked: {NOT_CHECKED}",
             "checked": f"Last checked: {NOT_CHECKED}",

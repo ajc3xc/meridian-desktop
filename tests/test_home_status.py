@@ -134,9 +134,9 @@ def test_services_engine_running_and_ports_counted():
         ports=(SlotPortResult("a", 1, True), SlotPortResult("b", 2, False), SlotPortResult("c", 3, True)),
     )
     view = services_view(facts)
-    assert view.headline == "LaTeX engine running"
+    assert view.headline == "LaTeX backup engine running"
     assert view.tone == TONE_OK
-    assert view.rows[0].text == "LaTeX engine on port 8471."
+    assert view.rows[0].text == "LaTeX normally runs in Overleaf in your browser. Local backup engine on port 8471."
     assert view.rows[1].text == "Slot ports: 2 of 3 listening on 127.0.0.1."
     _assert_no_old_words(view)
 
@@ -144,7 +144,7 @@ def test_services_engine_running_and_ports_counted():
 def test_services_engine_not_running_is_idle_not_an_error():
     facts = ServiceFacts(engine_url="http://127.0.0.1:8471", engine=_engine(ENGINE_NOT_RUNNING), ports=())
     view = services_view(facts)
-    assert view.headline == "LaTeX engine not running"
+    assert view.headline == "LaTeX backup engine off"
     assert view.tone == TONE_IDLE
     assert "node dist/server.js" in view.rows[0].detail
 

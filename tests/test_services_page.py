@@ -336,7 +336,7 @@ def test_services_tab_shows_one_row_per_service(qtbot, settings_path):
     assert _text(page, "services-health-checked") == "Last checked: 2026-10-19 14:03:22"
     assert _text(page, "services-health-start") == "How to start: it is already running, so there is nothing to start."
 
-    assert _text(page, "services-engine") == "LaTeX engine: running"
+    assert _text(page, "services-engine") == "LaTeX backup engine: running"
     assert _text(page, "services-engine-port") == f"Port checked: {ENGINE_PORT}"
     assert _text(page, "services-engine-checked") == "Last checked: 2026-10-19 14:03:22"
 
@@ -398,10 +398,10 @@ def test_unchecked_rows_say_so_and_still_say_how_to_start(qtbot, settings_path):
 
     assert _text(page, "services-intro") == UNCHECKED_TEXT
     assert _text(page, "services-health") == "Local server health: not checked yet"
-    assert _text(page, "services-engine") == "LaTeX engine: not checked yet"
+    assert _text(page, "services-engine") == "LaTeX backup engine: not checked yet"
     assert _text(page, "services-runner") == "Runner: not checked yet"
     assert _text(page, "services-health-checked") == f"Last checked: {NOT_CHECKED}"
-    assert _text(page, "services-engine-start").startswith("How to start: start the LaTeX engine")
+    assert _text(page, "services-engine-start").startswith("How to start: if you want the local backup, run ")
     assert _text(page, "services-runner-start").startswith("How to start: run python -m meridian.local_runner start")
     assert _text(page, "services-health-version") == ""  # an empty line is not shown
 
@@ -426,9 +426,9 @@ def test_not_listening_comes_from_a_refused_socket_for_both_addresses(qtbot, set
     ]
     assert _text(page, "services-health") == "Local server health: not running"
     assert _text(page, "services-health-seen") == "Port 7878 is not listening, so no local server is running there."
-    assert _text(page, "services-engine") == "LaTeX engine: not running"
+    assert _text(page, "services-engine") == "LaTeX backup engine: not running"
     assert _text(page, "services-engine-seen") == "Port 8471 is not listening, so no LaTeX engine is running there."
-    assert _text(page, "services-engine-start") == f"How to start: {latex_client.START_HELP} Then press Check services."
+    assert _text(page, "services-engine-start") == f"How to start: {latex_client.BACKUP_START} Then press Check services."
 
 
 def test_http_answers_decide_running_and_not_meridian(qtbot, settings_path, monkeypatch):
@@ -447,7 +447,7 @@ def test_http_answers_decide_running_and_not_meridian(qtbot, settings_path, monk
     _press(qtbot, page)
 
     assert _text(page, "services-health") == "Local server health: running"
-    assert _text(page, "services-engine") == "LaTeX engine: not Meridian"
+    assert _text(page, "services-engine") == "LaTeX backup engine: not Meridian"
     assert _text(page, "services-engine-seen") == "Port 8471 is listening, but the answer is not the LaTeX engine."
 
 
@@ -461,7 +461,7 @@ def test_a_timed_out_probe_reads_could_not_check(qtbot, settings_path, monkeypat
 
     assert _text(page, "services-health") == "Local server health: could not check"
     assert _text(page, "services-health-seen") == "Port 7878 could not be checked."
-    assert _text(page, "services-engine") == "LaTeX engine: could not check"
+    assert _text(page, "services-engine") == "LaTeX backup engine: could not check"
     assert _text(page, "services-engine-seen") == latex_client.TIMEOUT_MESSAGE
 
 
@@ -677,7 +677,7 @@ def test_no_row_shows_not_built_yet(qtbot, settings_path):
 FAILURE_CASES = [
     ("health", "services-health", "Local server health: could not check", "services-health-seen",
      "The local server health check failed unexpectedly (ValueError)."),
-    ("engine", "services-engine", "LaTeX engine: could not check", "services-engine-seen",
+    ("engine", "services-engine", "LaTeX backup engine: could not check", "services-engine-seen",
      "The LaTeX engine check failed unexpectedly (ValueError)."),
     ("runner", "services-runner", "Runner: could not check", "services-runner-seen",
      "The runner check failed unexpectedly (ValueError)."),
@@ -718,7 +718,7 @@ def test_each_failed_check_shows_its_own_failure_and_the_others_still_show(
     if failing != "health":
         assert _text(page, "services-health") == "Local server health: running"
     if failing != "engine":
-        assert _text(page, "services-engine") == "LaTeX engine: running"
+        assert _text(page, "services-engine") == "LaTeX backup engine: running"
     if failing != "runner":
         assert _text(page, "services-runner") == "Runner: running"
     if failing != "ports":

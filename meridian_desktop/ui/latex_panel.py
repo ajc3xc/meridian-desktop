@@ -1,4 +1,8 @@
-"""LaTeX engine panel for the Writing tab: one probe of the local engine, with both versions shown.
+"""LaTeX panel: Overleaf in the browser first, then one probe of the local backup engine, with both versions shown.
+
+The normal way to use LaTeX is Overleaf in the browser, so the panel leads with that. The local
+engine is an optional backup copy for raw .tex files and local projects, off unless the owner
+turns it on, and the rest of the panel is about that backup.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The panel makes no
 request when it is built. It probes each time it is shown, so an engine started while the
@@ -31,15 +35,13 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
-UNCHECKED_TEXT = "LaTeX engine: not checked yet"
-CHECKING_TEXT = "LaTeX engine: checking..."
-CONNECTED_TEXT = "LaTeX engine: running."
-NOT_CONNECTED_TEXT = "LaTeX engine: not running."
+UNCHECKED_TEXT = "Local backup engine: not checked yet"
+CHECKING_TEXT = "Local backup engine: checking..."
+CONNECTED_TEXT = "Local backup engine: running."
+NOT_CONNECTED_TEXT = "Local backup engine: not running."
 VERSION_UNAVAILABLE = "not available"
 FAILED_TEXT = "The check failed unexpectedly ({})."
-UNCHECKED_START = (
-    "start the LaTeX engine you installed on this computer if it is not running, then press Check again."
-)
+UNCHECKED_START = f"{latex_client.BACKUP_START} Then press Check again."
 
 
 @dataclass(frozen=True)
@@ -115,27 +117,25 @@ def extension_version_text(status: EngineStatus | None) -> str:
 
 
 def engine_start_text(status: EngineStatus | None, port: str) -> str:
-    """One plain sentence on how to start the engine, for what the probe found.
+    """How to start the local backup engine, for what the probe found.
 
-    ``port`` is the port the probe checked. It is used only for the states that name it.
+    The backup is off unless the owner turns it on, so not running is offered as a choice, not as a fault. ``port`` is
+    the port the probe checked. It is used only for the states that name it.
     """
     if status is None:
-        return "start the LaTeX engine you installed on this computer, then press Check again."
+        return f"{latex_client.BACKUP_START} Then press Check again."
     if status.connected:
         return "it is already running, so there is nothing to start."
     if status.state == latex_client.ENGINE_NOT_RUNNING:
-        return f"{latex_client.START_HELP} Then press Check again to check port {port}."
+        return f"{latex_client.BACKUP_START} Then press Check again to check port {port}."
     if status.state == latex_client.ENGINE_NOT_ANSWERING:
-        return (
-            f"stop the other program on port {port}, then start the LaTeX engine you installed "
-            "and press Check again."
-        )
+        return f"stop the other program on port {port}, then {latex_client.START_HELP} Then press Check again."
     if status.message == latex_client.NOT_LOOPBACK_MESSAGE:
         return (
             "change the engine address in the desktop settings to one on this computer, "
             "such as http://127.0.0.1:8471, then press Check again."
         )
-    return "check that the LaTeX engine you installed is running on this computer, then press Check again."
+    return "check that the local backup engine is running on this computer, then press Check again."
 
 
 class _ProbeJob(QRunnable):
@@ -165,7 +165,8 @@ class _ProbeJob(QRunnable):
 
 
 class LatexPanel(QWidget):
-    """The LaTeX section of the Writing tab: running or not, with both versions, in one selectable block of text."""
+    """The LaTeX section: Overleaf in the browser first, then the local backup engine (running or not, both versions),
+    all in one selectable block of text."""
 
     def __init__(
         self,
@@ -191,10 +192,13 @@ class LatexPanel(QWidget):
         layout = QVBoxLayout(self)
 
         # Every line is in one label, so one drag selects them all. The keys name the lines for set_lines and tests.
+        # Overleaf in the browser comes first, because that is the normal way. The rest is about the local backup.
         self._text = TextBlock(
             self,
             "latex-text",
             (
+                ("latex-lead", latex_client.OVERLEAF_LEAD),
+                ("latex-backup", latex_client.BACKUP_NOTE),
                 ("latex-status", UNCHECKED_TEXT),
                 ("latex-detail", ""),
                 ("latex-engine-version", engine_version_text(None)),

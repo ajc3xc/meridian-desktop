@@ -80,9 +80,10 @@ LOCAL_SERVER_TITLE = "Local server and startup"
 KEYS_TITLE = "Keys"
 CLIENT_SETUP_TITLE = "Client setup"
 DIAGNOSTICS_TITLE = "Diagnostics (logs)"
-# The LaTeX section label names the saved engine address (engine_url), host and port only.
-LATEX_SECTION_TEMPLATE = "LaTeX (local engine on {address})"
-LATEX_SECTION_NOT_LOCAL = "LaTeX (local engine; the saved engine address is not on this computer)"
+# The LaTeX section label leads with Overleaf in the browser, the normal way, and names the saved address of the local
+# backup engine (engine_url), host and port only.
+LATEX_SECTION_TEMPLATE = "LaTeX (Overleaf in the browser; local backup engine on {address})"
+LATEX_SECTION_NOT_LOCAL = "LaTeX (Overleaf in the browser; the saved backup engine address is not on this computer)"
 
 
 def latex_section_text(engine_url: object) -> str:

@@ -104,16 +104,16 @@ def _all_label_text(panel):
     [
         (CONNECTED_STATUS, "8471", "it is already running, so there is nothing to start."),
         (NOT_RUNNING_STATUS, "8471",
-         f"{latex_client.START_HELP} Then press Check again to check port 8471."),
+         f"{latex_client.BACKUP_START} Then press Check again to check port 8471."),
         (NOT_ANSWERING_STATUS, "8471",
-         "stop the other program on port 8471, then start the LaTeX engine you installed and press Check again."),
+         f"stop the other program on port 8471, then {latex_client.START_HELP} Then press Check again."),
         (EngineStatus(ENGINE_ERROR, latex_client.NOT_LOOPBACK_MESSAGE), "",
          "change the engine address in the desktop settings to one on this computer, "
          "such as http://127.0.0.1:8471, then press Check again."),
         (EngineStatus(ENGINE_ERROR, latex_client.TIMEOUT_MESSAGE), "8471",
-         "check that the LaTeX engine you installed is running on this computer, then press Check again."),
+         "check that the local backup engine is running on this computer, then press Check again."),
         (None, "",
-         "start the LaTeX engine you installed on this computer, then press Check again."),
+         f"{latex_client.BACKUP_START} Then press Check again."),
     ],
 )
 def test_engine_start_text_for_each_state(status, port, expected):
@@ -121,8 +121,8 @@ def test_engine_start_text_for_each_state(status, port, expected):
 
 
 def test_unchecked_panel_already_says_how_to_start():
-    assert UNCHECKED_START.startswith("start the LaTeX engine you installed on this computer")
-    assert UNCHECKED_TEXT == "LaTeX engine: not checked yet"
+    assert UNCHECKED_START == f"{latex_client.BACKUP_START} Then press Check again."
+    assert UNCHECKED_TEXT == "Local backup engine: not checked yet"
 
 
 # ----------------------------------------------------------- the panel, shown
@@ -133,7 +133,7 @@ def test_running_engine_shows_running_with_both_versions(qtbot, settings_path):
 
     _show_and_wait(qtbot, panel)
 
-    assert _line(panel, "latex-status") == CONNECTED_TEXT == "LaTeX engine: running."
+    assert _line(panel, "latex-status") == CONNECTED_TEXT == "Local backup engine: running."
     assert _line(panel, "latex-engine-version") == "Engine version: 1.4.0"
     assert _line(panel, "latex-extension-version") == "Extension version: 0.9.2"
     assert _line(panel, "latex-start") == "How to start: it is already running, so there is nothing to start."
@@ -147,12 +147,12 @@ def test_engine_not_listening_shows_not_running_from_a_refused_socket(qtbot, set
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, latex_client))
 
     assert opener.urls == [f"{LOCAL_URL}/health"]
-    assert _line(panel, "latex-status") == NOT_CONNECTED_TEXT == "LaTeX engine: not running."
+    assert _line(panel, "latex-status") == NOT_CONNECTED_TEXT == "Local backup engine: not running."
     assert _line(panel, "latex-detail") == latex_client.NOT_RUNNING_MESSAGE
     assert _line(panel, "latex-engine-version") == "Engine version: not available"
     assert _line(panel, "latex-extension-version") == "Extension version: not available"
     assert _line(panel, "latex-start") == (
-        f"How to start: {latex_client.START_HELP} Then press Check again to check port 8471."
+        f"How to start: {latex_client.BACKUP_START} Then press Check again to check port 8471."
     )
 
 
@@ -168,11 +168,10 @@ def test_the_start_sentence_names_the_port_from_the_configured_address(qtbot, se
 def test_another_program_on_the_port_reads_not_running_and_says_to_stop_it(qtbot, settings_path):
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(NOT_ANSWERING_STATUS)))
 
-    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-status") == "Local backup engine: not running."
     assert _line(panel, "latex-detail") == latex_client.NOT_ANSWERING_MESSAGE
     assert _line(panel, "latex-start") == (
-        "How to start: stop the other program on port 8471, then start the LaTeX engine you installed "
-        "and press Check again."
+        f"How to start: stop the other program on port 8471, then {latex_client.START_HELP} Then press Check again."
     )
 
 
@@ -185,7 +184,7 @@ def test_an_address_with_a_user_name_is_refused_and_the_user_name_is_not_shown(q
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, latex_client))
 
     assert opener.urls == []
-    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-status") == "Local backup engine: not running."
     assert _line(panel, "latex-detail") == latex_client.NOT_LOOPBACK_MESSAGE
     assert "someone" not in _all_label_text(panel)
     assert "change the engine address" in _line(panel, "latex-start")
@@ -201,10 +200,10 @@ def test_an_address_with_a_user_name_is_refused_and_the_user_name_is_not_shown(q
 def test_an_engine_that_could_not_be_checked_says_so_and_how_to_check_it(qtbot, settings_path, status, detail):
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(status)))
 
-    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-status") == "Local backup engine: not running."
     assert _line(panel, "latex-detail") == detail
     assert _line(panel, "latex-start") == (
-        "How to start: check that the LaTeX engine you installed is running on this computer, "
+        "How to start: check that the local backup engine is running on this computer, "
         "then press Check again."
     )
 
@@ -216,7 +215,7 @@ def test_a_failed_check_names_the_error_only_and_still_says_how_to_start(qtbot, 
     assert _line(panel, "latex-detail") == "The check failed unexpectedly (ValueError)."
     assert secret not in _all_label_text(panel)
     assert _line(panel, "latex-start") == (
-        "How to start: start the LaTeX engine you installed on this computer, then press Check again."
+        f"How to start: {latex_client.BACKUP_START} Then press Check again."
     )
 
 
@@ -228,7 +227,7 @@ def test_check_again_moves_from_running_to_not_running_and_updates_the_sentence(
     panel.findChild(QPushButton, "latex-check").click()
     qtbot.waitUntil(lambda: _settled(panel), timeout=5000)
 
-    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-status") == "Local backup engine: not running."
     assert "check port 8471" in _line(panel, "latex-start")
     assert len(client.calls) == 2
 

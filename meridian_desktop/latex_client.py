@@ -8,6 +8,10 @@ a plain version string. The engine's /extension-version sends a hash of the exte
 files instead ({"hash": "<sha256 hex>"}), and that is shown in short form. Anything else
 reads "not reported".
 
+The normal way to use LaTeX is Overleaf in the browser. This engine is an optional local
+backup copy, for raw .tex files and local projects, and it is off unless the owner turns it
+on. OVERLEAF_LEAD and BACKUP_NOTE say so in one place, for every LaTeX surface.
+
 The HTTP engine is started by hand with node dist/server.js from its engine folder.
 START_HELP says so in one place, for every not-running text. The meridian-latex tools in
 Claude run a separate stdio server (dist/mcp-server.js), which never listens on this port.
@@ -57,6 +61,16 @@ START_HELP = (
     "next to the extension folder). The meridian-latex tools in Claude use a separate stdio server and do not start "
     "this one."
 )
+
+# Overleaf in the browser is the normal way to use LaTeX, and the local engine is a backup. Every LaTeX surface (the
+# LaTeX panel, the Services page and the Home card) leads with OVERLEAF_LEAD and calls the engine a backup with
+# BACKUP_NOTE. BACKUP_START offers the start command as a choice, because a backup that is off is not a fault.
+OVERLEAF_LEAD = "LaTeX normally runs in Overleaf in your browser."
+BACKUP_NOTE = (
+    "The local engine is an optional backup copy for raw .tex files and local projects, "
+    "and it is off unless you turn it on."
+)
+BACKUP_START = f"if you want the local backup, {START_HELP}"
 
 # A reported version is a short token such as 1.4.0 or 0.9.2-beta. Anything else is not shown.
 _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
@@ -190,6 +204,8 @@ def probe_engine(base_url: str, timeout: float = PROBE_TIMEOUT, get: Callable[..
 
 
 __all__ = [
+    "BACKUP_NOTE",
+    "BACKUP_START",
     "ENGINE_CONNECTED",
     "ENGINE_ERROR",
     "ENGINE_NOT_ANSWERING",
@@ -198,6 +214,7 @@ __all__ = [
     "HASH_SHORT_LENGTH",
     "HEALTH_PATH",
     "NOT_REPORTED",
+    "OVERLEAF_LEAD",
     "PROBE_TIMEOUT",
     "START_COMMAND",
     "START_HELP",

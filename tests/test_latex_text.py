@@ -9,7 +9,10 @@ separate stdio server (dist/mcp-server.js) that never listens on the engine port
 3. the LaTeX panel and the Services page check again on every show, not only the first;
 4. the Settings LaTeX label names the saved engine address, not a fixed one;
 5. a left-button drag across a block of lines in the LaTeX panel or on the Services page highlights the whole block,
-   and Ctrl+C copies all of it, because each block is one selectable label.
+   and Ctrl+C copies all of it, because each block is one selectable label;
+6. the LaTeX panel, the Services page, the Home card and the Settings label lead with Overleaf in the browser, call the
+   local engine an optional backup that is off unless you turn it on, keep the exact start command, and add no new
+   control.
 
 The loopback engine fakes bind port 0, so the OS picks a free port. No test touches the real engine port. Offscreen Qt
 and a temp home, from conftest.
@@ -41,7 +44,7 @@ from meridian_desktop.latex_client import (
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.slot_ports import SLOT_PORTS, SlotPortResult
-from meridian_desktop.ui import services_page
+from meridian_desktop.ui import latex_panel, services_page
 from meridian_desktop.ui.latex_panel import CHECKING_TEXT, CONNECTED_TEXT, LatexPanel, TextBlock, engine_start_text
 from meridian_desktop.ui.services_page import HealthFacts, ServicesPage, engine_row
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, SettingsTab, latex_section_text
@@ -179,9 +182,10 @@ def test_the_services_page_not_running_text_uses_the_shared_start_text():
 def test_the_home_card_not_running_text_uses_the_shared_start_text():
     view = services_view(ServiceFacts(engine_url="http://127.0.0.1:8471", engine=NOT_RUNNING_STATUS, ports=()))
 
-    assert view.headline == "LaTeX engine not running"
+    assert view.headline == "LaTeX backup engine off"
     assert START_HELP in view.rows[0].detail
-    assert view.rows[0].detail.startswith("Nothing listens on that port. To start it, ")
+    assert view.rows[0].detail.startswith("Nothing listens on that port. ")
+    assert "To turn it on, " + START_HELP in view.rows[0].detail
     assert "Check services" not in view.rows[0].detail  # Home has no Check services button
     assert OLD_WORDS not in view.rows[0].detail
 
@@ -312,11 +316,11 @@ def test_the_services_page_checks_on_every_show_and_on_the_button(qtbot, setting
 @pytest.mark.parametrize(
     "url, label",
     [
-        ("http://127.0.0.1:8471", "LaTeX (local engine on 127.0.0.1:8471)"),
-        ("http://127.0.0.1:9999", "LaTeX (local engine on 127.0.0.1:9999)"),
-        ("http://localhost:8472/", "LaTeX (local engine on localhost:8472)"),
-        ("http://[::1]:8471", "LaTeX (local engine on [::1]:8471)"),
-        ("http://127.0.0.1", "LaTeX (local engine on 127.0.0.1)"),
+        ("http://127.0.0.1:8471", "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1:8471)"),
+        ("http://127.0.0.1:9999", "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1:9999)"),
+        ("http://localhost:8472/", "LaTeX (Overleaf in the browser; local backup engine on localhost:8472)"),
+        ("http://[::1]:8471", "LaTeX (Overleaf in the browser; local backup engine on [::1]:8471)"),
+        ("http://127.0.0.1", "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1)"),
     ],
 )
 def test_the_settings_latex_label_names_the_saved_loopback_address(url, label):
@@ -335,12 +339,12 @@ def test_the_settings_latex_label_names_the_saved_loopback_address(url, label):
 def test_the_settings_latex_label_never_shows_an_address_that_is_not_loopback(url, hidden):
     label = latex_section_text(url)
 
-    assert label == "LaTeX (local engine; the saved engine address is not on this computer)"
+    assert label == "LaTeX (Overleaf in the browser; the saved backup engine address is not on this computer)"
     assert hidden not in label
 
 
 def test_the_default_label_is_the_one_the_window_and_tests_look_for():
-    assert LATEX_SECTION == "LaTeX (local engine on 127.0.0.1:8471)"
+    assert LATEX_SECTION == "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1:8471)"
 
 
 def test_the_settings_tab_label_reads_the_engine_url_setting(qtbot, settings_path):
@@ -350,12 +354,12 @@ def test_the_settings_tab_label_reads_the_engine_url_setting(qtbot, settings_pat
     qtbot.addWidget(tab)
 
     texts = [label.text() for label in tab.findChildren(QLabel)]
-    assert "LaTeX (local engine on 127.0.0.1:9999)" in texts
+    assert "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1:9999)" in texts
     assert LATEX_SECTION not in texts
 
     store.save(Settings(engine_url="http://localhost:8475"))
     tab.refresh()
-    assert tab.findChild(QLabel, "settings-latex-section").text() == "LaTeX (local engine on localhost:8475)"
+    assert tab.findChild(QLabel, "settings-latex-section").text() == "LaTeX (Overleaf in the browser; local backup engine on localhost:8475)"
 
 
 # ----------------------------------------------------------------- 5. one drag selects a whole block, Ctrl+C copies it
@@ -482,3 +486,118 @@ def test_a_text_block_keeps_its_selection_when_its_lines_are_set_to_the_same_tex
     assert block.line("b") == "Second line"
     with pytest.raises(KeyError):
         block.set_lines({"unknown": "text"})
+
+
+# ----------------------------------------------------------------- 6. Overleaf in the browser first, the engine a backup
+
+
+def _leads_with_overleaf(text):
+    """The first line names Overleaf in the browser, and the text calls the local engine a backup that is off."""
+    first = text.splitlines()[0]
+    return "Overleaf" in first and "browser" in first and "backup" in text and "off unless you turn it on" in text
+
+
+def test_the_shared_texts_lead_with_overleaf_and_call_the_engine_an_optional_backup():
+    assert "Overleaf" in latex_client.OVERLEAF_LEAD and "browser" in latex_client.OVERLEAF_LEAD
+    note = latex_client.BACKUP_NOTE
+    assert "optional backup" in note and "raw .tex files" in note and "local projects" in note
+    assert "off unless you turn it on" in note
+    assert latex_client.BACKUP_START == f"if you want the local backup, {START_HELP}"
+
+
+def test_the_latex_panel_leads_with_overleaf_before_it_is_checked(qtbot, settings_path):
+    panel = LatexPanel(SettingsStore(settings_path), client=_FakeEngineClient(NOT_RUNNING_STATUS))
+    qtbot.addWidget(panel)
+    text = panel.findChild(TextBlock, "latex-text").text()
+
+    assert _leads_with_overleaf(text), text
+    assert text.splitlines()[:2] == [latex_client.OVERLEAF_LEAD, latex_client.BACKUP_NOTE]
+    assert START_COMMAND in _line(panel, "latex-start")
+
+
+@pytest.mark.parametrize("status", [NOT_RUNNING_STATUS, CONNECTED_STATUS])
+def test_the_latex_panel_leads_with_overleaf_after_a_check(qtbot, settings_path, status):
+    panel = _shown_panel(qtbot, settings_path, status)
+    text = panel.findChild(TextBlock, "latex-text").text()
+
+    assert _leads_with_overleaf(text), text
+    assert _line(panel, "latex-status").startswith("Local backup engine: ")
+
+
+def test_the_latex_panel_not_running_text_offers_the_backup_with_the_exact_command(qtbot, settings_path):
+    panel = _shown_panel(qtbot, settings_path, NOT_RUNNING_STATUS)
+
+    assert _line(panel, "latex-status") == "Local backup engine: not running."
+    start = _line(panel, "latex-start")
+    assert start == f"How to start: {latex_client.BACKUP_START} Then press Check again to check port 8471."
+    assert "node dist/server.js" in start and "engine folder" in start
+    assert "stdio server" in start  # the Claude meridian-latex tools use a separate server
+
+
+def test_the_services_engine_row_leads_with_overleaf_and_calls_the_engine_a_backup(qtbot, settings_path):
+    page = _services_page(qtbot, settings_path, _Recorder(NOT_RUNNING_STATUS))
+    block = page.findChild(TextBlock, "services-engine-text")
+    assert _leads_with_overleaf(block.text()), block.text()  # before any check
+
+    page.resize(900, 900)
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.waitUntil(lambda: not page.busy, timeout=5000)
+
+    assert _leads_with_overleaf(block.text()), block.text()
+    assert block.line("services-engine") == "LaTeX backup engine: not running"
+    assert block.line("services-engine-start") == (
+        f"How to start: {latex_client.BACKUP_START} Then press Check services."
+    )
+    # The other rows are not about LaTeX, so they carry no Overleaf line.
+    assert "Overleaf" not in page.findChild(TextBlock, "services-health-text").text()
+    assert "LaTeX backup engine" in page.findChild(QLabel, "services-intro").text()
+
+
+def test_the_home_card_leads_with_overleaf_and_reads_off_when_the_backup_is_not_running():
+    view = services_view(ServiceFacts(engine_url="http://127.0.0.1:8471", engine=NOT_RUNNING_STATUS, ports=()))
+
+    assert view.headline == "LaTeX backup engine off"
+    assert view.tone == home_status.TONE_IDLE  # off is the normal state, not a fault
+    assert view.rows[0].text == f"{latex_client.OVERLEAF_LEAD} Local backup engine on port 8471."
+    assert view.rows[0].detail == (
+        f"Nothing listens on that port. {latex_client.BACKUP_NOTE} To turn it on, {START_HELP}"
+    )
+
+
+@pytest.mark.parametrize("engine, failure", [(CONNECTED_STATUS, ""), (None, "OSError")])
+def test_the_home_card_leads_with_overleaf_in_every_engine_state(engine, failure):
+    view = services_view(
+        ServiceFacts(engine_url="http://127.0.0.1:8471", engine=engine, engine_failure=failure, ports=())
+    )
+
+    assert view.rows[0].text.startswith(latex_client.OVERLEAF_LEAD)
+    assert "backup" in view.rows[0].text
+
+
+def test_the_settings_latex_label_leads_with_overleaf():
+    assert LATEX_SECTION == "LaTeX (Overleaf in the browser; local backup engine on 127.0.0.1:8471)"
+    assert latex_section_text("http://example.com:8471") == (
+        "LaTeX (Overleaf in the browser; the saved backup engine address is not on this computer)"
+    )
+
+
+def test_no_latex_text_still_says_the_engine_you_installed():
+    texts = [engine_start_text(status, "8471") for status in (
+        None,
+        NOT_RUNNING_STATUS,
+        CONNECTED_STATUS,
+        EngineStatus(latex_client.ENGINE_NOT_ANSWERING, latex_client.NOT_ANSWERING_MESSAGE),
+        EngineStatus(latex_client.ENGINE_ERROR, latex_client.TIMEOUT_MESSAGE),
+    )]
+    texts += [latex_panel.UNCHECKED_START, services_page.ENGINE_START_UNCHECKED, *services_page.ENGINE_START.values()]
+    for text in texts:
+        assert "you installed" not in text, text
+
+
+def test_no_open_overleaf_button_setting_or_start_control_is_added(qtbot, settings_path):
+    panel = _shown_panel(qtbot, settings_path, NOT_RUNNING_STATUS)
+    page = _shown_services_page(qtbot, settings_path, NOT_RUNNING_STATUS)
+
+    assert [button.text() for button in panel.findChildren(QPushButton)] == ["Check again"]
+    assert [button.text() for button in page.findChildren(QPushButton)] == [services_page.CHECK_BUTTON_TEXT]
