@@ -36,6 +36,11 @@ Tunnel mode reads projects the same way Hosted does. Its top bar shows one line 
 state (from one read-only status call, made when the mode is switched to Tunnel and at start in
 Tunnel mode), the tools that need the tunnel, and how to start it by hand. The top bar has no
 control that starts, stops or restarts anything.
+
+The window opens inside the usable area of its screen (the screen less the taskbar), centred, with its title bar on
+screen: 1280 x 780 where that fits, and at most 90 percent of the usable width and height where it does not. When the
+window moves to another screen, or its screen's usable area changes, a window larger than the usable area shrinks to
+it, and a title bar above its top moves down. Content that does not fit scrolls.
 """
 
 from __future__ import annotations
@@ -44,7 +49,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, Qt, Slot
+from PySide6.QtCore import QMargins, QPoint, QRect, QSize, QThreadPool, QTimer, Qt, Slot
+from PySide6.QtGui import QScreen, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -102,9 +108,66 @@ MODE_DESCRIPTIONS = {
     TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
-# The window opens at this size (width, height). The five tab labels fit at 1280 px, and Home scrolls its cards
-# below that height, so no card is cut off on a short window.
+# The window opens at this size (width, height) when the screen has room for it. The five tab labels fit at 1280 px,
+# and Home scrolls its cards below that height, so no card is cut off on a short window.
 DEFAULT_WINDOW_SIZE = (1280, 780)
+# On a smaller screen the window opens at most this share of the usable width and height, so its frame and title bar
+# stay on screen with a little room around them.
+SCREEN_SHARE = 0.9
+
+
+def _start_within(start: int, length: int, low: int, length_available: int) -> int:
+    """The start of a span of ``length`` moved as little as it can to lie inside ``length_available`` from ``low``.
+
+    When the span is longer than the room, it starts at ``low``, so a window's left edge and title bar stay on screen.
+    """
+    return max(low, min(start, low + length_available - length))
+
+
+def initial_window_rect(available: QRect, frame: QMargins, preferred: QSize, minimum: QSize) -> QRect:
+    """The window's rectangle on first show, as setGeometry takes it (the area inside the frame). Pure: no widget.
+
+    ``available`` is the usable area of the screen (QScreen.availableGeometry: the screen less the taskbar), and
+    ``frame`` is the border and title bar around the window. The frame is at most SCREEN_SHARE of the usable width and
+    height, the window is at most ``preferred`` and at least ``minimum``, and the frame is centred in the usable area.
+    Only a ``minimum`` too large for the usable area makes the frame leave it, and then the frame's top-left corner is
+    the usable area's, so the title bar stays on screen.
+    """
+    horizontal = frame.left() + frame.right()
+    vertical = frame.top() + frame.bottom()
+    width = min(preferred.width(), int(available.width() * SCREEN_SHARE) - horizontal)
+    height = min(preferred.height(), int(available.height() * SCREEN_SHARE) - vertical)
+    size = QSize(width, height).expandedTo(minimum).expandedTo(QSize(1, 1))
+    frame_width, frame_height = size.width() + horizontal, size.height() + vertical
+    left = _start_within(
+        available.left() + (available.width() - frame_width) // 2, frame_width, available.left(), available.width()
+    )
+    top = _start_within(
+        available.top() + (available.height() - frame_height) // 2, frame_height, available.top(), available.height()
+    )
+    return QRect(QPoint(left + frame.left(), top + frame.top()), size)
+
+
+def kept_window_rect(available: QRect, current: QRect, frame: QMargins, minimum: QSize) -> QRect:
+    """The window's rectangle after it moved to another screen, or its screen's usable area changed. Pure: no widget.
+
+    ``current`` is the window's rectangle as geometry() gives it. The window keeps its place and size where it can. A
+    window wider or taller than the usable area shrinks to it (never below ``minimum``) and moves inside it on that
+    side, and a title bar above the top of the usable area moves down to it. A window that fits but sits partly off a
+    side, as while it is dragged to the next screen, is left where it is.
+    """
+    horizontal = frame.left() + frame.right()
+    vertical = frame.top() + frame.bottom()
+    room = QSize(available.width() - horizontal, available.height() - vertical)
+    size = current.size().boundedTo(room).expandedTo(minimum)
+    left = current.left() - frame.left()
+    top = current.top() - frame.top()
+    if size.width() < current.width():
+        left = _start_within(left, size.width() + horizontal, available.left(), available.width())
+    if size.height() < current.height():
+        top = _start_within(top, size.height() + vertical, available.top(), available.height())
+    top = max(top, available.top())
+    return QRect(QPoint(left + frame.left(), top + frame.top()), size)
 
 
 def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
@@ -331,9 +394,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
         # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
-        # may not shrink below the full bar, so every tab label stays visible.
+        # may not shrink below the full bar, so every tab label stays visible. The five labels need about 550 px,
+        # well inside a small laptop screen, so this minimum stays.
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
+        # The size asked for. The first show fits it to the usable area of the screen (see showEvent).
         self.resize(*DEFAULT_WINDOW_SIZE)
+        self._placed = False
+        self._watched_screen: QScreen | None = None
 
         self.show_status(STATUS_MESSAGE)
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -351,6 +418,100 @@ class MainWindow(QMainWindow):
         if self._runner_actions.locating or self._saved_mode != TUNNEL_MODE:
             return
         self._start_tunnel_check()
+
+    # ----------------------------------------------------------- size and place on screen
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """At the first show, fit the window inside the usable area of its screen, centred, and start watching it."""
+        super().showEvent(event)
+        if self._placed:
+            return
+        self._placed = True
+        self._place_on_screen()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.screenChanged.connect(self._on_screen_changed)
+        self._watch_screen(self.screen())
+        # Some systems report the title bar's height only once the window is on screen. Check the frame again then.
+        # A child timer, not QTimer.singleShot with a bound method: that would hold the window until it fired, so a
+        # window closed at once would not be freed by reference counting.
+        recheck = QTimer(self)
+        recheck.setSingleShot(True)
+        recheck.timeout.connect(self._recheck_after_show)
+        recheck.start(0)
+
+    def _sized_by_state(self) -> bool:
+        """A maximised, full-screen or minimised window is sized by the system, so it is never moved here."""
+        return self.isMaximized() or self.isFullScreen() or self.isMinimized()
+
+    def _frame_margins(self) -> QMargins:
+        """The border and title bar around the window, as the system reports them (zero until it knows them)."""
+        frame, inner = self.frameGeometry(), self.geometry()
+        return QMargins(
+            inner.left() - frame.left(),
+            inner.top() - frame.top(),
+            frame.right() - inner.right(),
+            frame.bottom() - inner.bottom(),
+        )
+
+    def _minimum_window_size(self) -> QSize:
+        return self.minimumSizeHint().expandedTo(self.minimumSize())
+
+    def _place_on_screen(self) -> None:
+        """Size the window to its screen's usable area (see initial_window_rect) and centre it there."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        self.setGeometry(
+            initial_window_rect(
+                screen.availableGeometry(), self._frame_margins(), self.size(), self._minimum_window_size()
+            )
+        )
+
+    @Slot()
+    def _recheck_after_show(self) -> None:
+        """Place the window again if its real frame, now known, leaves the usable area of its screen."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        if not screen.availableGeometry().contains(self.frameGeometry()):
+            self._place_on_screen()
+
+    def _watch_screen(self, screen: QScreen | None) -> None:
+        """Follow changes to the usable area of the window's screen, and stop following the screen it left."""
+        if screen is self._watched_screen:
+            return
+        if self._watched_screen is not None:
+            try:
+                self._watched_screen.availableGeometryChanged.disconnect(self._on_available_changed)
+            except (RuntimeError, TypeError):
+                pass  # the screen was removed, or the connection is already gone
+        self._watched_screen = screen
+        if screen is not None:
+            screen.availableGeometryChanged.connect(self._on_available_changed)
+
+    @Slot(QScreen)
+    def _on_screen_changed(self, screen: QScreen) -> None:
+        """The window moved to another screen. Keep it no larger than that screen, with its title bar on it."""
+        self._watch_screen(screen)
+        self._keep_on_screen()
+
+    @Slot(QRect)
+    def _on_available_changed(self, _available: QRect) -> None:
+        """The usable area of the window's screen changed, as when the resolution, scale or taskbar changes."""
+        self._keep_on_screen()
+
+    def _keep_on_screen(self) -> None:
+        """Shrink a window larger than its screen's usable area, and move a title bar above it down (kept_window_rect)."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        current = self.geometry()
+        kept = kept_window_rect(
+            screen.availableGeometry(), current, self._frame_margins(), self._minimum_window_size()
+        )
+        if kept != current:
+            self.setGeometry(kept)
 
     # ----------------------------------------------------------- building
 
@@ -420,10 +581,15 @@ class MainWindow(QMainWindow):
         self.tunnel_status_label = make_selectable(QLabel(parent))
         self.tunnel_status_label.setObjectName("tunnel-mode-status")
         self.tunnel_status_label.setTextFormat(Qt.TextFormat.PlainText)
-        bar.addWidget(self.tunnel_status_label)
+        # The top bar's lines wrap. A label that does not wrap is as wide as its text at the least, and a settings
+        # warning can join one problem per key, so the window could not shrink to a small screen.
+        self.tunnel_status_label.setWordWrap(True)
+        # It takes the spare width, so it stays on one line wherever the window has room for it.
+        bar.addWidget(self.tunnel_status_label, 1)
 
         self.settings_warning = make_selectable(QLabel(parent))
         self.settings_warning.setObjectName("settings-warning")
+        self.settings_warning.setWordWrap(True)
         if result.warning:
             self.settings_warning.setText(f"Settings: {result.warning}")
         else:
