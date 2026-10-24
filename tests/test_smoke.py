@@ -34,9 +34,9 @@ from _fakes import MemoryKeyring
 from meridian_desktop import __main__ as entry
 from meridian_desktop import local_client, projects_reader, settings_store
 from meridian_desktop.data_source import (
-    NO_LOCAL_DATA_MESSAGE,
     NOT_SIGNED_IN_MESSAGE,
     DataSources,
+    no_local_data_message,
 )
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
@@ -62,6 +62,8 @@ EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
+# The no-data message for a saved Settings(mode="local"): default local URL, no database file, no core folder.
+NO_LOCAL_DATA_MESSAGE = no_local_data_message(Settings(mode="local"))
 
 # The core projects table. executor_config and agent_instructions are present so a test can
 # prove the Projects tab never shows them. Inserted oldest first, so the expected order differs.
