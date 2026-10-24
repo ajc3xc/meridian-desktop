@@ -3,17 +3,23 @@
 Each test drives the widget through its window handle, the way a real mouse does: a press, moves with the button held,
 and a release, then Ctrl+C through the same window. It then reads the clipboard. Offscreen Qt, fakes only: no socket,
 no process, no real settings or keychain, and no modal dialog waits for an answer.
+
+Every test here runs in the window's own font (UI_FONT_FILES), set for the test and taken away after it. The offscreen
+platform has no font of its own, so without one each character is a wide box, and the cards' widths would depend on
+whether an earlier test in the run had loaded a font.
 """
 
+import contextlib
 import json
 import re
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QTextDocument
+from PySide6.QtGui import QContextMenuEvent, QFont, QFontDatabase, QGuiApplication, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -61,6 +67,52 @@ LEFT = Qt.MouseButton.LeftButton
 NO_KEYS = Qt.KeyboardModifier.NoModifier
 BEFORE = "<<before>>"
 PID = "5787cc92-ba7d-4788-b17c-28ab7938b839"
+# The window's font on Windows, then a fallback, at the size the window uses.
+UI_FONT_FILES = (Path("C:/Windows/Fonts/segoeui.ttf"), Path("C:/Windows/Fonts/arial.ttf"))
+UI_FONT_POINT_SIZE = 9
+
+
+@contextlib.contextmanager
+def _window_font():
+    """Load the first of UI_FONT_FILES that is there and make it the application font. On exit the file is taken out of
+    the font database again and the application font is the one before. Yields the file's font id, or -1 for none."""
+    previous = QFont(QApplication.font())
+    added = -1
+    for candidate in UI_FONT_FILES:
+        added = QFontDatabase.addApplicationFont(str(candidate)) if candidate.is_file() else -1
+        families = QFontDatabase.applicationFontFamilies(added) if added >= 0 else []
+        if families:
+            QApplication.setFont(QFont(families[0], UI_FONT_POINT_SIZE))
+            break
+        if added >= 0:
+            QFontDatabase.removeApplicationFont(added)
+            added = -1
+    try:
+        yield added
+    finally:
+        if added >= 0:
+            QFontDatabase.removeApplicationFont(added)
+        QApplication.setFont(previous)
+
+
+@pytest.fixture(autouse=True)
+def ui_font(qapp) -> bool:
+    """Each test runs in the window's font, whatever an earlier test loaded, and no later test sees it (_window_font).
+    True when one of UI_FONT_FILES was there to set."""
+    with _window_font() as added:
+        yield added >= 0
+
+
+def test_the_window_font_is_taken_away_again_after_the_test(qapp):
+    before = QFont("Sans Serif", 13)
+    QApplication.setFont(before)
+    with _window_font() as added:
+        if added < 0:
+            pytest.skip("none of the window's font files is on this computer")
+        assert QApplication.font().family() == QFontDatabase.applicationFontFamilies(added)[0]
+        assert QApplication.font().pointSize() == UI_FONT_POINT_SIZE
+    assert QFontDatabase.applicationFontFamilies(added) == [], "the font file is out of the font database again"
+    assert QApplication.font() == before
 
 
 # ----------------------------------------------------------------- a mouse and a keyboard, through the window handle
