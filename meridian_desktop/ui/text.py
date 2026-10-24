@@ -161,11 +161,11 @@ def block_html(lines: Sequence[BlockLine], font: QFont) -> str:
     return document.toHtml()
 
 
-def paragraph_tops(label: QLabel) -> list[int]:
-    """Where each paragraph of a rich-text label starts, in the label's own coordinates.
+def _laid_out(label: QLabel) -> tuple[QTextDocument, float, float]:
+    """The label's rich text laid out as QLabel lays out its own, with the y where the text starts and its height.
 
-    The text is laid out as QLabel lays out its own: in the label's font, with no margin round the document, with the
-    label's wrap and alignment, and as wide as its contents less its margin. A label with an indent is not handled.
+    The text is laid out in the label's font, with no margin round the document, with the label's wrap and alignment,
+    and as wide as its contents less its margin. A label with an indent is not handled.
     """
     document = QTextDocument()
     document.setDefaultFont(label.font())
@@ -186,13 +186,29 @@ def paragraph_tops(label: QLabel) -> list[int]:
         offset = max((area.height() - height) / 2, 0.0)
     elif label.alignment() & Qt.AlignmentFlag.AlignBottom:
         offset = max(area.height() - height, 0.0)
+    return document, area.top() + offset, height
+
+
+def paragraph_tops(label: QLabel) -> list[int]:
+    """Where each paragraph of a rich-text label starts, in the label's own coordinates (see _laid_out)."""
+    document, top, _height = _laid_out(label)
     layout = document.documentLayout()
     tops: list[int] = []
     block = document.begin()
     while block.isValid():
-        tops.append(area.top() + round(offset + layout.blockBoundingRect(block).top()))
+        tops.append(round(top + layout.blockBoundingRect(block).top()))
         block = block.next()
     return tops
+
+
+def text_bottom(label: QLabel) -> int:
+    """Where a rich-text label's text ends, in the label's own coordinates (see _laid_out).
+
+    A label leaves out its last paragraph's bottom margin, so this is where the last line ends. Room kept under the text
+    is the label's bottom contents margin, below this point.
+    """
+    _document, top, height = _laid_out(label)
+    return round(top + height)
 
 
 def make_box_selectable(box: QMessageBox) -> QMessageBox:

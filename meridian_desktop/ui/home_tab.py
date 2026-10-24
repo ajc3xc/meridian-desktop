@@ -83,6 +83,7 @@ from meridian_desktop.ui.text import (
     make_selectable,
     paragraph_tops,
     set_label_text,
+    text_bottom,
 )
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, open_release_page
 from meridian_desktop.ui.zotero_panel import ask_start
@@ -213,6 +214,34 @@ def _line_height(text: str, font: QFont) -> int:
     return math.ceil(document.size().height())
 
 
+class _CardControls(ScopeControls):
+    """A runner's Start, Stop and Restart on a Home card (ScopeControls), whose note and result lines are the card's.
+
+    ScopeControls shows its gate note and its last result in labels of its own, under its buttons. A drag cannot cross
+    from the card's text block into another label, so here those two labels are never shown. They keep their text under
+    their names (tunnel-control-result, home-local-control-note and so on) for code that reads it, and the card draws
+    the same lines into its one text block, under the buttons (_Card.add_controls). ``linesChanged`` is emitted each
+    time either line may have changed. The buttons, the questions they ask and the calls they run are ScopeControls'
+    own, unchanged.
+    """
+
+    linesChanged = Signal()
+
+    def lines(self) -> tuple[str, ...]:
+        """The lines ScopeControls shows under its buttons: the gate note, then the last result, each when it is set."""
+        return tuple(label.text() for label in (self._note, self._result) if label.text())
+
+    def refresh_enabled(self) -> None:
+        super().refresh_enabled()
+        self._note.hide()
+        self.linesChanged.emit()
+
+    def _show(self, text: str) -> None:
+        super()._show(text)
+        self._result.hide()
+        self.linesChanged.emit()
+
+
 class _Card(QFrame):
     """One status card: a title, a headline, a detail sentence, the time checked, a note, rows, and one action.
 
@@ -220,10 +249,12 @@ class _Card(QFrame):
     into a CardView. A card with no ``work`` is drawn by its owner (the Updates card reads a bar, and reads no thread).
 
     A drag cannot cross from one label to the next, so every line of the card (title, headline, detail, checked line,
-    note and rows) is one selectable text block, home-<key>-text. Each line is a paragraph with the font and the gaps it
-    had as a label of its own, so one drag from the first line to the last selects them all and Ctrl+C copies them. A
-    row's button sits at the block's right edge, level with the row's first line, and the row's text keeps that room
-    free. Widgets put under the text (the tunnel's buttons) and the action button are not part of the block.
+    note, rows, and the note and result lines under a runner's buttons) is one selectable text block, home-<key>-text.
+    Each line is a paragraph with the font and the gaps it had as a label of its own, so one drag from the first line to
+    the last selects them all and Ctrl+C copies them. A row's button sits at the block's right edge, level with the
+    row's first line, and the row's text keeps that room free. A runner's Start, Stop and Restart (add_controls) sit in
+    a gap of the block under the card's own lines, where they sat before, and their note and result lines follow them
+    in the block. Widgets put under the text (the tunnel's Open Settings) and the action button are not part of it.
 
     Each line also keeps a label of its own under its old name (home-<key>-headline and so on), never shown, for code
     that reads one line. The card has a Copy action of its own too: in its right-click menu, and on Ctrl+C while the card
@@ -265,6 +296,9 @@ class _Card(QFrame):
         # Each row's button by row number, and the paragraph of the text block where each row starts.
         self._row_buttons: dict[int, QPushButton] = {}
         self._row_paragraphs: list[int] = []
+        # A runner's buttons (add_controls), and the paragraph of the text block where their first line starts (-1: none).
+        self._controls: _CardControls | None = None
+        self._control_paragraph = -1
 
         self._stall = QTimer(self)
         self._stall.setSingleShot(True)
@@ -310,8 +344,18 @@ class _Card(QFrame):
     # ------------------------------------------------------------ public
 
     def add_body(self, widget: QWidget) -> None:
-        """Put a widget (the tunnel's control buttons) under the card's text."""
+        """Put a widget (the tunnel's Open Settings) under the card's text."""
         self._body.addWidget(widget)
+
+    def add_controls(self, controls: _CardControls) -> None:
+        """Put a runner's Start, Stop and Restart under the card's own lines, and their note and result lines under the
+        buttons, in the card's one text block. The buttons are the card's child, placed over a gap in the block."""
+        if controls.parentWidget() is not self:
+            controls.setParent(self)
+            controls.show()
+        self._controls = controls
+        controls.linesChanged.connect(self._draw_text)
+        self._draw_text()
 
     @property
     def busy(self) -> bool:
@@ -403,7 +447,9 @@ class _Card(QFrame):
 
         The gaps are the ones the lines had as labels of their own: the card's spacing between its lines, ROW_DETAIL_GAP
         between a row and its detail, and ROW_GAP between rows. A row with a button keeps the button's width and
-        ROW_BUTTON_GAP free at its right, and is at least as tall as its button.
+        ROW_BUTTON_GAP free at its right, and is at least as tall as its button. A runner's buttons get the card's
+        spacing and their own height under the card's own lines, and their note and result lines follow with the
+        spacing they had in the runner's own layout. The block is at least as wide as the buttons, as the card was.
         """
         font = self._text.font()
         spacing = max(self.layout().spacing(), 0)
@@ -440,12 +486,35 @@ class _Card(QFrame):
                 lines.append(BlockLine(row.detail, space_after=after, right_margin=right))
             else:
                 lines.append(BlockLine(row.text, space_after=after, right_margin=right))
+        controls = self._controls
+        self._control_paragraph = -1
+        if controls is not None:
+            # The gap for the buttons, under the card's own lines, then the lines the buttons' own layout showed under them.
+            # The layout is brought up to date first, so a button just shown or hidden counts in its size.
+            controls.layout().activate()
+            control_lines = controls.lines()
+            inner = max(controls.layout().spacing(), 0)
+            gap = spacing + controls.sizeHint().height() + (inner if control_lines else 0)
+            lines[-1] = replace(lines[-1], space_after=lines[-1].space_after + gap)
+            if control_lines:
+                self._control_paragraph = len(lines)
+            for number, text in enumerate(control_lines):
+                lines.append(BlockLine(text, space_after=inner if number < len(control_lines) - 1 else 0))
+        # A label leaves out its last paragraph's bottom margin, so the room under the last line (for a row's button or
+        # a runner's buttons) is the block's bottom contents margin instead.
+        tail = math.ceil(lines[-1].space_after)
+        lines[-1] = replace(lines[-1], space_after=0)
+        if self._text.contentsMargins().bottom() != tail:
+            self._text.setContentsMargins(0, 0, 0, tail)
         set_label_text(self._text, block_html(lines, font))
-        self._place_row_buttons()
+        if controls is not None:
+            self._text.setMinimumWidth(max(self._text.minimumSizeHint().width(), controls.minimumSizeHint().width()))
+        self._place_buttons()
 
-    def _place_row_buttons(self) -> None:
-        """Put each row's button at the right edge of the text block, level with the first line of its row."""
-        if not self._row_buttons:
+    def _place_buttons(self) -> None:
+        """Put each row's button at the right edge of the text block, level with the first line of its row, and a
+        runner's buttons across the block, in the gap above their note and result lines (or at the block's foot)."""
+        if not self._row_buttons and self._controls is None:
             return
         tops = paragraph_tops(self._text)
         area = self._text.geometry()
@@ -456,11 +525,20 @@ class _Card(QFrame):
             top = area.top() + tops[self._row_paragraphs[index]]
             button.setGeometry(area.right() + 1 - size.width(), top, size.width(), size.height())
             button.raise_()
+        controls = self._controls
+        if controls is not None:
+            height = controls.sizeHint().height()
+            if 0 <= self._control_paragraph < len(tops):
+                top = tops[self._control_paragraph] - max(controls.layout().spacing(), 0) - height
+            else:
+                top = text_bottom(self._text) + self._text.contentsMargins().bottom() - height
+            controls.setGeometry(area.left(), area.top() + top, area.width(), height)
+            controls.raise_()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
-        # The text block moved or changed size, so its rows moved: the row buttons follow them.
+        # The text block moved or changed size, so its rows moved: the row buttons and a runner's buttons follow them.
         if watched is self._text and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
-            self._place_row_buttons()
+            self._place_buttons()
         return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------ results (GUI thread)
@@ -671,15 +749,16 @@ class HomeTab(QWidget):
         deps = self._deps
         if deps.actions is None:
             return
-        self._tunnel_controls = ScopeControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
-        self._tunnel.add_body(self._tunnel_controls)
+        # Their note and result lines are lines of the card's own text block (_CardControls), so one drag copies them too.
+        self._tunnel_controls = _CardControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
+        self._tunnel.add_controls(self._tunnel_controls)
         self._tunnel_settings = QPushButton(OPEN_SETTINGS_TEXT, self._tunnel)
         self._tunnel_settings.setObjectName("home-tunnel-settings")
         self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
         self._tunnel.add_body(self._tunnel_settings)
         # The same local controls Settings has, with the same confirmation. Settings keeps its own.
-        self._local_controls = ScopeControls(SCOPE_LOCAL, deps.actions, local_gate, prefix="home-local", parent=self._local)
-        self._local.add_body(self._local_controls)
+        self._local_controls = _CardControls(SCOPE_LOCAL, deps.actions, local_gate, prefix="home-local", parent=self._local)
+        self._local.add_controls(self._local_controls)
         # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
         deps.actions.coreChanged.connect(self._on_core_changed)
         # A Start, Stop or Restart here or in Settings, each check after a start, and a client setup change. Home only

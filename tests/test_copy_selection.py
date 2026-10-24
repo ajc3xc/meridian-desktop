@@ -33,6 +33,7 @@ from meridian_desktop.claude_processes import ClaudeProcessesResult
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.home_status import CHECKING_HEADLINE, CardView, RowView
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
+from meridian_desktop.runner_controls import START
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import YES, ToolRow, ToolsStatus
@@ -43,8 +44,17 @@ from meridian_desktop.ui.home_tab import API_NOT_READY_TEXT, LAUNCH_CANCELLED_TE
 from meridian_desktop.ui.main_window import STATUS_MESSAGE, MainWindow
 from meridian_desktop.ui.projects_tab import ProjectsTab
 from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.ui.scope_controls import CANCELLED_TEXT, CORE_NOT_SET_TEXT
 from meridian_desktop.ui.sessions_panel import SessionsPanel
-from meridian_desktop.ui.text import SELECTABLE_TEXT, set_label_text, visible_text
+from meridian_desktop.ui.text import (
+    SELECTABLE_TEXT,
+    BlockLine,
+    block_html,
+    paragraph_tops,
+    set_label_text,
+    text_bottom,
+    visible_text,
+)
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
 LEFT = Qt.MouseButton.LeftButton
@@ -80,9 +90,14 @@ def _drag(window: QWidget, start_widget: QWidget, start: QPoint, end_widget: QWi
 
 
 def _drag_over(window: QWidget, label: QLabel) -> None:
-    """Drag from the first character of a label to its last line's end."""
+    """Drag from the first character of a label to its last line's end.
+
+    The drag ends just right of the label, on its last line: a label sized to its text (a message box's) ends at its
+    last character, so a point inside its right edge can land on the first half of that character and leave it out.
+    The label has the mouse from the press, so the end still reaches it.
+    """
     rect = label.rect()
-    _drag(window, label, QPoint(1, 3), label, QPoint(rect.width() - 2, rect.height() - 2))
+    _drag(window, label, QPoint(1, 3), label, QPoint(rect.width() + 4, rect.height() - 2))
 
 
 def _click(window: QWidget, widget: QWidget, point: QPoint) -> None:
@@ -172,11 +187,22 @@ def _tools_with_rows():
     return ToolsStatus(rows=rows, message="Checked. No tool is started or stopped.", checked_at=datetime(2026, 10, 23, 14, 5))
 
 
-def _actions(store):
+def _never(*args, **kwargs):
+    raise AssertionError("no test runs a start or a stop")
+
+
+def _actions(store, asked=None):
+    """The runner actions. Every confirmation answers No (and is recorded in ``asked``), so nothing is ever run."""
+
+    def answer_no(parent, title, body, confirm_text):
+        if asked is not None:
+            asked.append(title)
+        return False
+
     return RunnerActions(
         store,
-        make_control=lambda python, cwd: None,
-        confirm=lambda parent, title, body, confirm_text: False,
+        make_control=_never,
+        confirm=answer_no,
         find_zotero=lambda: None,
         probe_zotero=lambda: ApiCheck(API_NOT_RUNNING, "not running"),
         start_zotero=lambda exe, log_path=None: (_ for _ in ()).throw(AssertionError("no test starts Zotero")),
@@ -184,20 +210,27 @@ def _actions(store):
     )
 
 
-def _home(qtbot, tmp_path, *, probe=None, tools=None) -> HomeTab:
+def _home(qtbot, tmp_path, *, probe=None, tools=None, core=False, asked=None) -> HomeTab:
+    """Home with fakes. ``core`` sets a core checkout and Python (paths in tmp_path, never run), so the Tunnel and Local
+    buttons are on and a press asks first; every question is answered No."""
     store = SettingsStore(tmp_path / "settings.json")
+    if core:
+        store.save(Settings(core_python=str(tmp_path / "python.exe"), core_checkout=str(tmp_path / "core")))
     deps = HomeDeps(
         store=store,
         probe=probe or (lambda url: local_client.HEALTH_NOT_RUNNING),
         tunnel=_tunnel_not_available,
-        actions=_actions(store),
+        actions=_actions(store, asked),
         zotero=_Zotero(),
         tools=tools or _tools_with_rows,
         current_version="0.2.0",
     )
     tab = HomeTab(deps)
     qtbot.addWidget(tab)
-    tab.resize(1100, 900)
+    # In the test font the Local card's row of buttons is wider than half of 1100 pixels, so the cards would run past
+    # the window's right edge. The window is as wide as both columns need, so a drag over a card stays in the window.
+    cards = tab.findChild(QWidget, "home-cards")
+    tab.resize(max(1100, cards.minimumSizeHint().width() + 80), 900)
     _activate(tab)
     return tab
 
@@ -222,6 +255,12 @@ def _settled(qtbot, card, key, headline=None):
 
     qtbot.waitUntil(done, timeout=5000)
     _laid_out(qtbot, card, key)
+
+
+def _all_settled(qtbot, tab) -> None:
+    """Wait until every card that reads shows its answer, so no card above another still grows and moves it mid-drag."""
+    for key in ("local", "tunnel", "services", "zotero", "tools"):
+        _settled(qtbot, _card(tab, key), key)
 
 
 def _laid_out(qtbot, card, key) -> None:
@@ -249,17 +288,17 @@ def _plain(text: str) -> str:
     return text.replace("\u2029", "\n").replace("\u2028", "\n").replace("\u00a0", " ")
 
 
-def _first_and_last_line(card, key) -> tuple[QLabel, QLabel]:
-    """The labels that show the card's first line (its title) and its last line, as they sit on the card.
-
-    Only the card's own lines count (object names home-<key>-...), not the tunnel buttons' result line below them.
-    """
-    shown = [
-        label
-        for label in card.findChildren(QLabel)
-        if label.objectName().startswith(f"home-{key}-") and label.isVisible() and label.text()
-    ]
+def _shown_labels(card) -> list[QLabel]:
+    """Every label the owner sees on the card, top to bottom, whoever built it: the card's own lines and the runner
+    controls' note and result lines under the Tunnel and Local buttons alike."""
+    shown = [label for label in card.findChildren(QLabel) if label.isVisible() and label.text()]
     shown.sort(key=lambda label: (label.mapTo(card, QPoint(0, 0)).y(), label.mapTo(card, QPoint(0, 0)).x()))
+    return shown
+
+
+def _first_and_last_line(card, key) -> tuple[QLabel, QLabel]:
+    """The labels that show the card's first line (its title) and its last line, as they sit on the card."""
+    shown = _shown_labels(card)
     return shown[0], shown[-1]
 
 
@@ -284,14 +323,15 @@ CHECKED = r"Checked at \d\d:\d\d:\d\d\."
 
 # For each block type, the lines a drag over the whole card copies, top to bottom. Each entry is a regular expression.
 WHOLE_CARD_LINES = {
-    # headline, detail and checked line
-    "local": ["Local Meridian server", "Not running", r"Nothing listens on port 7878\. .+", CHECKED],
-    # the tunnel's buttons sit under its lines, and are not copied
-    "tunnel": ["Tunnel", "Not checked", r"The tunnel cannot be checked until .+", CHECKED],
-    # rows without buttons, each with a detail line
+    # headline, detail and checked line, then the line under the local server's buttons (no core is set in the test)
+    "local": ["Local Meridian server", "Not running", r"Nothing listens on port 7878\. .+", CHECKED, re.escape(CORE_NOT_SET_TEXT)],
+    # the tunnel's buttons sit under its lines and are not copied; the line under them is
+    "tunnel": ["Tunnel", "Not checked", r"The tunnel cannot be checked until .+", CHECKED, re.escape(CORE_NOT_SET_TEXT)],
+    # rows without buttons, each with a detail line: the LaTeX row (row 0) and the slot ports
     "services": [
-        "Services", "LaTeX engine not running", CHECKED,
-        r"LaTeX engine on port 8471\.", ".+",
+        "Services", "LaTeX backup engine off", CHECKED,
+        r"LaTeX normally runs in Overleaf in your browser\. Local backup engine on port 8471\.",
+        r"Nothing listens on that port\. The local engine is an optional backup .+ do not start this one\.",
         r"Slot ports: 0 of 1 listening on 127\.0\.0\.1\.", r"A listening port only shows .+",
     ],
     "zotero": ["Zotero", "Not installed", r"Zotero was not found .+", CHECKED],
@@ -317,8 +357,7 @@ def _assert_lines(copied: str, expected: list[str]) -> None:
 def test_one_drag_from_the_first_line_to_the_last_selects_the_whole_card_and_ctrl_c_copies_it(qtbot, tmp_path, key):
     tab = _home(qtbot, tmp_path)
     # Every card has its answer, so no card above this one still grows and moves it.
-    for other in ("local", "tunnel", "services", "zotero", "tools"):
-        _settled(qtbot, _card(tab, other), other)
+    _all_settled(qtbot, tab)
     card = _card(tab, key)
     _laid_out(qtbot, card, key)
 
@@ -329,6 +368,9 @@ def test_one_drag_from_the_first_line_to_the_last_selects_the_whole_card_and_ctr
     block = _block(card, key)
     assert QApplication.focusWidget() is block
     assert _plain(block.selectedText()) == copied
+    assert copied == visible_text(card), "the drag copies every line the card shows, as its Copy action does"
+    # Every line the card shows is in its one block: no other label on the card shows text.
+    assert _shown_labels(card) == [block]
     for button in card.findChildren(QPushButton):
         if button.text():
             assert button.text() not in copied.split("\n"), button.objectName()
@@ -351,6 +393,99 @@ def test_a_card_note_is_part_of_the_one_drag(qtbot, tmp_path, note):
 
     _assert_lines(copied, WHOLE_CARD_LINES["zotero"] + [re.escape(line) for line in note.split("\n")])
     assert _part(card, "zotero", "note").text() == note
+
+
+@pytest.mark.parametrize(("key", "prefix"), [("tunnel", "tunnel"), ("local", "home-local")])
+def test_the_line_under_the_tunnel_and_local_buttons_is_part_of_the_one_drag(qtbot, tmp_path, key, prefix):
+    asked = []
+    tab = _home(qtbot, tmp_path, core=True, asked=asked)
+    card = _card(tab, key)
+    _all_settled(qtbot, tab)
+    block = _block(card, key)
+    start = card.findChild(QPushButton, f"{prefix}-start")
+    assert start.isEnabled()
+    # The core is set, so no line shows under the buttons yet, and the card's block ends with its buttons.
+    _assert_lines(visible_text(card), WHOLE_CARD_LINES[key][:4])
+    _laid_out(qtbot, card, key)
+    _scroll_into_view(card)
+    controls = card.findChild(QWidget, f"{prefix}-controls")
+    assert controls.parentWidget() is card
+    assert controls.geometry().top() > block.geometry().top() + _paragraph_box(block, 3).bottom()
+    assert controls.geometry().bottom() == block.geometry().bottom()
+    assert controls.geometry().left() == block.geometry().left() and controls.width() == block.width()
+    detail = _part(card, key, "detail").text()
+    _drag_over_paragraph(tab, block, 2)
+    assert _plain(block.selectedText()) == detail
+
+    # Start asks first. The answer is No, so nothing starts, and the line under the buttons says so. The line changes
+    # while the detail is selected, and the detail stays selected. (click() leaves the focus where it is, as a start
+    # check's later answer does. A real click on a button takes the focus, and the label's selection with it.)
+    start.click()
+    assert asked == [f"Start the {'tunnel' if key == 'tunnel' else 'local server'}?"]
+    cancelled = CANCELLED_TEXT[START]
+    assert card.findChild(QLabel, f"{prefix}-control-result").text() == cancelled
+    assert _plain(block.selectedText()) == detail
+    _laid_out(qtbot, card, key)
+
+    _drag_whole_card(tab, card, key)
+    copied = _ctrl_c(tab)
+
+    _assert_lines(copied, WHOLE_CARD_LINES[key][:4] + [re.escape(cancelled)])
+    assert copied == visible_text(card)
+    assert _shown_labels(card) == [block]
+    # The buttons still sit between the card's own lines and the line under them, and a real click on Start, where the
+    # card shows it, still asks.
+    block_top = block.mapTo(card, QPoint(0, 0)).y()
+    start_top = start.mapTo(card, QPoint(0, 0)).y()
+    assert block_top + _paragraph_box(block, 3).bottom() < start_top
+    assert start_top + start.height() <= block_top + _paragraph_box(block, 4).top()
+    _click(tab, start, start.rect().center())
+    assert len(asked) == 2
+
+
+def test_a_gate_change_redraws_the_line_under_the_buttons_and_keeps_the_card_as_wide_as_its_buttons(qtbot, tmp_path):
+    tab = _home(qtbot, tmp_path)
+    card = _card(tab, "local")
+    _all_settled(qtbot, tab)
+    block = _block(card, "local")
+    controls = card.findChild(QWidget, "home-local-controls")
+    fix = card.findChild(QPushButton, "home-local-fix")
+    assert fix.isVisible()
+    assert visible_text(card).split("\n")[-1] == CORE_NOT_SET_TEXT
+    wide = controls.minimumSizeHint().width()
+    assert block.minimumWidth() == max(block.minimumSizeHint().width(), wide)
+
+    # The core is set: the note under the buttons goes, the fix button with it, and the block keeps the buttons' width.
+    SettingsStore(tmp_path / "settings.json").save(
+        Settings(core_python=str(tmp_path / "python.exe"), core_checkout=str(tmp_path / "core"))
+    )
+    tab.refresh_tunnel_gate()
+    assert not fix.isVisible()
+    _assert_lines(visible_text(card), WHOLE_CARD_LINES["local"][:4])
+    assert controls.minimumSizeHint().width() < wide
+    assert block.minimumWidth() == max(block.minimumSizeHint().width(), controls.minimumSizeHint().width())
+    _laid_out(qtbot, card, "local")
+    assert controls.geometry().bottom() == block.geometry().bottom()
+
+
+def test_a_drag_over_the_latex_row_selects_all_of_it_and_runs_on_to_the_last_line(qtbot, tmp_path):
+    """The Services card's LaTeX row (row 0) is a line and a detail of several lines, in the card's one block."""
+    tab = _home(qtbot, tmp_path)
+    card = _card(tab, "services")
+    _all_settled(qtbot, tab)
+    block = _block(card, "services")
+    _scroll_into_view(card)
+    # Paragraphs: title, headline, checked line, the LaTeX row and its detail, the slot ports row and its detail.
+    document = block.findChild(QTextDocument)
+    assert document.findBlockByNumber(4).layout().lineCount() > 1, "the LaTeX row's detail wraps"
+    row, detail, last = (_paragraph_box(block, index) for index in (3, 4, 6))
+
+    _drag(tab, block, QPoint(row.left() + 1, row.top() + 3), block, QPoint(detail.right() - 1, detail.bottom() - 2))
+    _assert_lines(_ctrl_c(tab), WHOLE_CARD_LINES["services"][3:5])
+
+    _click(tab, block, QPoint(block.width() - 2, _paragraph_box(block, 0).top() + 3))
+    _drag(tab, block, QPoint(row.left() + 1, row.top() + 3), block, QPoint(last.right() - 1, last.bottom() - 2))
+    _assert_lines(_ctrl_c(tab), WHOLE_CARD_LINES["services"][3:])
 
 
 def test_row_buttons_sit_level_with_their_rows_at_the_right_and_a_click_runs_the_row_action(qtbot, tmp_path):
@@ -417,10 +552,17 @@ def test_a_home_card_copies_its_visible_text_from_the_right_click_menu(qtbot, tm
     assert _part(card, "tools", "note").isHidden()
     assert copied == visible_text(card)
 
-    # A right-click on a row's line opens the card's menu, and its Copy copies the whole card. The mouse's context menu
-    # event goes to the text block itself: offscreen QTest sometimes hands the one it makes from a click to the
-    # top-level widget instead. The probe in the report makes the real right-click through the window.
-    row = block
+    # A right-click on a row's line opens the card's menu, and its Copy copies the whole card.
+    assert _right_click_menu(qtbot, block) == [["Copy"]]
+    assert clipboard.text() == copied
+
+
+def _right_click_menu(qtbot, label: QLabel) -> list[list[str]]:
+    """Right-click the label's last line, and press Copy in the menu that opens, when it has one. Returns the menu's
+    actions. The mouse's context menu event goes to the label itself: offscreen QTest sometimes hands the one it makes
+    from a click to the top-level widget instead. The probe in the report makes the real right-click through the window.
+    """
+    QGuiApplication.clipboard().setText(BEFORE)
     seen = []
 
     def use_open_menu():
@@ -428,23 +570,40 @@ def test_a_home_card_copies_its_visible_text_from_the_right_click_menu(qtbot, tm
         if menu is None:
             return
         seen.append([action.text() for action in menu.actions()])
-        next(action for action in menu.actions() if action.text() == "Copy").trigger()
+        copy = next((action for action in menu.actions() if action.text() == "Copy"), None)
+        if copy is not None:
+            copy.trigger()
         menu.close()
 
     timer = QTimer()
     timer.setInterval(50)
     timer.timeout.connect(use_open_menu)
     timer.start()
-    clipboard.setText(BEFORE)
-    point = QPoint(4, row.height() - 4)
-    event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, row.mapToGlobal(point))
+    point = QPoint(4, label.height() - 4)
+    event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, label.mapToGlobal(point))
     try:
-        QApplication.sendEvent(row, event)  # the menu runs until the timer has used it
+        QApplication.sendEvent(label, event)  # the menu runs until the timer has used it
         qtbot.waitUntil(lambda: bool(seen), timeout=3000)
     finally:
         timer.stop()
-    assert seen == [["Copy"]]
-    assert clipboard.text() == copied
+    return seen
+
+
+@pytest.mark.parametrize("core", [False, True], ids=["note-under-the-buttons", "result-under-the-buttons"])
+@pytest.mark.parametrize(("key", "prefix"), [("tunnel", "tunnel"), ("local", "home-local")])
+def test_a_right_click_on_the_line_under_the_buttons_opens_the_card_menu(qtbot, tmp_path, key, prefix, core):
+    tab = _home(qtbot, tmp_path, core=core)
+    card = _card(tab, key)
+    _all_settled(qtbot, tab)
+    if core:
+        card.findChild(QPushButton, f"{prefix}-start").click()  # asks, and the answer is No
+    _laid_out(qtbot, card, key)
+    last = _shown_labels(card)[-1]
+    expected = CANCELLED_TEXT[START] if core else CORE_NOT_SET_TEXT
+    assert visible_text(card).split("\n")[-1] == expected
+
+    assert _right_click_menu(qtbot, last) == [["Copy"]]
+    assert QGuiApplication.clipboard().text() == visible_text(card)
 
 
 def test_ctrl_c_copies_the_whole_card_when_the_card_has_focus_and_only_the_selection_in_a_label(qtbot, tmp_path):
@@ -478,10 +637,11 @@ def _paragraph_box(block: QLabel, index: int):
 def _drag_over_paragraph(window, block: QLabel, index: int) -> None:
     """Drag from the first character of one paragraph of the block to the end of its last line.
 
-    A press inside a selection drags the selected text, as in any text field, so a click below the text clears the
-    selection first.
+    A press inside a selection drags the selected text, as in any text field, so a click clears the selection first:
+    at the right end of the title line, where no button sits (a runner's buttons sit at the block's foot).
     """
-    _click(window, block, QPoint(block.width() - 2, block.height() - 1))
+    title = _paragraph_box(block, 0)
+    _click(window, block, QPoint(block.width() - 2, title.top() + 3))
     box = _paragraph_box(block, index)
     _drag(window, block, QPoint(box.left() + 1, box.top() + 3), block, QPoint(box.right() - 1, box.bottom() - 2))
 
@@ -503,11 +663,11 @@ def test_a_recheck_keeps_a_whole_card_selection_and_a_selection_of_one_line(qtbo
     _drag_whole_card(tab, card, "local")
     assert _plain(block.selectedText()) == visible_text(card)
 
-    # The check runs: the checked line says Checking, and the whole card stays selected.
+    # The check runs: the checked line says Checking, and the whole card stays selected, the line under the buttons too.
     card.check()
     assert _part(card, "local", "headline").text() == "Not running"
     assert _part(card, "local", "checked").text() == CHECKING_HEADLINE
-    assert visible_text(card).endswith("\n" + CHECKING_HEADLINE)
+    assert visible_text(card).split("\n")[3:] == [CHECKING_HEADLINE, CORE_NOT_SET_TEXT]
     assert _plain(block.selectedText()) == visible_text(card)
 
     # Its answer comes back with a new time, and the whole card is still selected.
@@ -553,6 +713,28 @@ def test_new_label_text_keeps_a_selection_whose_text_is_still_there(qtbot):
     label.setSelection(0, len(label.text()))
     set_label_text(label, "Status: down.\nChecked at 10:07:00.\nLast line.")
     assert _plain(label.selectedText()) == label.text(), "a selection round a change grows with it"
+
+
+def test_paragraph_tops_and_text_bottom_follow_the_label_and_its_bottom_margin(qtbot):
+    """A label drops its last paragraph's bottom margin, so room under a block is its bottom contents margin."""
+    label = QLabel()
+    qtbot.addWidget(label)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    font = label.font()
+    label.setText(block_html([BlockLine("First line", space_after=10), BlockLine("Last line", space_after=30)], font))
+    label.resize(300, label.heightForWidth(300))
+    tops = paragraph_tops(label)
+    assert len(tops) == 2 and tops[0] == 0 and tops[1] > 10
+    bottom = text_bottom(label)
+    assert bottom == label.heightForWidth(300), "the last paragraph's own bottom margin is left out"
+
+    label.setContentsMargins(0, 0, 0, 30)
+    label.resize(300, label.heightForWidth(300))
+    assert paragraph_tops(label) == tops
+    assert text_bottom(label) == bottom
+    assert label.height() == bottom + 30
 
 
 def test_unchanged_rows_keep_their_buttons_and_changed_rows_replace_the_old_ones(qtbot):
