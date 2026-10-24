@@ -7,14 +7,20 @@ both tabs, the hosted errors that a file must never hide, the no-data message, t
 Sessions re-read when the file settings change, and the Settings database chooser.
 
 Every database is built in tmp_path (see test_sessions_reader.make_core_db). No test opens the real core database,
-reaches the network, reads the real keychain or starts a server. Offscreen Qt, from conftest.
+reaches the network or reads the real keychain. The one server is a stub on an ephemeral 127.0.0.1 port, never a real
+Meridian port, used to check that Projects and Sessions decide "did the local server answer?" with the same check.
+Offscreen Qt, from conftest.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
+import socket
+import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,7 +51,7 @@ from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus
-from meridian_desktop.ui import main_window, sessions_panel
+from meridian_desktop.ui import main_window, projects_tab, sessions_panel
 from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.projects_tab import ProjectsTab
 from meridian_desktop.ui.sessions_panel import PROJECTS_FAILED_TEXT, SessionsPanel, status_text
@@ -386,6 +392,7 @@ def _panel(qtbot, settings_box, *, token=None, hosted=None, sources=None):
             calls.projects += 1
             return provider()
 
+        local_server_answers = staticmethod(provider.local_server_answers)
         local_file = staticmethod(provider.local_file)
         watch_key = staticmethod(provider.watch_key)
 
@@ -515,14 +522,14 @@ _SESSIONS_SOURCE = {sc.SOURCE_LOCAL: SOURCE_SERVER, sc.SOURCE_HOSTED: SOURCE_HOS
 
 
 def _expected_order(mode, server_up, token, with_file):
-    """The sources a read asks, in order: the rule both tabs must follow."""
+    """The sources a read takes rows from, in order, after the local-server check: the rule both tabs must follow."""
     if mode != "local":
         return [SOURCE_HOSTED] if token else []
     if server_up:
         return [SOURCE_SERVER]
     if token:
-        return [SOURCE_SERVER, SOURCE_HOSTED]
-    return [SOURCE_SERVER, SOURCE_FILE] if with_file else [SOURCE_SERVER]
+        return [SOURCE_HOSTED]
+    return [SOURCE_FILE] if with_file else []
 
 
 @pytest.mark.parametrize("with_file", [True, False], ids=["file", "no-file"])
@@ -535,10 +542,16 @@ def test_projects_and_sessions_ask_the_same_sources_in_the_same_order(tmp_path, 
     settings = dataclasses.replace(local(core_folder(tmp_path) if with_file else None), mode=mode)
 
     projects_asked: list[str] = []
+    # Every local-server check, from either tab. Both tabs use this one probe through data_source.local_server_answers.
+    probes: list[str] = []
 
     def probe(url):
-        projects_asked.append(SOURCE_SERVER)
+        probes.append(url)
         return local_client.HEALTH_RUNNING if server_up else local_client.HEALTH_NOT_RUNNING
+
+    def read_server(url):
+        projects_asked.append(SOURCE_SERVER)
+        return [dict(row) for row in HOSTED_PROJECT_ROWS]
 
     def list_hosted(url, saved):
         projects_asked.append(SOURCE_HOSTED)
@@ -552,16 +565,18 @@ def test_projects_and_sessions_ask_the_same_sources_in_the_same_order(tmp_path, 
 
     sources = DataSources(
         probe=probe,
-        read_server=lambda url: [dict(row) for row in HOSTED_PROJECT_ROWS],
+        read_server=read_server,
         read_file=read_file,
         get_token=lambda: token,
         list_hosted=list_hosted,
     )
     projects = resolve(settings, sources)
+    projects_probes = list(probes)
 
     sessions_asked: list[str] = []
 
     def local_server(base_url, path, timeout):
+        # Asked only when the shared check said the server answered. A stray call would show in sessions_asked.
         sessions_asked.append(SOURCE_SERVER)
         if not server_up:
             raise LocalClientError("not_running", "nothing listens")
@@ -582,16 +597,206 @@ def test_projects_and_sessions_ask_the_same_sources_in_the_same_order(tmp_path, 
     )
     sessions = reads._read_sessions(PID)  # noqa: SLF001
     sessions_asked.extend(SOURCE_FILE for _ in file_session_reads)
+    sessions_probes = probes[len(projects_probes):]
 
     expected = _expected_order(mode, server_up, token, with_file)
     assert projects_asked == expected
     assert sessions_asked == expected
-    # Both tabs show the same source: the last one asked, unless that was a local server that did not answer.
-    shown = None if not expected or (expected[-1] == SOURCE_SERVER and not server_up) else expected[-1]
+    # One check decides for both tabs: the same probe, asked once by each, at the same address, in local mode only.
+    assert projects_probes == sessions_probes == ([LOCAL_URL] if mode == "local" else [])
+    # Both tabs show the same source: the one rows came from, or none.
+    shown = expected[-1] if expected else None
     assert projects.source == shown
     sessions_source = None if sessions.state == sc.NOT_RUNNING or not sessions.source else _SESSIONS_SOURCE[
         sessions.source]
     assert sessions_source == shown
+
+
+# ----------------------------------------------------------------- one local-server check, against a stub server
+#
+# A real HTTP server on an ephemeral loopback port stands in for the local Meridian server, in each state it can be
+# in. The app's own wiring reads it over real sockets: projects_tab.default_sources for the Projects tab, and the
+# window's providers for the Sessions tab. Only the probe timeout is shortened, and hosted answers through a fake.
+
+STUB_STATES = ["answers", "refuses", "bad_body", "times_out"]
+STUB_PROBE_TIMEOUT = 0.5
+# The real local ports. A stub must never take one.
+REAL_PORTS = {7878, 8471, 23119, *range(8808, 8822)}
+SERVER_SESSION = {"name": "from-server", "status": "active", "last_seen": ""}
+HOSTED_SESSION = {"name": "from-hosted", "status": "active", "last_seen": ""}
+
+
+class _StubHandler(BaseHTTPRequestHandler):
+    """One local server state, chosen by the server's ``state``. Each request path is recorded."""
+
+    def do_GET(self):  # noqa: N802 - http.server naming
+        self.server.paths.append(self.path)
+        state = self.server.state
+        if state == "times_out":
+            self.server.release.wait(10)  # no reply until the test ends
+            return
+        if state == "bad_body":
+            self._reply(200, b"<html>Not Meridian</html>", "text/html")
+            return
+        path = self.path.split("?", 1)[0]
+        if path == "/health":
+            self._reply(200, json.dumps({"service": "meridian", "status": "ok"}).encode("utf-8"))
+        elif path == "/projects":
+            self._reply(200, json.dumps(HOSTED_PROJECT_ROWS).encode("utf-8"))
+        elif path.startswith("/projects/") and path.endswith("/sessions"):
+            self._reply(200, json.dumps([SERVER_SESSION]).encode("utf-8"))
+        else:
+            self._reply(404, b"{}")
+
+    def _reply(self, status, body, content_type="application/json"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # the test output stays quiet
+        pass
+
+
+@pytest.fixture
+def stub_server(monkeypatch):
+    """start(state) -> (local URL, paths asked). "refuses" is a loopback port with nothing listening."""
+    monkeypatch.setattr(projects_tab, "PROBE_TIMEOUT", STUB_PROBE_TIMEOUT)
+    servers = []
+
+    def start(state):
+        if state == "refuses":
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            assert port not in REAL_PORTS
+            return f"http://127.0.0.1:{port}", []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
+        server.daemon_threads = True
+        server.state = state
+        server.paths = []
+        server.release = threading.Event()
+        assert server.server_address[1] not in REAL_PORTS
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}", server.paths
+
+    yield start
+    for server in servers:
+        server.release.set()
+        server.shutdown()
+        server.server_close()
+
+
+class RoutedHosted:
+    """A hosted transport: the project list for /projects, one session for a sessions path. Each URL is recorded."""
+
+    def __init__(self):
+        self.urls = []
+
+    def __call__(self, request, timeout):
+        self.urls.append(request.full_url)
+        rows = [HOSTED_SESSION] if "/sessions" in request.full_url else HOSTED_PROJECT_ROWS
+        return hosted_client.Reply(200, json.dumps(rows).encode("utf-8"))
+
+
+_EXPECTED_SOURCE = {"answers": SOURCE_SERVER}
+
+
+@pytest.mark.parametrize("token", [FAKE_TOKEN, None], ids=["token", "no-token"])
+@pytest.mark.parametrize("state", STUB_STATES)
+def test_projects_and_sessions_choose_the_same_source_for_each_local_server_state(
+    stub_server, settings_path, tmp_path, file_session_reads, state, token
+):
+    url, asked = stub_server(state)
+    core = core_folder(tmp_path, now=datetime.now(timezone.utc))
+    store = SettingsStore(settings_path)
+    store.save(dataclasses.replace(local(core), local_url=url))
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    if token:
+        token_store.set_token(token, store=secrets)
+    hosted = RoutedHosted()
+    # The app's sources, with hosted answered by the fake. The probe and the server read use real sockets.
+    sources = dataclasses.replace(
+        projects_tab.default_sources(secrets),
+        list_hosted=lambda hosted_url, saved: hosted_client.list_projects(hosted_url, saved, transport=hosted),
+    )
+
+    # The Projects tab: the resolve its worker runs.
+    projects = projects_tab._settings_resolution(store, sources)  # noqa: SLF001
+    # The Sessions tab: the reads its worker runs, wired as the window wires them.
+    reads = sessions_panel._Reads(  # noqa: SLF001
+        main_window._saved_local_url(store),  # noqa: SLF001
+        main_window._saved_hosted(store, secrets),  # noqa: SLF001
+        main_window._saved_projects(store, sources),  # noqa: SLF001
+        main_window._saved_mode(store),  # noqa: SLF001
+        None,
+        hosted,
+        lambda: ClaudeProcessesResult(LISTED, "", ()),
+    )
+    full = reads.collect_full(1, "")
+    tick = reads.collect_local(2, PID)
+
+    expected = _EXPECTED_SOURCE.get(state, SOURCE_HOSTED if token else SOURCE_FILE)
+    assert projects.state == STATE_OK
+    assert projects.source == expected
+    assert full.project_id == PID
+    assert full.result.state == sc.SESSIONS
+    assert _SESSIONS_SOURCE[full.result.source] == expected
+    if expected == SOURCE_SERVER:
+        assert [row.name for row in full.result.rows] == ["from-server"]
+        assert tick.result is not None and _SESSIONS_SOURCE[tick.result.source] == SOURCE_SERVER
+    else:
+        # The server did not answer the probe, so no tab asked it for anything else, and the tick shows nothing new.
+        assert all(path == "/health" for path in asked)
+        assert tick.result is None
+    if expected == SOURCE_HOSTED:
+        assert [row.name for row in full.result.rows] == ["from-hosted"]
+    assert any("/sessions" in sent for sent in hosted.urls) == (expected == SOURCE_HOSTED)
+    if expected == SOURCE_FILE:
+        # The snapshot label on both tabs, and the file is read only here.
+        assert projects.message == WRITTEN_NOTE
+        assert full.result.message == WRITTEN_NOTE
+        assert file_session_reads == [PID]
+    else:
+        assert file_session_reads == []
+
+
+@pytest.mark.parametrize("state", STUB_STATES)
+def test_the_window_shows_projects_and_sessions_from_the_same_source_for_each_local_server_state(
+    qtbot, stub_server, settings_path, tmp_path, monkeypatch, state
+):
+    """The whole window with the app's real sources and no token: both screens name the same source."""
+    url, _asked = stub_server(state)
+    core = core_folder(tmp_path, now=datetime.now(timezone.utc))
+    SettingsStore(settings_path).save(dataclasses.replace(local(core), local_url=url))
+    monkeypatch.setattr(sessions_panel.claude_processes, "list_claude_processes",
+                        lambda run=None: ClaudeProcessesResult(LISTED, "", ()))
+    window = MainWindow(
+        SettingsStore(settings_path),
+        secret_store=KeyringSecretStore(backend=MemoryKeyring()),
+        tools_status=lambda: ToolsStatus(rows=()),
+    )
+    qtbot.addWidget(window)
+    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    window.tabs.setCurrentIndex(names.index("Projects"))
+    window.show()
+    qtbot.waitExposed(window)
+
+    if state == "answers":
+        projects_line = "Showing 1 project(s) from the local Meridian server."
+        sessions_start = "1 session(s) from this computer's Meridian server."
+    else:
+        projects_line = f"Showing 2 project(s) from the database file. {WRITTEN_NOTE}"
+        sessions_start = f"3 session(s) from the database file. {WRITTEN_NOTE}"
+    projects_status = window.tabs.widget(names.index("Projects")).findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: projects_status.text() == projects_line, timeout=10000)
+
+    window.tabs.setCurrentIndex(names.index("Sessions"))
+    sessions = window.tabs.widget(names.index("Sessions"))
+    sessions_status = sessions.findChild(QLabel, "sessions-status")
+    qtbot.waitUntil(lambda: sessions_status.text().startswith(sessions_start), timeout=10000)
 
 
 def test_another_project_picked_then_refresh_reads_that_project_from_the_file(qtbot, tmp_path):
@@ -774,7 +979,8 @@ def test_the_window_shows_the_core_file_on_projects_and_sessions(qtbot, settings
     assert sessions.findChild(QLabel, "sessions-status").text().startswith(
         f"3 session(s) from the database file. {WRITTEN_NOTE}"
     )
-    assert local_calls and hosted_calls == []
+    # The probe says no local server answered, so, as on Projects, its sessions route is never asked.
+    assert local_calls == [] and hosted_calls == []
 
 
 def test_a_hosted_401_shows_on_projects_and_sessions_while_the_core_file_exists(qtbot, settings_path, tmp_path,

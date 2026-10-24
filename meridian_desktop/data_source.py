@@ -4,7 +4,11 @@
 for the picked project's sessions. ``resolve`` reads the mode from Settings and returns one source, never two.
 
 Local mode, in this order:
-- the local Meridian server, when its probe state is running: source "server". Its answer is final, an error included.
+- the local Meridian server, when local_server_answers says it answered: source "server". Its answer is final, an
+  error included. local_server_answers is the one check of the local server for both tabs: it is True only when the
+  probe state is running. A refused connection, a timeout, a body that is not Meridian's health answer, or a refused
+  address is False, so the next source is asked. The Sessions tab calls the same check, with the same probe, through
+  ProjectsProvider.local_server_answers, so both tabs choose the same source for the same server.
 - otherwise hosted Meridian, only when a hosted token is saved: source "hosted". A saved token means hosted is in use,
   so its answer is final too: a failed hosted read is shown as it is, and the database file is not read in its place.
 - otherwise, with no token saved, the database file, read-only: source "file". A db_path chosen in Settings always
@@ -28,8 +32,9 @@ local_client.list_projects, projects_reader.list_projects, token_store.get_token
 projects_reader.last_written), and tests pass fakes. The token goes only to the hosted client. It never appears in a
 Resolution, a message or an error.
 
-ProjectsProvider is the Sessions tab's view of the same resolve: the (id, name) pairs for its picker, the database file
-its file read uses, and the two settings that name that file, so the tab can read again when either changes.
+ProjectsProvider is the Sessions tab's view of the same resolve: the (id, name) pairs for its picker, the local-server
+check its local reads use, the database file its file read uses, and the two settings that name that file, so the tab
+can read again when either changes.
 
 A failed read gives state "read_failed", with the chosen source and no rows. A HostedError
 (from hosted_client) gives its own fixed text, which holds no token, body or path. Any other
@@ -193,6 +198,17 @@ def no_local_data_message(settings: Settings) -> str:
     return NO_LOCAL_DATA_MESSAGE.format(server=_SERVER_CHECKED.format(url=settings.local_url), saved=saved, core=core)
 
 
+def local_server_answers(local_url: str, probe: ProbeFn) -> bool:
+    """Whether the local Meridian server answered: the one check both the Projects and the Sessions tab use.
+
+    True only when ``probe`` (local_client.probe_health in the app) gives HEALTH_RUNNING: GET /health answered 200 with
+    Meridian's health body. Every other state is False, so the tab asks the next source: not_running (a refused
+    connection), not_meridian (another body, status or service) and error (a timeout, or an address that is not
+    loopback).
+    """
+    return probe(local_url) == local_client.HEALTH_RUNNING
+
+
 def _usable_token(token: object) -> bool:
     return isinstance(token, str) and bool(token.strip())
 
@@ -257,7 +273,7 @@ def resolve(settings: Settings, sources: DataSources) -> Resolution:
     """
 
     def server() -> Resolution | None:
-        if sources.probe(settings.local_url) != local_client.HEALTH_RUNNING:
+        if not local_server_answers(settings.local_url, sources.probe):
             return None
         # A running server wins. The file is not read, so the result holds one source only.
         return _read(SOURCE_SERVER, lambda: sources.read_server(settings.local_url))
@@ -295,7 +311,8 @@ class ProjectsProvider:
     """The Sessions tab's view of the Projects resolve. It holds a settings loader and the sources, never a window.
 
     Calling it returns the resolved projects as (id, name) pairs, or raises ProjectsUnresolved with the resolver's
-    message (no source, or a failed read such as a hosted 401). local_file names the database file the tab's file read
+    message (no source, or a failed read such as a hosted 401). local_server_answers is the resolver's own local-server
+    check, with the same probe, for the tab's local reads. local_file names the database file the tab's file read
     uses, with its snapshot label; the tab asks for it only where read_in_order reaches the file. watch_key is the two
     settings that choose that file, so the tab can read again when either one changes.
     """
@@ -315,6 +332,13 @@ class ProjectsProvider:
                 name = row.get("name")
                 pairs.append((pid, name if isinstance(name, str) else ""))
         return pairs
+
+    def local_server_answers(self, local_url: str) -> bool:
+        """data_source.local_server_answers with the probe resolve uses, so Sessions decides as Projects does.
+
+        Runs on the worker. ``local_url`` is the address the tab then reads, the Local URL from Settings.
+        """
+        return local_server_answers(local_url, self._sources.probe)
 
     def local_file(self) -> tuple[Path, str] | None:
         """(path, snapshot label) of the file local mode reads, or None when there is none. Runs on the worker."""
@@ -351,6 +375,7 @@ __all__ = [
     "core_database_path",
     "file_note",
     "local_database",
+    "local_server_answers",
     "no_local_data_message",
     "read_in_order",
     "resolve",

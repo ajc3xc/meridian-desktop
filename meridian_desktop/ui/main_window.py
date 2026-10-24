@@ -15,9 +15,12 @@ below, are loopback calls: to the local Meridian server at the local_url setting
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
 its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
-only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
-pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
-on the Test connection button in Settings.
+only the hosted URL the owner sets, with the saved token: on the Projects tab, on the Sessions tab when it is first
+shown or its Refresh is pressed (for the project list and the sessions), and on the Test connection button in
+Settings. In hosted mode neither tab reads the local server or the database file. Local mode reads both tabs in one
+order: the local server when it answers (one /health check, data_source.local_server_answers, for both tabs), then
+the hosted URL when a hosted token is saved, then the database file, read-only, only when neither answered and no
+token is saved.
 
 The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
 and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
