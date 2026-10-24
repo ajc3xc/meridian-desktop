@@ -228,7 +228,7 @@ def _label_text(label: QLabel) -> str:
     return text
 
 
-def _hidden_on_purpose(widget: QWidget) -> bool:
+def hidden_on_purpose(widget: QWidget) -> bool:
     """True for a widget that hide() or setVisible(False) hid. A widget that a layout has not shown yet is not hidden."""
     return widget.isHidden() and widget.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide)
 
@@ -244,7 +244,7 @@ def _layout_labels(layout: QLayout, found: list[QLabel]) -> None:
 
 
 def _widget_labels(widget: QWidget, found: list[QLabel]) -> None:
-    if _hidden_on_purpose(widget):
+    if hidden_on_purpose(widget):
         return
     if isinstance(widget, QLabel):
         found.append(widget)

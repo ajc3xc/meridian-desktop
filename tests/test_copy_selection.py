@@ -10,6 +10,7 @@ whether an earlier test in the run had loaded a font.
 """
 
 import contextlib
+import dataclasses
 import json
 import re
 import threading
@@ -18,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent, QFont, QFontDatabase, QGuiApplication, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -49,7 +50,7 @@ from meridian_desktop.ui.first_run import FirstRunOutcome
 from meridian_desktop.ui.home_tab import API_NOT_READY_TEXT, LAUNCH_CANCELLED_TEXT, HomeDeps, HomeTab, _Card
 from meridian_desktop.ui.main_window import STATUS_MESSAGE, MainWindow
 from meridian_desktop.ui.projects_tab import ProjectsTab
-from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.ui.runner_actions import CHOOSE_CANCELLED_TEXT, RunnerActions
 from meridian_desktop.ui.scope_controls import CANCELLED_TEXT, CORE_NOT_SET_TEXT
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.text import (
@@ -244,12 +245,18 @@ def _never(*args, **kwargs):
 
 
 def _actions(store, asked=None):
-    """The runner actions. Every confirmation answers No (and is recorded in ``asked``), so nothing is ever run."""
+    """The runner actions. Every confirmation answers No (and is recorded in ``asked``), so nothing is ever run. Choose the
+    Meridian core folder is cancelled (and recorded in ``asked`` too), so no folder dialog opens and nothing is saved."""
 
     def answer_no(parent, title, body, confirm_text):
         if asked is not None:
             asked.append(title)
         return False
+
+    def cancel_folder(parent, current):
+        if asked is not None:
+            asked.append("choose the core folder")
+        return ""
 
     return RunnerActions(
         store,
@@ -259,6 +266,8 @@ def _actions(store, asked=None):
         probe_zotero=lambda: ApiCheck(API_NOT_RUNNING, "not running"),
         start_zotero=lambda exe, log_path=None: (_ for _ in ()).throw(AssertionError("no test starts Zotero")),
         probe_local=lambda url: local_client.HEALTH_NOT_RUNNING,
+        locate=_never,
+        choose_folder=cancel_folder,
     )
 
 
@@ -279,10 +288,9 @@ def _home(qtbot, tmp_path, *, probe=None, tools=None, core=False, asked=None) ->
     )
     tab = HomeTab(deps)
     qtbot.addWidget(tab)
-    # In the test font the Local card's row of buttons is wider than half of 1100 pixels, so the cards would run past
-    # the window's right edge. The window is as wide as both columns need, so a drag over a card stays in the window.
-    cards = tab.findChild(QWidget, "home-cards")
-    tab.resize(max(1100, cards.minimumSizeHint().width() + 80), 900)
+    # The Tunnel and Local buttons wrap onto more rows when a card is narrower than their row, so both columns fit 1100
+    # pixels and no drag over a card runs past the window's right edge.
+    tab.resize(1100, 900)
     _activate(tab)
     return tab
 
@@ -316,10 +324,21 @@ def _all_settled(qtbot, tab) -> None:
 
 
 def _laid_out(qtbot, card, key) -> None:
-    """Wait until the card's layout has given its text block the height its text needs, so a drag lands on the lines."""
+    """Wait until the card's layout has given its text block the height its text needs, and Home's grid has placed the
+    card, so a drag or a click lands where the test measured. A runner's buttons can wrap onto another number of rows
+    once the block has its width, which draws the block again, so the wait lasts until a round of layout requests
+    moves nothing."""
     block = card.findChild(QLabel, f"home-{key}-text")
-    if block is not None:
-        qtbot.waitUntil(lambda: block.height() == block.heightForWidth(block.width()), timeout=5000)
+    if block is None:
+        return
+
+    def still() -> bool:
+        before = (card.geometry(), block.geometry())
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        QApplication.processEvents()
+        return before == (card.geometry(), block.geometry()) and block.height() == block.heightForWidth(block.width())
+
+    qtbot.waitUntil(still, timeout=5000)
 
 
 def _copy_action(widget):
@@ -495,29 +514,120 @@ def test_the_line_under_the_tunnel_and_local_buttons_is_part_of_the_one_drag(qtb
     assert len(asked) == 2
 
 
-def test_a_gate_change_redraws_the_line_under_the_buttons_and_keeps_the_card_as_wide_as_its_buttons(qtbot, tmp_path):
-    tab = _home(qtbot, tmp_path)
-    card = _card(tab, "local")
-    _all_settled(qtbot, tab)
-    block = _block(card, "local")
-    controls = card.findChild(QWidget, "home-local-controls")
-    fix = card.findChild(QPushButton, "home-local-fix")
-    assert fix.isVisible()
-    assert visible_text(card).split("\n")[-1] == CORE_NOT_SET_TEXT
-    wide = controls.minimumSizeHint().width()
-    assert block.minimumWidth() == max(block.minimumSizeHint().width(), wide)
+def _box(widget: QWidget, ancestor: QWidget) -> QRect:
+    """Where ``widget`` sits in ``ancestor``."""
+    return QRect(widget.mapTo(ancestor, QPoint(0, 0)), widget.size())
 
-    # The core is set: the note under the buttons goes, the fix button with it, and the block keeps the buttons' width.
-    SettingsStore(tmp_path / "settings.json").save(
-        Settings(core_python=str(tmp_path / "python.exe"), core_checkout=str(tmp_path / "core"))
+
+def _assert_local_card_fits(tab: HomeTab, *, core: bool) -> None:
+    """Home does not scroll sideways, the whole Local card shows in Home's viewport, and each Local button shows whole on
+    the card: inside its text block, under the card's own lines and above the lines under the buttons, overlapping no
+    other button, and on or off as the gate says. The buttons wrap onto another row only when the next one does not fit."""
+    scroll = tab.findChild(QScrollArea, "home-scroll")
+    assert scroll.horizontalScrollBar().maximum() == 0, "Home scrolls sideways"
+    assert not scroll.horizontalScrollBar().isVisible()
+    viewport = scroll.viewport()
+    card = _card(tab, "local")
+    assert viewport.rect().contains(_box(card, viewport)), (_box(card, viewport), viewport.rect())
+    block = _block(card, "local")
+    area = _box(block, card)
+    # Paragraphs 0 to 3 are the card's own lines (title, headline, detail, checked line). Any further ones sit under
+    # the buttons.
+    own_lines_end = area.top() + _paragraph_box(block, 3).bottom()
+    shown_lines = visible_text(card).split("\n")
+    under = area.top() + _paragraph_box(block, 4).top() if len(shown_lines) > 4 else area.bottom() + 1
+    expected = {"start": core, "stop": core, "restart": core, "fix": not core}
+    boxes = []
+    for name, on in expected.items():
+        button = card.findChild(QPushButton, f"home-local-{name}")
+        if name == "fix" and core:
+            assert not button.isVisible(), "the fix button goes when the gate is on"
+            continue
+        assert button.isVisible(), name
+        assert button.isEnabled() is on, name
+        box = _box(button, card)
+        assert button.size() == button.sizeHint(), f"{name} is cut: {button.size()} for {button.sizeHint()}"
+        assert area.left() <= box.left() and box.right() <= area.right(), (name, box, area)
+        assert own_lines_end < box.top() and box.bottom() < under, (name, box, own_lines_end, under)
+        boxes.append(box)
+    for index, box in enumerate(boxes):
+        assert not any(box.intersects(other) for other in boxes[index + 1:]), "two buttons overlap"
+    rows: list[list[QRect]] = []
+    for box in boxes:
+        if rows and rows[-1][-1].top() == box.top():
+            rows[-1].append(box)
+        else:
+            rows.append([box])
+    gaps = {right.left() - left.right() - 1 for row in rows for left, right in zip(row, row[1:])}
+    assert len(gaps) <= 1, gaps
+    gap = gaps.pop() if gaps else 0
+    for above, row in zip(rows, rows[1:]):
+        assert above[-1].right() + gap + row[0].width() > area.right(), "a button wrapped that fitted on the row above"
+
+
+def _window_home(qtbot, tmp_path, asked) -> tuple[QWidget, HomeTab]:
+    """The real window, 716 pixels wide: the width it opens at on the 800-pixel offscreen screen. Home is its first tab."""
+    window = _window(qtbot, tmp_path, asked=asked)
+    _activate(window)
+    window.resize(716, window.height())
+    qtbot.waitUntil(lambda: window.width() == 716, timeout=3000)
+    tab = window.findChild(HomeTab)
+    assert tab is not None and tab.isVisible()
+    return window, tab
+
+
+def _home_1100(qtbot, tmp_path, asked) -> tuple[QWidget, HomeTab]:
+    tab = _home(qtbot, tmp_path, asked=asked)
+    assert tab.width() == 1100
+    return tab, tab
+
+
+@pytest.mark.parametrize("build", [_window_home, _home_1100], ids=["window-716", "home-1100"])
+def test_the_local_card_fits_home_and_a_gate_change_redraws_its_buttons_and_the_line_under_them(
+    qtbot, tmp_path, ui_font, build
+):
+    if not ui_font:
+        pytest.skip("the window's font is not on this computer, and button widths follow the font")
+    asked: list[str] = []
+    window, tab = build(qtbot, tmp_path, asked)
+    _all_settled(qtbot, tab)
+    card = _card(tab, "local")
+    _laid_out(qtbot, card, "local")
+
+    # No core: Start, Stop and Restart are off, the fix button is on, and the line under the buttons says why.
+    assert visible_text(card).split("\n")[-1] == CORE_NOT_SET_TEXT
+    _assert_local_card_fits(tab, core=False)
+    # A real click on the fix button, where the card shows it, runs it. The chooser is cancelled, and the line under the
+    # buttons says so, under the note.
+    _scroll_into_view(card)
+    fix = card.findChild(QPushButton, "home-local-fix")
+    _click(window, fix, fix.rect().center())
+    assert asked == ["choose the core folder"]
+    assert visible_text(card).split("\n")[-2:] == [CORE_NOT_SET_TEXT, CHOOSE_CANCELLED_TEXT]
+    _laid_out(qtbot, card, "local")
+    _assert_local_card_fits(tab, core=False)
+
+    # The core is set: the buttons come on, the fix button and the note go, and the result line stays under the buttons.
+    store = SettingsStore(tmp_path / "settings.json")
+    store.save(
+        dataclasses.replace(
+            store.load().settings, core_python=str(tmp_path / "python.exe"), core_checkout=str(tmp_path / "core")
+        )
     )
     tab.refresh_tunnel_gate()
-    assert not fix.isVisible()
-    _assert_lines(visible_text(card), WHOLE_CARD_LINES["local"][:4])
-    assert controls.minimumSizeHint().width() < wide
-    assert block.minimumWidth() == max(block.minimumSizeHint().width(), controls.minimumSizeHint().width())
     _laid_out(qtbot, card, "local")
-    assert controls.geometry().bottom() == block.geometry().bottom()
+    _assert_lines(visible_text(card), WHOLE_CARD_LINES["local"][:4] + [re.escape(CHOOSE_CANCELLED_TEXT)])
+    _assert_local_card_fits(tab, core=True)
+    assert _copy_action(card) is not None and _shown_labels(card) == [_block(card, "local")]
+
+    # A real click on each button, where the card shows it, asks first. Every answer is No, so nothing runs.
+    for name in ("start", "stop", "restart"):
+        _scroll_into_view(card)
+        button = card.findChild(QPushButton, f"home-local-{name}")
+        _click(window, button, button.rect().center())
+        _laid_out(qtbot, card, "local")
+    assert asked[1:] == ["Start the local server?", "Stop the local server?", "Restart the local server: stop it first?"]
+    _assert_local_card_fits(tab, core=True)
 
 
 def test_a_drag_over_the_latex_row_selects_all_of_it_and_runs_on_to_the_last_line(qtbot, tmp_path):
@@ -668,6 +778,8 @@ def test_ctrl_c_copies_the_whole_card_when_the_card_has_focus_and_only_the_selec
     assert QApplication.focusWidget() is card
     copied = _ctrl_c(tab)
     assert copied == visible_text(card)
+    # No core is set, so the card shows the line under its buttons (the fix button is there too), and the copy ends with it.
+    assert card.findChild(QPushButton, "home-local-fix").isVisible()
     _assert_lines(copied, WHOLE_CARD_LINES["local"])
 
     # Inside the text, Ctrl+C copies what was selected there, not the whole card.
@@ -927,7 +1039,8 @@ class _Runner:
         return _tunnel_not_available(scope)
 
 
-def _window(qtbot, tmp_path) -> MainWindow:
+def _window(qtbot, tmp_path, asked=None) -> MainWindow:
+    """The real window with fakes. Every question its runner actions ask is answered No (and recorded in ``asked``)."""
     store = SettingsStore(tmp_path / "settings.json")
     store.save(Settings(mode="local"))
 
@@ -959,7 +1072,7 @@ def _window(qtbot, tmp_path) -> MainWindow:
         tunnel_runner=_Runner(),
         tools_status=lambda: ToolsStatus(rows=(), message="Not checked in this test."),
         update_transport=None,
-        runner_actions=_actions(store),
+        runner_actions=_actions(store, asked),
     )
     qtbot.addWidget(window)
     return window
