@@ -434,6 +434,8 @@ class LaunchStarts(QObject):
             text = "\n".join(note.message for note in notes if isinstance(note, LaunchNote))
         if text and self._report is not None:
             self._report(text)
+        # A launch-time start may have started the local server, so Home reads its cards again.
+        self._actions.notify_runner_state_changed()
 
 
 __all__ = [
