@@ -3,6 +3,11 @@
 Both transports are fakes, so no socket is opened and no keychain is read. Each fake records its calls and the
 thread it ran on, so a test can prove that a refresh runs off the UI thread, that nothing is sent before the tab is
 shown, and that a refused address sends nothing. The token is checked against every widget's visible text.
+
+Whether the local server answered is decided by data_source.local_server_answers, the Projects tab's check. The
+panel reaches it through its project provider, so build_panel gives the provider that check with a fake /health
+probe: refused for a fake local server whose error is not_running, running otherwise, and error for a non-loopback
+address, as local_client.probe_health answers.
 """
 
 import gc
@@ -19,8 +24,9 @@ from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from _shared_delivery import emit, recording_deliveries, visible_state
-from meridian_desktop import claude_processes, hosted_client, sessions_client as sc
+from meridian_desktop import claude_processes, hosted_client, local_client, sessions_client as sc
 from meridian_desktop.claude_processes import ClaudeProcess, ClaudeProcessesResult
+from meridian_desktop.data_source import local_server_answers
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.ui.sessions_panel import (
     CLAUDE_CHECKING_TEXT,
@@ -130,19 +136,45 @@ def no_claude_processes():
     return ClaudeProcessesResult(claude_processes.LISTED, "", ())
 
 
+def fake_health(local, url):
+    """What GET /health gives for a fake local server, as local_client.probe_health names it. No socket is opened.
+
+    A non-loopback or unusable address is an error, as the real probe refuses it before sending. A fake whose error
+    is not_running refuses the connection. Any other fake answers as Meridian.
+    """
+    try:
+        local_client.assert_loopback(url)
+    except LocalClientError:
+        return local_client.HEALTH_ERROR
+    error = getattr(local, "error", None)
+    if isinstance(error, LocalClientError) and error.code == "not_running":
+        return local_client.HEALTH_NOT_RUNNING
+    return local_client.HEALTH_RUNNING
+
+
 def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, None), projects=((PID, "Alpha"),),
                 project_provider=None, hosted_provider=None, mode="local", process_lister=None):
     """Build the panel with fake providers. Returns (panel, counts): how many times each provider was called.
 
     ``mode`` is the mode saved in Settings. The mode provider runs on the worker, so counts.mode also shows each
     timer tick that reached the worker. ``process_lister`` stands in for the Claude process listing. Without one, the
-    listing finds no Claude program, so no test starts tasklist.
+    listing finds no Claude program, so no test starts tasklist. The project provider carries the Projects tab's
+    local-server check, data_source.local_server_answers, with fake_health as its probe; counts.probes counts it.
     """
-    counts = SimpleNamespace(projects=0, hosted=0, mode=0, claude=0)
+    counts = SimpleNamespace(projects=0, hosted=0, mode=0, claude=0, probes=0)
 
-    def list_projects():
-        counts.projects += 1
-        return project_provider() if project_provider is not None else list(projects)
+    class Provider:
+        """The project list, and the Projects tab's own local-server check, as the window's ProjectsProvider has."""
+
+        def __call__(self):
+            counts.projects += 1
+            return project_provider() if project_provider is not None else list(projects)
+
+        def local_server_answers(self, url):
+            counts.probes += 1
+            return local_server_answers(url, lambda probed: fake_health(local, probed))
+
+    list_projects = Provider()
 
     def hosted_pair():
         counts.hosted += 1
@@ -558,11 +590,7 @@ def test_no_projects_says_so_and_sends_nothing(qtbot):
     assert local.calls == []
 
 
-class ProjectsUnavailable(Exception):
-    """Stands in for the window's exception. Its class name must never reach the status line."""
-
-
-@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), ProjectsUnavailable("/home/x/secret.db")])
+@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), OSError("/home/x/secret.db")])
 def test_a_failed_project_list_says_so_in_plain_words_and_sends_nothing(qtbot, failure):
     def broken():
         raise failure
@@ -623,16 +651,41 @@ def test_the_token_is_not_shown_when_hosted_refuses_it(qtbot):
     assert SENTINEL_TOKEN not in all_visible_text(panel)
 
 
-def test_a_non_loopback_local_address_is_refused_and_nothing_is_sent(qtbot):
+@pytest.mark.parametrize("token", [SENTINEL_TOKEN, None], ids=["token", "no-token"])
+def test_a_non_loopback_local_address_gets_nothing_and_the_next_source_is_the_one_projects_asks(qtbot, token):
+    """The real probe refuses a non-loopback address before it sends (state error), so the Projects tab's check says
+    no server answered. The Sessions tab uses that same check: nothing goes to the address, and the next source is
+    hosted with a saved token, as on Projects, or nothing at all without one."""
+    remote = "http://10.0.0.5:7878"
+    assert local_client.probe_health(remote) == local_client.HEALTH_ERROR  # refused before any request
+    assert local_server_answers(remote, local_client.probe_health) is False
     local = FakeLocal()
-    hosted = FakeHosted()
-    panel, hosted = make_panel(qtbot, local=local, hosted=hosted, local_url="http://10.0.0.5:7878",
-                               hosted_value=(HOSTED, SENTINEL_TOKEN))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, hosted = make_panel(qtbot, local=local, hosted=hosted, local_url=remote, hosted_value=(HOSTED, token))
     panel.show()
     settle(qtbot, panel)
     assert local.calls == []
+    if token:
+        assert len(hosted.calls) == 1
+        assert status_of(panel).startswith("1 session(s) from hosted Meridian.")
+    else:
+        assert hosted.calls == []
+        assert "not running on this computer" in status_of(panel)
+
+
+def test_a_local_server_that_answers_its_check_gives_the_final_answer_even_an_error(qtbot):
+    """As on Projects: once the check says the local server answered, its sessions answer is shown as it is, a timeout
+    included, and hosted is not asked over it, even with a token saved."""
+    local = FakeLocal(error=LocalClientError("timeout", "slow"))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, counts = build_panel(qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN))
+    panel.show()
+    settle(qtbot, panel)
+    assert counts.probes == 1
+    assert len(local.calls) == 1
+    assert status_of(panel) == sc.LOCAL_TIMEOUT_MESSAGE
     assert hosted.calls == []
-    assert "not on this computer" in status_of(panel)
+    assert counts.hosted == 0
 
 
 def test_a_missing_route_shows_its_message_and_no_rows(qtbot):
@@ -678,7 +731,8 @@ def test_a_show_makes_one_project_read_and_one_sessions_read(qtbot):
     panel.show()
     settle(qtbot, panel)
     assert counts.projects == 1
-    assert len(local.calls) == 1  # the sessions read asks the local server first
+    assert counts.probes == 1  # the sessions read asks the Projects tab's local-server check first
+    assert local.calls == []  # which says no server answered, so its sessions route is not asked
     assert counts.hosted == 1
     assert len(hosted.calls) == 1  # and then the hosted host, once
 
@@ -719,7 +773,7 @@ def test_a_refresh_press_makes_exactly_one_project_read_and_one_sessions_read(qt
     settle(qtbot, panel)
     assert counts.projects == projects + 1
     assert counts.hosted == hosted_reads + 1
-    assert len(local.calls) == local_calls + 1
+    assert len(local.calls) == local_calls  # hosted mode reads hosted only, as the Projects tab does
     assert len(hosted.calls) == hosted_calls + 1
     assert button.isEnabled()
 
@@ -765,10 +819,11 @@ def test_a_local_tick_that_gets_no_answer_changes_nothing_and_asks_hosted_nothin
     settle(qtbot, panel)
     status_before = status_of(panel)
     local.error = LocalClientError("not_running", "x")  # the server stops answering
-    hosted_reads = counts.hosted
+    hosted_reads, probes = counts.hosted, counts.probes
     panel._timer.timeout.emit()  # noqa: SLF001
     settle(qtbot, panel)
-    assert len(local.calls) == 2
+    assert counts.probes == probes + 1  # the tick asks the same local-server check as a full read
+    assert len(local.calls) == 1  # which says no answer, so the sessions route is not asked
     assert counts.hosted == hosted_reads
     assert hosted.calls == []
     assert status_of(panel) == status_before

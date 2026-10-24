@@ -15,9 +15,12 @@ below, are loopback calls: to the local Meridian server at the local_url setting
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
 its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
-only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
-pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
-on the Test connection button in Settings.
+only the hosted URL the owner sets, with the saved token: on the Projects tab, on the Sessions tab when it is first
+shown or its Refresh is pressed (for the project list and the sessions), and on the Test connection button in
+Settings. In hosted mode neither tab reads the local server or the database file. Local mode reads both tabs in one
+order: the local server when it answers (one /health check, data_source.local_server_answers, for both tabs), then
+the hosted URL when a hosted token is saved, then the database file, read-only, only when neither answered and no
+token is saved.
 
 The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
 and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
@@ -198,11 +201,6 @@ def _line_reporter(label: QLabel) -> Callable[[str], None]:
     return report
 
 
-class ProjectsUnavailable(Exception):
-    """The Projects resolver found no source to read. The Sessions tab then says the projects could not be read,
-    in plain words that name no class and no path."""
-
-
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
     """The local URL as saved now, read by the Search tab when a search runs.
 
@@ -243,9 +241,10 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
 def _saved_projects(store: SettingsStore, sources: DataSources) -> ProjectsProvider:
     """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
 
-    When the resolver found no source to read, the provider raises data_source.ProjectsUnresolved with the resolver's
-    own message, and the Sessions tab shows that message. The provider also names the database file the Sessions
-    file read uses, and the settings that choose it. It holds the store, never the window.
+    When the resolver gives no rows (no source to read, or a failed read such as a hosted 401), the provider raises
+    data_source.ProjectsUnresolved with the resolver's own message, and the Sessions tab shows that message. The
+    provider also names the database file the Sessions file read uses, and the settings that choose it. It holds the
+    store, never the window.
     """
 
     def load() -> Settings:

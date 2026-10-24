@@ -207,10 +207,11 @@ def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settin
     table = page.findChild(QTableWidget, "sessions-table")
     qtbot.waitUntil(lambda: table.rowCount() == 1, timeout=5000)
 
-    # The local URL comes from Settings, and the project id from the Projects resolver. The hosted fallback
-    # gets the Settings URL and the token from the store. The list may refresh while the test runs, so
-    # every recorded call must match.
-    assert set(local_calls) == {(LOCAL, PID)}
+    # The one local-server check (data_source.local_server_answers) says the server did not answer, so the sessions
+    # route is never asked. With a token saved, the hosted fallback gets the project id from the Projects resolver, and
+    # the Settings URL and the token from the store. The list may refresh while the test runs, so every recorded call
+    # must match.
+    assert local_calls == []
     assert set(hosted_calls) == {(HOSTED, PID, FAKE_TOKEN)}
     picker = page.findChild(QComboBox, "sessions-project-picker")
     assert picker.itemText(0) == "Alpha"
