@@ -4,17 +4,21 @@ This is Qt code and sits in ui/, so the boundary check allows it. The panel make
 request when it is built. It probes each time it is shown, so an engine started while the
 panel was hidden reads as running when the panel comes back, and again when Check again
 is pressed. The probe runs on the thread pool, and the engine address comes from the
-settings file, so the UI thread never blocks. Results are plain text (PlainText labels),
+settings file, so the UI thread never blocks. Results are plain text (a PlainText label),
 so engine text is never read as HTML.
 
 The panel shows running or not running, the engine and extension versions when the engine
 answers, what the probe found, and how to start the engine. The panel never starts it.
+
+All of that text is one TextBlock: one selectable label that holds every line. A drag cannot
+cross from one QLabel to the next, so a left-button drag across the block highlights all of it,
+and Ctrl+C copies all of it. The Services page uses the same TextBlock for its rows.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,12 +50,44 @@ class _Probe:
     status: EngineStatus | None
 
 
-def _label(parent: QWidget, name: str, text: str) -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return make_selectable(label)
+class TextBlock(QLabel):
+    """Lines of plain text that belong together, in one selectable label.
+
+    A mouse drag cannot cross from one QLabel to the next, so a block built from one label per line can only be
+    copied a line at a time. One label holds every line instead: a left-button drag across it highlights the whole
+    block, and Ctrl+C copies all of it, one line per line. Each line has a key, and an empty line is left out. The
+    label's text is set only when it changes, so a redraw that changes nothing keeps a selection.
+    """
+
+    def __init__(self, parent: QWidget | None, name: str, lines: Iterable[tuple[str, str]]) -> None:
+        super().__init__(parent)
+        self.setObjectName(name)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        make_selectable(self)
+        self._lines: dict[str, str] = dict(lines)
+        self._render()
+
+    def keys(self) -> tuple[str, ...]:
+        """The keys of the block's lines, in the order they are shown."""
+        return tuple(self._lines)
+
+    def line(self, key: str) -> str:
+        """The text of one line. Empty when that line is not shown."""
+        return self._lines[key]
+
+    def set_lines(self, lines: Mapping[str, str]) -> None:
+        """Set some of the lines at once. Every key must be one the block was built with."""
+        unknown = sorted(set(lines) - set(self._lines))
+        if unknown:
+            raise KeyError(f"no such line in {self.objectName()}: {', '.join(unknown)}")
+        self._lines.update(lines)
+        self._render()
+
+    def _render(self) -> None:
+        text = "\n".join(line for line in self._lines.values() if line)
+        if self.text() != text:
+            self.setText(text)
 
 
 def _probe(settings: SettingsStore, client: Any) -> _Probe:
@@ -129,7 +165,7 @@ class _ProbeJob(QRunnable):
 
 
 class LatexPanel(QWidget):
-    """The LaTeX section of the Writing tab: running or not, with both versions side by side."""
+    """The LaTeX section of the Writing tab: running or not, with both versions, in one selectable block of text."""
 
     def __init__(
         self,
@@ -154,22 +190,19 @@ class LatexPanel(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
 
-        self._status = _label(self, "latex-status", UNCHECKED_TEXT)
-        layout.addWidget(self._status)
-
-        self._detail = _label(self, "latex-detail", "")
-        layout.addWidget(self._detail)
-
-        self._start = _label(self, "latex-start", f"How to start: {UNCHECKED_START}")
-        layout.addWidget(self._start)
-
-        versions = QHBoxLayout()
-        self._engine_version = _label(self, "latex-engine-version", engine_version_text(None))
-        self._extension_version = _label(self, "latex-extension-version", extension_version_text(None))
-        versions.addWidget(self._engine_version)
-        versions.addWidget(self._extension_version)
-        versions.addStretch(1)
-        layout.addLayout(versions)
+        # Every line is in one label, so one drag selects them all. The keys name the lines for set_lines and tests.
+        self._text = TextBlock(
+            self,
+            "latex-text",
+            (
+                ("latex-status", UNCHECKED_TEXT),
+                ("latex-detail", ""),
+                ("latex-engine-version", engine_version_text(None)),
+                ("latex-extension-version", extension_version_text(None)),
+                ("latex-start", f"How to start: {UNCHECKED_START}"),
+            ),
+        )
+        layout.addWidget(self._text)
 
         action_row = QHBoxLayout()
         self._check_button = QPushButton("Check again", self)
@@ -198,8 +231,7 @@ class LatexPanel(QWidget):
         self._generation += 1
         generation = self._generation
         self._check_button.setEnabled(False)
-        self._status.setText(CHECKING_TEXT)
-        self._detail.setText("")
+        self._text.set_lines({"latex-status": CHECKING_TEXT, "latex-detail": ""})
         # The job holds the probe's inputs (the settings store and the client), this panel's owner token and the
         # shared delivery object. It never holds the panel, and the deliver closure captures no widget.
         work = functools.partial(_probe, self._settings, self._client)
@@ -232,11 +264,15 @@ class LatexPanel(QWidget):
 
     def _show_result(self, status: EngineStatus | None, detail: str, port: str) -> None:
         connected = status is not None and status.connected
-        self._status.setText(CONNECTED_TEXT if connected else NOT_CONNECTED_TEXT)
-        self._detail.setText(detail)
-        self._start.setText(f"How to start: {engine_start_text(status, port)}")
-        self._engine_version.setText(engine_version_text(status))
-        self._extension_version.setText(extension_version_text(status))
+        self._text.set_lines(
+            {
+                "latex-status": CONNECTED_TEXT if connected else NOT_CONNECTED_TEXT,
+                "latex-detail": detail,
+                "latex-engine-version": engine_version_text(status),
+                "latex-extension-version": extension_version_text(status),
+                "latex-start": f"How to start: {engine_start_text(status, port)}",
+            }
+        )
 
 
 __all__ = [
@@ -244,6 +280,7 @@ __all__ = [
     "NOT_CONNECTED_TEXT",
     "UNCHECKED_TEXT",
     "LatexPanel",
+    "TextBlock",
     "engine_start_text",
     "engine_version_text",
     "extension_version_text",

@@ -7,7 +7,9 @@ separate stdio server (dist/mcp-server.js) that never listens on the engine port
    constant, and says the Claude tools do not start this server;
 2. the extension version the engine sends as a hash (GET /extension-version answers {"hash": ...}) shows in short form;
 3. the LaTeX panel and the Services page check again on every show, not only the first;
-4. the Settings LaTeX label names the saved engine address, not a fixed one.
+4. the Settings LaTeX label names the saved engine address, not a fixed one;
+5. a left-button drag across a block of lines in the LaTeX panel or on the Services page highlights the whole block,
+   and Ctrl+C copies all of it, because each block is one selectable label.
 
 The loopback engine fakes bind port 0, so the OS picks a free port. No test touches the real engine port. Offscreen Qt
 and a temp home, from conftest.
@@ -18,7 +20,10 @@ import threading
 from http.server import BaseHTTPRequestHandler
 
 import pytest
-from PySide6.QtWidgets import QLabel, QPushButton
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from _fakes import MemoryKeyring, QuietServer
 from meridian_desktop import home_status, latex_client
@@ -37,7 +42,7 @@ from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.slot_ports import SLOT_PORTS, SlotPortResult
 from meridian_desktop.ui import services_page
-from meridian_desktop.ui.latex_panel import CHECKING_TEXT, CONNECTED_TEXT, LatexPanel, engine_start_text
+from meridian_desktop.ui.latex_panel import CHECKING_TEXT, CONNECTED_TEXT, LatexPanel, TextBlock, engine_start_text
 from meridian_desktop.ui.services_page import HealthFacts, ServicesPage, engine_row
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, SettingsTab, latex_section_text
 
@@ -131,8 +136,15 @@ class _FakeEngineClient:
         return self.status
 
 
+def _line(root, key):
+    """The text of the line ``key`` in the one TextBlock under ``root`` that holds it."""
+    blocks = [block for block in root.findChildren(TextBlock) if key in block.keys()]
+    assert len(blocks) == 1, key
+    return blocks[0].line(key)
+
+
 def _panel_settled(panel):
-    status = panel.findChild(QLabel, "latex-status").text()
+    status = _line(panel, "latex-status")
     return panel.findChild(QPushButton, "latex-check").isEnabled() and status not in (CHECKING_TEXT,)
 
 
@@ -231,10 +243,10 @@ def test_the_panel_shows_the_short_hash_from_a_loopback_server_ts_engine(qtbot, 
 
     panel.show()
     qtbot.waitExposed(panel)
-    qtbot.waitUntil(lambda: panel.findChild(QLabel, "latex-status").text() == CONNECTED_TEXT, timeout=5000)
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == CONNECTED_TEXT, timeout=5000)
 
-    assert panel.findChild(QLabel, "latex-extension-version").text() == f"Extension version: {SHORT_HASH}"
-    assert panel.findChild(QLabel, "latex-engine-version").text() == f"Engine version: {NOT_REPORTED}"
+    assert _line(panel, "latex-extension-version") == f"Extension version: {SHORT_HASH}"
+    assert _line(panel, "latex-engine-version") == f"Engine version: {NOT_REPORTED}"
     assert ENGINE_HASH not in "\n".join(label.text() for label in panel.findChildren(QLabel))
 
 
@@ -253,7 +265,7 @@ def test_the_latex_panel_checks_again_each_time_it_is_shown(qtbot, settings_path
     client.status = CONNECTED_STATUS  # the owner started the engine while the panel was hidden
     panel.hide()
     panel.show()
-    qtbot.waitUntil(lambda: panel.findChild(QLabel, "latex-status").text() == CONNECTED_TEXT, timeout=5000)
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == CONNECTED_TEXT, timeout=5000)
     assert len(client.calls) == 2
 
     panel.findChild(QPushButton, "latex-check").click()
@@ -275,20 +287,20 @@ def _services_page(qtbot, settings_path, engine):
 def test_the_services_page_checks_on_every_show_and_on_the_button(qtbot, settings_path):
     engine = _Recorder(NOT_RUNNING_STATUS)
     page = _services_page(qtbot, settings_path, engine)
-    state = page.findChild(QLabel, "services-engine")
+    state = page.findChild(TextBlock, "services-engine-text")
 
     assert engine.calls == []  # building the page checks nothing
 
     page.show()
     qtbot.waitExposed(page)
     qtbot.waitUntil(lambda: len(engine.calls) == 1 and not page.busy, timeout=5000)
-    assert state.text() == "LaTeX engine: not running"
+    assert state.line("services-engine") == f"{services_page.ENGINE_TITLE}: not running"
 
     engine.value = CONNECTED_STATUS
     page.hide()
     page.show()
     qtbot.waitUntil(lambda: len(engine.calls) == 2 and not page.busy, timeout=5000)
-    assert state.text() == "LaTeX engine: running"
+    assert state.line("services-engine") == f"{services_page.ENGINE_TITLE}: running"
 
     page.findChild(QPushButton, "services-check").click()
     qtbot.waitUntil(lambda: len(engine.calls) == 3 and not page.busy, timeout=5000)
@@ -344,3 +356,129 @@ def test_the_settings_tab_label_reads_the_engine_url_setting(qtbot, settings_pat
     store.save(Settings(engine_url="http://localhost:8475"))
     tab.refresh()
     assert tab.findChild(QLabel, "settings-latex-section").text() == "LaTeX (local engine on localhost:8475)"
+
+
+# ----------------------------------------------------------------- 5. one drag selects a whole block, Ctrl+C copies it
+
+
+def _drag_across(widget):
+    """A left-button drag from the top-left corner of ``widget`` to its bottom-right corner, sent as a mouse sends it."""
+    left, none = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+    start, end = QPoint(1, 1), QPoint(widget.width() - 2, widget.height() - 2)
+
+    def send(kind, pos, buttons, button):
+        event = QMouseEvent(
+            kind, QPointF(pos), QPointF(widget.mapToGlobal(pos)), button, buttons, Qt.KeyboardModifier.NoModifier
+        )
+        QApplication.sendEvent(widget, event)
+
+    send(QEvent.Type.MouseButtonPress, start, left, left)
+    for step in range(1, 9):
+        x = start.x() + (end.x() - start.x()) * step // 8
+        y = start.y() + (end.y() - start.y()) * step // 8
+        send(QEvent.Type.MouseMove, QPoint(x, y), left, none)
+    send(QEvent.Type.MouseButtonRelease, end, none, left)
+
+
+def _ctrl_c(widget):
+    """Press Ctrl+C on ``widget`` and return what the clipboard then holds."""
+    clipboard = QGuiApplication.clipboard()
+    clipboard.setText("<<nothing copied>>")
+    widget.setFocus()
+    QTest.keyClick(widget, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    return clipboard.text()
+
+
+def _label_with(root, text):
+    """The one label under ``root`` that shows ``text``."""
+    found = [label for label in root.findChildren(QLabel) if text in label.text()]
+    assert len(found) == 1, [label.objectName() for label in found]
+    return found[0]
+
+
+def _shown_panel(qtbot, settings_path, status):
+    panel = LatexPanel(SettingsStore(settings_path), client=_FakeEngineClient(status))
+    qtbot.addWidget(panel)
+    panel.resize(900, 500)
+    panel.show()
+    qtbot.waitExposed(panel)
+    qtbot.waitUntil(lambda: _panel_settled(panel), timeout=5000)
+    return panel
+
+
+@pytest.mark.parametrize("status", [NOT_RUNNING_STATUS, CONNECTED_STATUS])
+def test_one_drag_across_the_latex_panel_text_copies_every_line(qtbot, settings_path, status):
+    panel = _shown_panel(qtbot, settings_path, status)
+    shown = CONNECTED_TEXT if status.connected else latex_client.NOT_RUNNING_MESSAGE
+    block = _label_with(panel, shown)
+
+    _drag_across(block)
+    copied = _ctrl_c(block)
+
+    assert block.hasSelectedText()
+    assert copied == block.text()
+    for line in (shown, "Engine version:", "Extension version:", "How to start:"):
+        assert line in copied, line
+    assert copied.count("\n") >= 4  # the lines are copied as lines
+
+
+def test_the_latex_panel_text_is_one_plain_selectable_label(qtbot, settings_path):
+    panel = _shown_panel(qtbot, settings_path, NOT_RUNNING_STATUS)
+
+    labels = [label for label in panel.findChildren(QLabel) if label.text()]
+
+    assert [label.objectName() for label in labels] == ["latex-text"]
+    assert labels[0].textFormat() == Qt.TextFormat.PlainText
+    flags = labels[0].textInteractionFlags()
+    assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
+
+
+def _shown_services_page(qtbot, settings_path, engine_status):
+    page = _services_page(qtbot, settings_path, _Recorder(engine_status))
+    page.resize(900, 900)
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.waitUntil(lambda: not page.busy, timeout=5000)
+    return page
+
+
+@pytest.mark.parametrize("prefix, state_line", [
+    ("services-health", "Local server health: running"),
+    ("services-engine", f"{services_page.ENGINE_TITLE}: not running"),
+    ("services-runner", "Runner: could not check"),
+])
+def test_one_drag_across_a_services_row_copies_the_whole_row(qtbot, settings_path, prefix, state_line):
+    page = _shown_services_page(qtbot, settings_path, NOT_RUNNING_STATUS)
+    row = page.findChild(QFrame, f"{prefix}-row")
+    block = _label_with(row, state_line)
+
+    _drag_across(block)
+    copied = _ctrl_c(block)
+
+    assert copied == block.text()
+    for line in (state_line, "Port checked:", "Last checked:", "How to start:"):
+        assert line in copied, line
+    # The whole row is that one label.
+    assert [label for label in row.findChildren(QLabel) if label.text()] == [block]
+
+
+def test_a_text_block_keeps_its_selection_when_its_lines_are_set_to_the_same_text(qtbot):
+    block = TextBlock(None, "test-block", [("a", "First line"), ("b", ""), ("c", "Third line")])
+    qtbot.addWidget(block)
+    block.resize(400, 120)
+    block.show()
+    qtbot.waitExposed(block)
+
+    assert block.text() == "First line\nThird line"  # an empty line is left out
+    _drag_across(block)
+    assert block.hasSelectedText()
+
+    block.set_lines({"a": "First line", "c": "Third line"})
+    assert block.hasSelectedText()  # nothing changed, so the selection stays
+
+    block.set_lines({"b": "Second line"})
+    assert block.text() == "First line\nSecond line\nThird line"
+    assert block.line("b") == "Second line"
+    with pytest.raises(KeyError):
+        block.set_lines({"unknown": "text"})

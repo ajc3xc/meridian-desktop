@@ -45,6 +45,7 @@ from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, MUTATING_VERBS, MO
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.slot_ports import PER_PORT_TIMEOUT, PROBE_HOST, SLOT_PORTS, SlotPortResult, probe_slot_ports
 from meridian_desktop.ui import services_page
+from meridian_desktop.ui.latex_panel import TextBlock
 from meridian_desktop.ui.services_page import (
     CHECK_BUTTON_TEXT,
     ENGINE_TITLE,
@@ -185,6 +186,10 @@ def _press(qtbot, page):
 
 
 def _text(page, name):
+    """The text of a label, or of a line in one of the row blocks (each row is one TextBlock)."""
+    for block in page.findChildren(TextBlock):
+        if name in block.keys():
+            return block.line(name)
     return page.findChild(QLabel, name).text()
 
 
@@ -327,7 +332,7 @@ def test_services_tab_shows_one_row_per_service(qtbot, settings_path):
     assert _text(page, "services-health-port") == "Port checked: 7999"
     assert _text(page, "services-health-seen") == "Port 7999 is listening, and Meridian answered its health check."
     assert _text(page, "services-health-version") == "Engine version: 1.4.2. Git SHA: a555660ef312."
-    assert page.findChild(QLabel, "services-health-version").isHidden() is False
+    assert "Engine version: 1.4.2." in page.findChild(TextBlock, "services-health-text").text()
     assert _text(page, "services-health-checked") == "Last checked: 2026-10-19 14:03:22"
     assert _text(page, "services-health-start") == "How to start: it is already running, so there is nothing to start."
 
@@ -398,7 +403,7 @@ def test_unchecked_rows_say_so_and_still_say_how_to_start(qtbot, settings_path):
     assert _text(page, "services-health-checked") == f"Last checked: {NOT_CHECKED}"
     assert _text(page, "services-engine-start").startswith("How to start: start the LaTeX engine")
     assert _text(page, "services-runner-start").startswith("How to start: run python -m meridian.local_runner start")
-    assert page.findChild(QLabel, "services-health-version").isHidden()
+    assert _text(page, "services-health-version") == ""  # an empty line is not shown
 
 
 def test_not_listening_comes_from_a_refused_socket_for_both_addresses(qtbot, settings_path, monkeypatch):
@@ -650,8 +655,7 @@ def test_labels_are_plain_text(qtbot, settings_path):
 
     _press(qtbot, page)
 
-    version = page.findChild(QLabel, "services-health-version")
-    assert version.text() == "Engine version: <b>1.4.2</b>."
+    assert _text(page, "services-health-version") == "Engine version: <b>1.4.2</b>."
     for label in page.findChildren(QLabel):
         assert label.textFormat() == Qt.TextFormat.PlainText
 

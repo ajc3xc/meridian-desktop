@@ -31,6 +31,7 @@ from meridian_desktop.ui.latex_panel import (
     UNCHECKED_START,
     UNCHECKED_TEXT,
     LatexPanel,
+    TextBlock,
     engine_start_text,
 )
 
@@ -69,12 +70,13 @@ class _RefusingOpener:
         raise urllib.error.URLError(ConnectionRefusedError(111, "connection refused"))
 
 
-def _label(panel, name):
-    return panel.findChild(QLabel, name)
+def _line(panel, key):
+    """One line of the panel's text. Every line is in the one TextBlock, latex-text."""
+    return panel.findChild(TextBlock, "latex-text").line(key)
 
 
 def _settled(panel):
-    return panel.findChild(QPushButton, "latex-check").isEnabled() and _label(panel, "latex-status").text() != CHECKING_TEXT
+    return panel.findChild(QPushButton, "latex-check").isEnabled() and _line(panel, "latex-status") != CHECKING_TEXT
 
 
 def _show_and_wait(qtbot, panel):
@@ -131,10 +133,10 @@ def test_running_engine_shows_running_with_both_versions(qtbot, settings_path):
 
     _show_and_wait(qtbot, panel)
 
-    assert _label(panel, "latex-status").text() == CONNECTED_TEXT == "LaTeX engine: running."
-    assert _label(panel, "latex-engine-version").text() == "Engine version: 1.4.0"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: 0.9.2"
-    assert _label(panel, "latex-start").text() == "How to start: it is already running, so there is nothing to start."
+    assert _line(panel, "latex-status") == CONNECTED_TEXT == "LaTeX engine: running."
+    assert _line(panel, "latex-engine-version") == "Engine version: 1.4.0"
+    assert _line(panel, "latex-extension-version") == "Extension version: 0.9.2"
+    assert _line(panel, "latex-start") == "How to start: it is already running, so there is nothing to start."
 
 
 def test_engine_not_listening_shows_not_running_from_a_refused_socket(qtbot, settings_path, monkeypatch):
@@ -145,11 +147,11 @@ def test_engine_not_listening_shows_not_running_from_a_refused_socket(qtbot, set
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, latex_client))
 
     assert opener.urls == [f"{LOCAL_URL}/health"]
-    assert _label(panel, "latex-status").text() == NOT_CONNECTED_TEXT == "LaTeX engine: not running."
-    assert _label(panel, "latex-detail").text() == latex_client.NOT_RUNNING_MESSAGE
-    assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: not available"
-    assert _label(panel, "latex-start").text() == (
+    assert _line(panel, "latex-status") == NOT_CONNECTED_TEXT == "LaTeX engine: not running."
+    assert _line(panel, "latex-detail") == latex_client.NOT_RUNNING_MESSAGE
+    assert _line(panel, "latex-engine-version") == "Engine version: not available"
+    assert _line(panel, "latex-extension-version") == "Extension version: not available"
+    assert _line(panel, "latex-start") == (
         f"How to start: {latex_client.START_HELP} Then press Check again to check port 8471."
     )
 
@@ -160,15 +162,15 @@ def test_the_start_sentence_names_the_port_from_the_configured_address(qtbot, se
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, client))
 
     assert client.calls == [("http://127.0.0.1:9999", latex_client.PROBE_TIMEOUT)]
-    assert "check port 9999" in _label(panel, "latex-start").text()
+    assert "check port 9999" in _line(panel, "latex-start")
 
 
 def test_another_program_on_the_port_reads_not_running_and_says_to_stop_it(qtbot, settings_path):
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(NOT_ANSWERING_STATUS)))
 
-    assert _label(panel, "latex-status").text() == "LaTeX engine: not running."
-    assert _label(panel, "latex-detail").text() == latex_client.NOT_ANSWERING_MESSAGE
-    assert _label(panel, "latex-start").text() == (
+    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-detail") == latex_client.NOT_ANSWERING_MESSAGE
+    assert _line(panel, "latex-start") == (
         "How to start: stop the other program on port 8471, then start the LaTeX engine you installed "
         "and press Check again."
     )
@@ -183,10 +185,10 @@ def test_an_address_with_a_user_name_is_refused_and_the_user_name_is_not_shown(q
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, latex_client))
 
     assert opener.urls == []
-    assert _label(panel, "latex-status").text() == "LaTeX engine: not running."
-    assert _label(panel, "latex-detail").text() == latex_client.NOT_LOOPBACK_MESSAGE
+    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-detail") == latex_client.NOT_LOOPBACK_MESSAGE
     assert "someone" not in _all_label_text(panel)
-    assert "change the engine address" in _label(panel, "latex-start").text()
+    assert "change the engine address" in _line(panel, "latex-start")
 
 
 @pytest.mark.parametrize(
@@ -199,9 +201,9 @@ def test_an_address_with_a_user_name_is_refused_and_the_user_name_is_not_shown(q
 def test_an_engine_that_could_not_be_checked_says_so_and_how_to_check_it(qtbot, settings_path, status, detail):
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(status)))
 
-    assert _label(panel, "latex-status").text() == "LaTeX engine: not running."
-    assert _label(panel, "latex-detail").text() == detail
-    assert _label(panel, "latex-start").text() == (
+    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert _line(panel, "latex-detail") == detail
+    assert _line(panel, "latex-start") == (
         "How to start: check that the LaTeX engine you installed is running on this computer, "
         "then press Check again."
     )
@@ -211,9 +213,9 @@ def test_a_failed_check_names_the_error_only_and_still_says_how_to_start(qtbot, 
     secret = "SECRET-DETAIL-IN-THE-MESSAGE"
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, _FakeEngineClient(ValueError(secret))))
 
-    assert _label(panel, "latex-detail").text() == "The check failed unexpectedly (ValueError)."
+    assert _line(panel, "latex-detail") == "The check failed unexpectedly (ValueError)."
     assert secret not in _all_label_text(panel)
-    assert _label(panel, "latex-start").text() == (
+    assert _line(panel, "latex-start") == (
         "How to start: start the LaTeX engine you installed on this computer, then press Check again."
     )
 
@@ -226,8 +228,8 @@ def test_check_again_moves_from_running_to_not_running_and_updates_the_sentence(
     panel.findChild(QPushButton, "latex-check").click()
     qtbot.waitUntil(lambda: _settled(panel), timeout=5000)
 
-    assert _label(panel, "latex-status").text() == "LaTeX engine: not running."
-    assert "check port 8471" in _label(panel, "latex-start").text()
+    assert _line(panel, "latex-status") == "LaTeX engine: not running."
+    assert "check port 8471" in _line(panel, "latex-start")
     assert len(client.calls) == 2
 
 
@@ -235,7 +237,7 @@ def test_panel_labels_are_plain_text_and_selectable(qtbot, settings_path):
     client = _FakeEngineClient(EngineStatus(ENGINE_CONNECTED, "<b>ok</b>", engine_version="<i>1</i>", extension_version="2"))
     panel = _show_and_wait(qtbot, _panel(qtbot, settings_path, client))
 
-    assert _label(panel, "latex-engine-version").text() == "Engine version: <i>1</i>"
+    assert _line(panel, "latex-engine-version") == "Engine version: <i>1</i>"
     for label in panel.findChildren(QLabel):
         assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
         assert label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse, label.objectName()
@@ -291,7 +293,7 @@ def test_panel_makes_no_probe_until_it_is_shown(qtbot, settings_path):
     panel = _panel(qtbot, settings_path, client)
 
     assert client.calls == []
-    assert _label(panel, "latex-start").text() == f"How to start: {UNCHECKED_START}"
+    assert _line(panel, "latex-start") == f"How to start: {UNCHECKED_START}"
 
 
 # ----------------------------------------------------------- a result for another owner, or a superseded probe

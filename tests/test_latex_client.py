@@ -35,7 +35,7 @@ from meridian_desktop.latex_client import (
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop.ui.latex_panel import CONNECTED_TEXT, NOT_CONNECTED_TEXT, LatexPanel
+from meridian_desktop.ui.latex_panel import CONNECTED_TEXT, NOT_CONNECTED_TEXT, LatexPanel, TextBlock
 from meridian_desktop.ui.main_window import LATEX_SECTION, MainWindow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -285,8 +285,9 @@ CONNECTED_STATUS = EngineStatus(ENGINE_CONNECTED, CONNECTED_MESSAGE, engine_vers
 NOT_RUNNING_STATUS = EngineStatus(ENGINE_NOT_RUNNING, NOT_RUNNING_MESSAGE)
 
 
-def _label(panel, name):
-    return panel.findChild(QLabel, name)
+def _line(panel, key):
+    """One line of the panel's text. Every line is in the one TextBlock, latex-text."""
+    return panel.findChild(TextBlock, "latex-text").line(key)
 
 
 def test_panel_makes_no_request_until_it_is_shown(qtbot, settings_path):
@@ -307,17 +308,14 @@ def test_panel_probes_once_on_first_show_and_shows_both_versions_side_by_side(qt
     panel.show()
     qtbot.waitExposed(panel)
 
-    status = _label(panel, "latex-status")
-    qtbot.waitUntil(lambda: status.text() == CONNECTED_TEXT, timeout=5000)
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == CONNECTED_TEXT, timeout=5000)
     assert client.calls == [(LOCAL_URL, PROBE_TIMEOUT, True)]
-    engine = _label(panel, "latex-engine-version")
-    extension = _label(panel, "latex-extension-version")
-    assert engine.text() == "Engine version: 1.4.0"
-    assert extension.text() == "Extension version: 0.9.2"
-    assert _label(panel, "latex-detail").text() == CONNECTED_MESSAGE
-    # Both versions sit in one row, the engine version on the left.
-    assert engine.geometry().top() == extension.geometry().top()
-    assert engine.geometry().right() < extension.geometry().left()
+    assert _line(panel, "latex-engine-version") == "Engine version: 1.4.0"
+    assert _line(panel, "latex-extension-version") == "Extension version: 0.9.2"
+    assert _line(panel, "latex-detail") == CONNECTED_MESSAGE
+    # Both versions sit in the one block of text, the engine version first.
+    text = panel.findChild(TextBlock, "latex-text").text()
+    assert text.index("Engine version: 1.4.0") < text.index("Extension version: 0.9.2")
 
 
 def test_check_again_probes_once_more_and_shows_not_connected_without_versions(qtbot, settings_path):
@@ -326,17 +324,16 @@ def test_check_again_probes_once_more_and_shows_not_connected_without_versions(q
     qtbot.addWidget(panel)
     panel.show()
     qtbot.waitExposed(panel)
-    status = _label(panel, "latex-status")
-    qtbot.waitUntil(lambda: status.text() == CONNECTED_TEXT, timeout=5000)
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == CONNECTED_TEXT, timeout=5000)
 
     client.status = NOT_RUNNING_STATUS
     panel.findChild(QPushButton, "latex-check").click()
 
-    qtbot.waitUntil(lambda: status.text() == NOT_CONNECTED_TEXT, timeout=5000)
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == NOT_CONNECTED_TEXT, timeout=5000)
     assert len(client.calls) == 2
-    assert _label(panel, "latex-detail").text() == NOT_RUNNING_MESSAGE
-    assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: not available"
+    assert _line(panel, "latex-detail") == NOT_RUNNING_MESSAGE
+    assert _line(panel, "latex-engine-version") == "Engine version: not available"
+    assert _line(panel, "latex-extension-version") == "Extension version: not available"
 
 
 def test_a_failed_check_shows_the_class_name_only(qtbot, settings_path):
@@ -346,9 +343,8 @@ def test_a_failed_check_shows_the_class_name_only(qtbot, settings_path):
     panel.show()
     qtbot.waitExposed(panel)
 
-    status = _label(panel, "latex-status")
-    qtbot.waitUntil(lambda: status.text() == NOT_CONNECTED_TEXT, timeout=5000)
-    detail = _label(panel, "latex-detail").text()
+    qtbot.waitUntil(lambda: _line(panel, "latex-status") == NOT_CONNECTED_TEXT, timeout=5000)
+    detail = _line(panel, "latex-detail")
     assert detail == "The check failed unexpectedly (ValueError)."
     assert "secret detail" not in detail
 
