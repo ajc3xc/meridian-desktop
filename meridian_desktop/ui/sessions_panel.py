@@ -71,7 +71,7 @@ from meridian_desktop.sessions_client import (
     local_sessions,
 )
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
-from meridian_desktop.ui.text import enable_table_copy, make_selectable
+from meridian_desktop.ui.text import enable_table_copy, make_selectable, set_label_text
 
 REFRESH_MS = 5000
 LOCAL_MODE = "local"
@@ -121,16 +121,24 @@ def choose_project(selected: str, choices: Sequence[tuple[str, str]]) -> str:
     return ids[0] if ids else ""
 
 
-def status_text(result: SessionsResult, checked_at: str) -> str:
-    """The status line for one result. ``checked_at`` is the local time the result arrived."""
-    if result.state == NO_PROJECT:
-        return result.message
+def status_line(result: SessionsResult) -> str:
+    """The status line for one result, without the time. It stays the same from one tick to the next."""
     if result.state == SESSIONS:
         where = SOURCE_TEXT.get(result.source, "Meridian")
         if result.rows:
-            return f"{len(result.rows)} session(s) from {where}. Checked at {checked_at}."
-        return f"No sessions from {where} right now. Checked at {checked_at}."
-    return f"{result.message} Checked at {checked_at}."
+            return f"{len(result.rows)} session(s) from {where}."
+        return f"No sessions from {where} right now."
+    return result.message
+
+
+def checked_line(result: SessionsResult, checked_at: str) -> str:
+    """The time line for one result: when it arrived, as local time. Empty when no project was read."""
+    return "" if result.state == NO_PROJECT else f"Checked at {checked_at}."
+
+
+def status_text(result: SessionsResult, checked_at: str) -> str:
+    """The status line and the time line together, as one sentence pair. ``checked_at`` is the local arrival time."""
+    return " ".join(part for part in (status_line(result), checked_line(result, checked_at)) if part)
 
 
 def row_cells(row: SessionRow, now: datetime) -> tuple[str, str, str, str]:
@@ -153,13 +161,13 @@ def claude_status_text(result: ClaudeProcessesResult, checked_at: str) -> str:
 
 
 def _table(parent: QWidget, name: str, columns: tuple[str, ...]) -> QTableWidget:
-    """A read-only table: no editing, one row selected at a time, and copy enabled."""
+    """A read-only table: no editing, whole rows selected (several by a drag, Shift or Ctrl), and Ctrl+C copies them."""
     table = QTableWidget(0, len(columns), parent)
     table.setObjectName(name)
     table.setHorizontalHeaderLabels(list(columns))
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     table.verticalHeader().setVisible(False)
     header = table.horizontalHeader()
     header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -353,8 +361,13 @@ class SessionsPanel(QWidget):
         picker_row.addWidget(self._refresh)
         layout.addLayout(picker_row)
 
+        # The status line and the time it was checked are two lines, so a tick that changes only the time leaves the
+        # status line, and a selection in it, alone.
         self._status = _label(self, "sessions-status", LOADING_TEXT)
         layout.addWidget(self._status)
+        self._checked = _label(self, "sessions-checked", "")
+        self._checked.hide()
+        layout.addWidget(self._checked)
 
         self._table = _table(self, "sessions-table", COLUMNS)
         layout.addWidget(self._table, 2)
@@ -437,7 +450,12 @@ class SessionsPanel(QWidget):
         for row_index, row in enumerate(rows):
             for column, text in enumerate(row_cells(row, now)):
                 self._table.setItem(row_index, column, QTableWidgetItem(text))
-        self._status.setText(status_text(result, now.astimezone().strftime("%H:%M:%S")))
+        set_label_text(self._status, status_line(result))
+        self._show_checked(checked_line(result, now.astimezone().strftime("%H:%M:%S")))
+
+    def _show_checked(self, text: str) -> None:
+        set_label_text(self._checked, text)
+        self._checked.setVisible(bool(text))
 
     def _show_claude(self, result: ClaudeProcessesResult, now: datetime) -> None:
         processes = result.processes if result.state == claude_processes.LISTED else ()
@@ -453,6 +471,7 @@ class SessionsPanel(QWidget):
     def _on_project_changed(self, _index: int) -> None:
         self._table.setRowCount(0)
         self._status.setText(PRESS_REFRESH_TEXT)
+        self._show_checked("")
         self._start(full=False)
 
     @Slot()
@@ -478,8 +497,10 @@ __all__ = [
     "LOCAL_MODE",
     "REFRESH_MS",
     "SessionsPanel",
+    "checked_line",
     "choose_project",
     "claude_status_text",
     "row_cells",
+    "status_line",
     "status_text",
 ]

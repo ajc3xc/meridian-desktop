@@ -51,7 +51,7 @@ from meridian_desktop.core_locator import LocatedCore
 from meridian_desktop.settings_store import CORE_CHECKOUT_KEY, CORE_PYTHON_KEY, SettingsStore
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import make_box_selectable, make_selectable
 
 HEADING_TEXT = "Client setup"
 FIND_AGAIN_TEXT = "Find it again"
@@ -215,6 +215,8 @@ def _ask_yes_no(parent: QWidget, title: str, text: str) -> bool:
     no = box.addButton(NO_TEXT, QMessageBox.ButtonRole.NoRole)
     box.setDefaultButton(no)
     box.setEscapeButton(no)
+    # The windows11 style lets the owner click only links in a message box, so its text is made selectable here.
+    make_box_selectable(box)
     box.exec()
     return box.clickedButton() is yes
 

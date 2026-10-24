@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -71,7 +72,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import make_selectable, set_label_text
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
@@ -115,6 +116,23 @@ def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
         return settings.auto_update and settings.check_updates
 
     return allowed
+
+
+def _show_line(label: QLabel, text: str) -> None:
+    """Show one status-bar line. The same line again is left alone, so a selection in it stays. The tooltip holds all
+    of it, for a line too long for the bar."""
+    set_label_text(label, text)
+    label.setToolTip(text)
+
+
+def _line_reporter(label: QLabel) -> Callable[[str], None]:
+    """A callable that shows a line in ``label``, for the update notice. It holds the label, never the window, so the
+    notice keeps no reference cycle through the window (see _saved_local_url)."""
+
+    def report(text: str) -> None:
+        _show_line(label, text)
+
+    return report
 
 
 class ProjectsUnavailable(Exception):
@@ -259,6 +277,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addLayout(self._build_mode_bar(central))
 
+        # The status bar's one line of text is a selectable label, not a painted message, so it can be selected and
+        # copied. Every line the window shows there goes through show_status. It takes no width of its own, so a long
+        # line never widens the window: it is cut at the edge, and its tooltip holds all of it.
+        self._status_line = make_selectable(QLabel(self))
+        self._status_line.setObjectName("status-line")
+        self._status_line.setTextFormat(Qt.TextFormat.PlainText)
+        self._status_line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.statusBar().addWidget(self._status_line, 1)
+
         # The status-bar notice holds the one update check of this window, and Home's Updates card reads its result, so
         # it is built before the tabs and added to the status bar below. The bar is hidden unless a release is downloading
         # or staged. A check runs at start and every six hours after, only while auto_update and check_updates are on. No
@@ -268,7 +295,7 @@ class MainWindow(QMainWindow):
             update_transport,
             install_root=update_root,
             enabled=_updates_allowed_reader(self._store),
-            report=self.statusBar().showMessage,
+            report=_line_reporter(self._status_line),
             parent=self,
             record_apps_entry=record_apps_entry,
         )
@@ -308,7 +335,7 @@ class MainWindow(QMainWindow):
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
         self.resize(*DEFAULT_WINDOW_SIZE)
 
-        self.statusBar().showMessage(STATUS_MESSAGE)
+        self.show_status(STATUS_MESSAGE)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
@@ -432,12 +459,21 @@ class MainWindow(QMainWindow):
 
         A line another part of the window set, such as a launch note or an update notice, is left alone when Home is chosen.
         """
-        status = self.statusBar()
         if self.tabs.widget(index) is self._home_page:
-            if not status.currentMessage():
-                status.showMessage(STATUS_MESSAGE)
-        elif status.currentMessage() == STATUS_MESSAGE:
-            status.clearMessage()
+            if not self.status_message():
+                self.show_status(STATUS_MESSAGE)
+        elif self.status_message() == STATUS_MESSAGE:
+            self.show_status("")
+
+    # ----------------------------------------------------------- status bar
+
+    def show_status(self, text: str) -> None:
+        """Show one line on the status bar. The same line again is left alone, so a selection in it stays."""
+        _show_line(self._status_line, text)
+
+    def status_message(self) -> str:
+        """The line the status bar shows now, or "" when it shows none."""
+        return self._status_line.text()
 
     # ----------------------------------------------------------- mode
 
@@ -509,7 +545,7 @@ class MainWindow(QMainWindow):
 
     def show_launch_notes(self, text: str) -> None:
         """Show what the launch-time starts did, on the status bar. Called on the GUI thread by ui/runner_actions.LaunchStarts."""
-        self.statusBar().showMessage(text)
+        self.show_status(text)
 
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""

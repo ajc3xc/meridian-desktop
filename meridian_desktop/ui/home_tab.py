@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -43,8 +44,10 @@ from meridian_desktop.home_status import (
     ACTION_LAUNCH_ZOTERO,
     ACTION_RELEASE_PAGE,
     ACTION_SETTINGS,
+    CHECKING_HEADLINE,
     CardView,
     LocalFacts,
+    RowView,
     ServiceFacts,
     checked_text,
     checking_view,
@@ -68,7 +71,7 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
 from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import enable_widget_copy, make_selectable, set_label_text
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, open_release_page
 from meridian_desktop.ui.zotero_panel import ask_start
 
@@ -90,9 +93,13 @@ LAUNCH_FAILED_TEXT = "Zotero did not launch ({}). Press Check now to see its sta
 API_READY_TEXT = "The local API answers now."
 API_NOT_READY_TEXT = "The local API is not answering yet. Zotero can take a little while to open. Press Check now in a moment."
 
-# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state.
+# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state. A card that has
+# focus (for Ctrl+C) shows it on its other three sides.
 CARD_STYLE = """
 QFrame[homeCard="true"] { border: 1px solid palette(mid); border-left-width: 4px; border-radius: 6px; }
+QFrame[homeCard="true"]:focus {
+    border-top-color: palette(highlight); border-right-color: palette(highlight); border-bottom-color: palette(highlight);
+}
 QFrame[homeCard="true"][tone="ok"] { border-left-color: #2e7d32; }
 QFrame[homeCard="true"][tone="attention"] { border-left-color: #b26a00; }
 QFrame[homeCard="true"][tone="checking"] { border-left-color: #1565c0; }
@@ -160,12 +167,20 @@ def _launch_zotero(client: Any, exe: str) -> tuple[str, bool]:
 
 # ----------------------------------------------------------------- one card
 
-def _clear(layout: QVBoxLayout) -> None:
+def _clear(layout: QLayout) -> None:
+    """Take every item out of ``layout`` and delete its widgets, in nested layouts too.
+
+    Each row is a layout of its own, so deleting only the direct widgets left the old rows on the card. A widget is
+    hidden at once, so nothing reads or copies it before it is deleted.
+    """
     while layout.count():
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            widget.hide()
             widget.deleteLater()
+        elif item.layout() is not None:
+            _clear(item.layout())
 
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -176,11 +191,22 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     return make_selectable(label)
 
 
+def _card_label(card: QWidget, name: str, text: str = "") -> QLabel:
+    """A card's line. A right-click on it opens the card's own menu, whose Copy copies the whole card."""
+    label = _label(card, name, text)
+    label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+    return label
+
+
 class _Card(QFrame):
     """One status card: a title, a headline, a detail sentence, the time checked, rows, one action and a note.
 
     ``work`` runs off the UI thread and returns the card's value. ``render`` turns that value and the time checked
     into a CardView. A card with no ``work`` is drawn by its owner (the Updates card reads a bar, and reads no thread).
+
+    A drag cannot cross from one line to the next, so the card has a Copy action of its own: in its right-click menu,
+    and on Ctrl+C while the card has focus. It copies the text the card shows, never a hidden line or a button's text.
+    A redraw changes only the lines whose text changed, so a selection in the others stays.
     """
 
     def __init__(
@@ -209,6 +235,9 @@ class _Card(QFrame):
         self._action_generation = 0
         self._action_owner = object()
         self._action_done: Callable[[Any, str], None] | None = None
+        # True once the card shows a check's answer. A new check then keeps that answer on screen until the next one.
+        self._has_answer = False
+        self._shown_rows: tuple[RowView, ...] = ()
 
         self._stall = QTimer(self)
         self._stall.setSingleShot(True)
@@ -217,23 +246,24 @@ class _Card(QFrame):
         shared_delivery().delivered.connect(self._on_delivered)
         shared_delivery().delivered.connect(self._on_action_delivered)
 
+        enable_widget_copy(self)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        heading = QLabel(title, self)
-        heading.setObjectName(f"home-{key}-title")
-        heading.setTextFormat(Qt.TextFormat.PlainText)
+        heading = _card_label(self, f"home-{key}-title", title)
+        heading.setWordWrap(False)
         font = heading.font()
         font.setBold(True)
         heading.setFont(font)
-        layout.addWidget(make_selectable(heading))
-        self._headline = _label(self, f"home-{key}-headline")
+        layout.addWidget(heading)
+        self._headline = _card_label(self, f"home-{key}-headline")
         headline_font = self._headline.font()
         headline_font.setBold(True)
         headline_font.setPointSizeF(headline_font.pointSizeF() * 1.15 if headline_font.pointSizeF() > 0 else 11.0)
         self._headline.setFont(headline_font)
-        self._detail = _label(self, f"home-{key}-detail")
-        self._checked = _label(self, f"home-{key}-checked")
-        self._note = _label(self, f"home-{key}-note")
+        self._detail = _card_label(self, f"home-{key}-detail")
+        self._checked = _card_label(self, f"home-{key}-checked")
+        self._note = _card_label(self, f"home-{key}-note")
         self._note.hide()
         layout.addWidget(self._headline)
         layout.addWidget(self._detail)
@@ -262,6 +292,9 @@ class _Card(QFrame):
 
         ``replace`` starts a new read even when one is running. The older answer is then dropped when it arrives, because
         the generation has moved on, so a read that began before the core was found cannot show after the newer one.
+
+        A card that already shows an answer keeps it, and its checked line says Checking until the new answer arrives, so
+        a selection in the card stays. A card with no answer yet shows Checking as its headline.
         """
         if self._work is None or (self._busy and not replace):
             return
@@ -269,7 +302,11 @@ class _Card(QFrame):
         self._generation += 1
         generation = self._generation
         self._stall.start()
-        self.show_view(checking_view())
+        if self._has_answer:
+            set_label_text(self._checked, CHECKING_HEADLINE)
+            self._checked.setVisible(True)
+        else:
+            self.show_view(checking_view())
         submit(self._owner, generation, self._work)
 
     def run_action(self, work: Callable[[], Any], done: Callable[[Any, str], None]) -> None:
@@ -287,29 +324,37 @@ class _Card(QFrame):
         self._note.setVisible(bool(text))
 
     def show_view(self, view: CardView) -> None:
-        """Draw a CardView. Every field is plain text."""
-        self._headline.setText(view.headline)
-        self._detail.setText(view.detail)
+        """Draw a CardView. Every field is plain text.
+
+        A line whose text is unchanged is not set again, and the rows are rebuilt only when they changed, so a
+        selection in an unchanged line stays.
+        """
+        set_label_text(self._headline, view.headline)
+        set_label_text(self._detail, view.detail)
         self._detail.setVisible(bool(view.detail))
-        self._checked.setText(view.checked)
+        set_label_text(self._checked, view.checked)
         self._checked.setVisible(bool(view.checked))
-        self.setProperty("tone", view.tone)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        _clear(self._rows)
-        for index, row in enumerate(view.rows):
-            self._rows.addLayout(self._row(index, row.text, row.detail, row.action, row.action_label))
+        if self.property("tone") != view.tone:
+            self.setProperty("tone", view.tone)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        if view.rows != self._shown_rows:
+            _clear(self._rows)
+            for index, row in enumerate(view.rows):
+                self._rows.addLayout(self._row(index, row.text, row.detail, row.action, row.action_label))
+            self._shown_rows = view.rows
         self._action_key = view.action
-        self._action.setText(view.action_label)
+        if self._action.text() != view.action_label:
+            self._action.setText(view.action_label)
         self._action.setVisible(bool(view.action))
 
     def _row(self, index: int, text: str, detail: str, action: str, action_label: str) -> QHBoxLayout:
         line = QHBoxLayout()
         block = QVBoxLayout()
         block.setSpacing(2)
-        block.addWidget(_label(self, f"home-{self._key}-row-{index}", text))
+        block.addWidget(_card_label(self, f"home-{self._key}-row-{index}", text))
         if detail:
-            block.addWidget(_label(self, f"home-{self._key}-row-{index}-detail", detail))
+            block.addWidget(_card_label(self, f"home-{self._key}-row-{index}-detail", detail))
         line.addLayout(block, 1)
         if action:
             button = QPushButton(action_label, self)
@@ -332,6 +377,7 @@ class _Card(QFrame):
             return
         self._stall.stop()
         self._busy = False
+        self._has_answer = True
         value, failure = payload
         checked = checked_text(datetime.now())
         if failure is not None or self._render is None:
@@ -357,6 +403,8 @@ class _Card(QFrame):
         if not self._busy:
             return
         self._busy = False
+        # The stalled line is not an answer, so the next check shows Checking as its headline again.
+        self._has_answer = False
         self.show_view(stalled_view(STALL_SECONDS))
 
 

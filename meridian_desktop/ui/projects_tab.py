@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QItemSelectionModel, QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -195,8 +195,9 @@ class ProjectsTab(QWidget):
         self._table.setObjectName("projects-table")
         self._table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in TABLE_FIELDS])
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Whole rows, and several of them: a drag, Shift or Ctrl selects more, and Ctrl+C copies them as tab-separated lines.
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -261,13 +262,17 @@ class ProjectsTab(QWidget):
             for column, field in enumerate(TABLE_FIELDS):
                 self._table.setItem(row_index, column, QTableWidgetItem(_table_text(row.get(field))))
         if self._rows:
-            self._table.selectRow(0)
+            # Only the first row, whatever keys are held: selectRow reads Shift and Ctrl under ExtendedSelection.
+            self._table.setCurrentCell(
+                0, 0, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+            )
         self._show_detail()
 
     # ----------------------------------------------------------- detail
 
     @Slot()
     def _show_detail(self) -> None:
+        """The detail of the first selected row. With several rows selected, the topmost one is shown."""
         selected = sorted({item.row() for item in self._table.selectedItems()})
         if not selected or selected[0] >= len(self._rows):
             self._detail.setText(DETAIL_EMPTY_TEXT)

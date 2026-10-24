@@ -358,7 +358,7 @@ def test_table_is_read_only_and_the_only_button_is_refresh(qtbot):
     settle(qtbot, panel)
     assert table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     assert claude_table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert claude_table_of(panel).selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
+    assert claude_table_of(panel).selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
     assert [button.objectName() for button in panel.findChildren(QPushButton)] == ["sessions-refresh"]
 
 
@@ -901,11 +901,11 @@ def test_row_cells_orders_the_four_columns_and_shows_an_age():
     assert row_cells(row, now) == ("(unnamed)", "idle", "5 min ago", "codex")
 
 
-def test_the_table_uses_single_row_selection(qtbot):
+def test_the_table_selects_whole_rows_and_several_at_once(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal())
     table = table_of(panel)
     assert table.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectRows
-    assert table.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
+    assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
     assert table.horizontalHeader().stretchLastSection()
 
 
