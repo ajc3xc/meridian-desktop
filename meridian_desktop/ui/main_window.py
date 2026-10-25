@@ -589,9 +589,10 @@ class MainWindow(QMainWindow):
 
         # The chosen mode's description. In Tunnel mode, the detail line names the tools that need the
         # tunnel and, when the tunnel is not running, how to start it by hand. The two lines are one block, so one drag
-        # over them selects both.
+        # over them selects both. The gap is the 6 px a layout gives two labels on this style. The column has no parent yet,
+        # so its own spacing() is unset here and cannot supply it.
         column = QVBoxLayout()
-        self._mode_text = TextBlock(parent, "mode-text", spacing=column.spacing())
+        self._mode_text = TextBlock(parent, "mode-text", spacing=6)
         self.mode_description = self._mode_text.line("mode-description", "")
         self.tunnel_detail = self._mode_text.line("tunnel-mode-detail", "")
         column.addLayout(bar)

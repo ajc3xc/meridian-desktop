@@ -432,8 +432,9 @@ class ClientSetupSection(QWidget):
         head.addWidget(state, 1)
         block.addLayout(head)
         # The path and the detail line are one block, so one drag over them selects both. The name and the state sit on
-        # one row above it, and the buttons below.
-        text = TextBlock(self, f"client-setup-{client}-text", spacing=block.spacing())
+        # one row above it, and the buttons below. The gap is the 6 px a layout gives two labels on this style. The block
+        # layout has no parent yet, so its own spacing() is unset here and cannot supply it.
+        text = TextBlock(self, f"client-setup-{client}-text", spacing=6)
         path = text.line(f"client-setup-{client}-path", "")
         detail = text.line(f"client-setup-{client}-detail", "")
         _set_message(detail, "")

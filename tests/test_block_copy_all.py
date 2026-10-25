@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QLabel, QTableWidget, QVBoxLayout, QWidget
 
 from _fakes import MemoryKeyring
@@ -33,7 +34,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.scope_controls import TUNNEL_OFF_TEXT
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
-from meridian_desktop.ui.text import SELECTABLE_TEXT, text_bottom
+from meridian_desktop.ui.text import SELECTABLE_TEXT, paragraph_tops, text_bottom
 from meridian_desktop.ui.writing_area import DOCX_LINE, SLIDES_LINE, WRITING_INTRO, WritingArea
 from test_client_setup_section import _section
 from test_copy_selection import (  # noqa: F401 - ui_font is an autouse fixture: each test runs in the window's font
@@ -305,3 +306,22 @@ def test_the_group_is_one_selectable_label_one_drag_selects_all_of_it_and_ctrl_c
     group.refresh()
     assert block.hasSelectedText()
     assert _plain(block.selectedText()) == expected
+
+
+@pytest.mark.parametrize("kind", ["client-setup-card", "top-bar-detail"])
+def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qtbot, tmp_path, settings_path, kind):
+    """A block's lines keep the gap a layout gives two labels on this style, 6 px, as they had as labels of their own.
+
+    On run/desk-fix-integrate (3aad775) the path and the detail were two labels in a layout, 6 px apart. A block takes its
+    gap as a number, not from a layout that is not parented yet, so this checks the laid-out text: the second line starts
+    one line of text below the first, plus the parented layout's spacing.
+    """
+    group = KINDS[kind](qtbot, tmp_path, settings_path)
+    block = group.block
+    _activate(group.top)
+    tops = paragraph_tops(block)
+    assert len(tops) >= 2, "a block holds more than one line"
+    stacked = QWidget()  # the parent of the reference layout: a layout's spacing() is set only while it has one
+    gap = QVBoxLayout(stacked).spacing()
+    assert gap == 6, "this style's layout gap between two labels is 6 px"
+    assert tops[1] - tops[0] == QFontMetrics(block.font()).lineSpacing() + gap
