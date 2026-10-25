@@ -91,7 +91,7 @@ from meridian_desktop.sessions_client import (
     local_sessions,
 )
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
-from meridian_desktop.ui.text import enable_table_copy, make_selectable, set_label_text
+from meridian_desktop.ui.text import TextBlock, enable_table_copy, make_selectable, set_label_text
 
 REFRESH_MS = 5000
 LOCAL_MODE = "local"
@@ -464,20 +464,22 @@ class SessionsPanel(QWidget):
         picker_row.addWidget(self._refresh)
         layout.addLayout(picker_row)
 
-        # The status line and the time it was checked are two lines, so a tick that changes only the time leaves the
-        # status line, and a selection in it, alone.
-        self._status = _label(self, "sessions-status", LOADING_TEXT)
-        layout.addWidget(self._status)
-        self._checked = _label(self, "sessions-checked", "")
+        # The status line and the time it was checked are one block, so one drag selects both. A tick that changes only the
+        # time changes the text after the status line, and set_label_text keeps a selection in the status line.
+        status = TextBlock(self, "sessions-status-text", spacing=layout.spacing())
+        self._status = status.line("sessions-status", LOADING_TEXT)
+        self._checked = status.line("sessions-checked", "")
         self._checked.hide()
-        layout.addWidget(self._checked)
+        layout.addWidget(status.label)
 
         self._table = _table(self, "sessions-table", COLUMNS)
         layout.addWidget(self._table, 2)
 
-        layout.addWidget(_label(self, "sessions-claude-caption", CLAUDE_CAPTION))
-        self._claude_processes = _label(self, "sessions-claude-processes", CLAUDE_CHECKING_TEXT)
-        layout.addWidget(self._claude_processes)
+        # The Claude caption and the line that says what was found are one block.
+        claude = TextBlock(self, "sessions-claude-text", spacing=layout.spacing())
+        claude.line("sessions-claude-caption", CLAUDE_CAPTION)
+        self._claude_processes = claude.line("sessions-claude-processes", CLAUDE_CHECKING_TEXT)
+        layout.addWidget(claude.label)
         self._claude_table = _table(self, "sessions-claude-table", CLAUDE_COLUMNS)
         layout.addWidget(self._claude_table, 1)
         layout.addWidget(_label(self, "sessions-claude-note", CLAUDE_NOTE_TEXT))

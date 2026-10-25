@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop.runner_controls import (
     SCOPE_LABELS,
@@ -44,7 +44,7 @@ from meridian_desktop.runner_controls import (
 from meridian_desktop.tunnel_status import RUNNING
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import CoreSetup, RunnerActions, submit
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import TextBlock
 
 RESTART = "restart"
 TUNNEL_OFF_TEXT = (
@@ -100,14 +100,6 @@ def local_gate(core: CoreSetup) -> tuple[bool, str]:
     if not core.core_ready:
         return False, CORE_NOT_SET_TEXT
     return True, ""
-
-
-def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return make_selectable(label)
 
 
 class ScopeControls(QWidget):
@@ -173,11 +165,12 @@ class ScopeControls(QWidget):
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
-        self._note = _label(self, f"{prefix}-control-note")
-        self._result = _label(self, f"{prefix}-control-result")
+        # The gate note and the last result are one block under the buttons, so one drag over them selects both.
+        self._text_block = TextBlock(self, f"{prefix}-control-text", spacing=layout.spacing())
+        self._note = self._text_block.line(f"{prefix}-control-note", "")
+        self._result = self._text_block.line(f"{prefix}-control-result", "")
         self._result.setVisible(False)
-        layout.addWidget(self._note)
-        layout.addWidget(self._result)
+        layout.addWidget(self._text_block.label)
 
         self._start.clicked.connect(self._on_start_clicked)
         self._stop.clicked.connect(self._on_stop_clicked)

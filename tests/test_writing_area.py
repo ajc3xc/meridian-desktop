@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QWidget
 
 from _fakes import MemoryKeyring
+from _shared_text import MARKUP_LINE, assert_shows_literally
 from meridian_desktop import local_client, projects_reader
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore
@@ -50,10 +51,23 @@ def test_writing_labels_are_plain_text_and_selectable(qtbot):
     area = WritingArea()
     qtbot.addWidget(area)
     labels = area.findChildren(QLabel)
-    assert len(labels) == 3
+    # The three lines are one rich-text block, so one drag selects them all. Each line in it is inserted as plain text,
+    # and each line keeps its own name as a hidden label.
+    assert {label.objectName() for label in labels} == {"writing-text", "writing-intro", "writing-docx", "writing-slides"}
     for label in labels:
-        assert label.textFormat() == Qt.TextFormat.PlainText
+        if label.objectName() != "writing-text":
+            assert label.textFormat() == Qt.TextFormat.PlainText
         assert label.textInteractionFlags() & SELECTABLE_TEXT == SELECTABLE_TEXT, label.objectName()
+
+
+def test_a_markup_looking_line_in_the_writing_block_shows_its_characters_and_no_bold(qtbot):
+    # The block is rich text, so a line in it must still show markup-looking text as its own characters.
+    area = WritingArea()
+    qtbot.addWidget(area)
+    intro = area.findChild(QLabel, "writing-intro")
+    intro.setText(MARKUP_LINE)
+    assert intro.textFormat() == Qt.TextFormat.PlainText
+    assert_shows_literally(area.findChild(QLabel, "writing-text"), MARKUP_LINE)
 
 
 def test_settings_page_holds_the_writing_area_and_still_five_tabs(qtbot, settings_path):

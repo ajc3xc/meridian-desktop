@@ -7,10 +7,9 @@ so each line says so in plain words, and no document or deck is made up. The LaT
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import TextBlock
 
 WRITING_SECTION = "Writing (DOCX and Slides on this computer)"
 WRITING_INTRO = "The LaTeX engine check is in Diagnostics, under Settings."
@@ -24,14 +23,6 @@ SLIDES_LINE = (
 )
 
 
-def _label(parent: QWidget, name: str, text: str) -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return make_selectable(label)
-
-
 class WritingArea(QWidget):
     """The DOCX and Slides lines, each Not connected. Nothing is read and nothing is sent."""
 
@@ -39,9 +30,12 @@ class WritingArea(QWidget):
         super().__init__(parent)
         self.setObjectName("writing-area")
         layout = QVBoxLayout(self)
-        layout.addWidget(_label(self, "writing-intro", WRITING_INTRO))
-        layout.addWidget(_label(self, "writing-docx", DOCX_LINE))
-        layout.addWidget(_label(self, "writing-slides", SLIDES_LINE))
+        # The intro and the two lines are one block, so one drag over them selects all three.
+        lines = TextBlock(self, "writing-text", spacing=layout.spacing())
+        lines.line("writing-intro", WRITING_INTRO)
+        lines.line("writing-docx", DOCX_LINE)
+        lines.line("writing-slides", SLIDES_LINE)
+        layout.addWidget(lines.label)
 
 
 __all__ = ["DOCX_LINE", "SLIDES_LINE", "WRITING_INTRO", "WRITING_SECTION", "WritingArea"]

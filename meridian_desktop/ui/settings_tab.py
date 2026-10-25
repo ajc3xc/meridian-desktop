@@ -69,7 +69,7 @@ from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
 from meridian_desktop.ui.tools_panel import ToolsPanel
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import TextBlock, make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
 MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"), ("tunnel", "Tunnel"))
@@ -445,12 +445,14 @@ class SettingsTab(QWidget):
 
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
-        group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
-        self._settings_file = _label(group.body(), "settings-file-path")
-        group.add_widget(self._settings_file)
-        self._load_warning = _label(group.body(), "settings-load-warning")
+        # The intro, the settings file and its load warning are one block, so one drag over them selects all three. The
+        # warning shows only when the settings file has one.
+        lines = TextBlock(group.body(), "diagnostics-text", spacing=group.body().layout().spacing())
+        lines.line("diagnostics-intro", DIAGNOSTICS_INTRO)
+        self._settings_file = lines.line("settings-file-path", "")
+        self._load_warning = lines.line("settings-load-warning", "")
         self._load_warning.setVisible(False)
-        group.add_widget(self._load_warning)
+        group.add_widget(lines.label)
         # The full tools table reads when it is first shown and when its Refresh is pressed.
         if self._tools_status is not None:
             group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))

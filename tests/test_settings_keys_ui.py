@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 
+import pytest
 from PySide6.QtCore import QPoint, QThreadPool
 from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
 
@@ -28,6 +29,7 @@ from meridian_desktop.ui.runpod_panel import (
 )
 from meridian_desktop.ui.settings_group import CollapsibleGroup
 from meridian_desktop.ui.settings_tab import SettingsTab
+from meridian_desktop.ui.text import _BlockLine
 
 FAKE_VALUE = "sk-fake-keys-ui-0001"
 FAKE_VALUE_TWO = "sk-fake-keys-ui-0002"
@@ -440,6 +442,28 @@ def _show_at_1280(qtbot, container, page, tab) -> None:
     qtbot.wait(30)
 
 
+def _checked_labels(tab) -> list[QLabel]:
+    """The labels the clipping check looks at: every visible label with text, at any size.
+
+    A line of a text block is left out. It is visible to Qt but has no size of its own, and its block draws its text.
+    The block's label is checked in its place. Any other label is checked, even one a layout has collapsed to 0 by 0.
+    """
+    return [
+        label
+        for label in tab.findChildren(QLabel)
+        if label.isVisibleTo(tab) and label.text() and not isinstance(label, _BlockLine)
+    ]
+
+
+def _assert_not_clipped(labels, tab) -> None:
+    for label in labels:
+        if label.wordWrap():
+            assert label.height() >= label.heightForWidth(label.width()) - 1, label.objectName() or label.text()
+        else:
+            assert label.width() >= label.sizeHint().width() - 1, label.objectName() or label.text()
+        assert _fully_inside(label, tab), label.objectName() or label.text()
+
+
 def test_no_label_or_button_is_clipped_at_1280_px(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
@@ -448,14 +472,9 @@ def test_no_label_or_button_is_clipped_at_1280_px(qtbot, settings_path):
     _expand_all(tab)
     _show_at_1280(qtbot, container, page, tab)
 
-    labels = [label for label in tab.findChildren(QLabel) if label.isVisibleTo(tab) and label.text()]
+    labels = _checked_labels(tab)
     assert len(labels) >= 20, "the walk reaches the real labels on every group"
-    for label in labels:
-        if label.wordWrap():
-            assert label.height() >= label.heightForWidth(label.width()) - 1, label.objectName() or label.text()
-        else:
-            assert label.width() >= label.sizeHint().width() - 1, label.objectName() or label.text()
-        assert _fully_inside(label, tab), label.objectName() or label.text()
+    _assert_not_clipped(labels, tab)
 
     buttons = [button for button in tab.findChildren(QPushButton) if button.isVisibleTo(tab)]
     assert len(buttons) >= 15
@@ -491,3 +510,21 @@ def test_client_setup_apply_remove_and_the_check_result_are_fully_visible_at_128
         label = tab.findChild(QLabel, caption)
         assert label.wordWrap() is False, caption
         assert label.width() >= label.sizeHint().width() - 1, caption
+
+
+@pytest.mark.parametrize("name", ["client-setup-python-label", "client-setup-result"])
+def test_a_real_label_a_layout_collapsed_to_zero_size_is_still_checked_for_clipping(qtbot, settings_path, name):
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    _expand_all(tab)
+    label = tab.findChild(QLabel, name)
+    label.setText(label.text() or "Restart Claude Code to load the change.")
+    label.setVisible(True)
+    _show_at_1280(qtbot, container, page, tab)
+
+    # A real label that a layout has collapsed to 0 by 0 is drawn by nothing, so the check must not skip it as empty.
+    label.setFixedSize(0, 0)
+    qtbot.waitUntil(lambda: label.size().isEmpty(), timeout=5000)
+    assert label in _checked_labels(tab), "a label collapsed to zero size is still checked"
+    with pytest.raises(AssertionError, match=name):
+        _assert_not_clipped(_checked_labels(tab), tab)

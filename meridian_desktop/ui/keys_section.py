@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop.api_keys import (
     BUILT_IN_NAMES,
-    RUNPOD_NAME,
     STATUS_NOT_SET,
     STATUS_SET,
     STATUS_UNREADABLE,
@@ -72,7 +71,6 @@ NOT_REMOVED_TEXT = "Not removed. {detail}"
 NOT_REMOVED_OS_TEXT = "Not removed. The key could not be deleted or its name could not be written. Try again."
 NAMES_NOT_READ_TEXT = "The saved key names could not be read. Reopen Settings to try again."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written."
-RUNPOD_HEADING_TEXT = RUNPOD_NAME
 
 # A confirmation: (parent, title, text) -> True only when the owner clicks Yes.
 Confirm = Callable[[QWidget, str, str], bool]
@@ -169,12 +167,12 @@ class KeysSection(QWidget):
         column.addWidget(_label(self, "keys-intro", INTRO_TEXT))
 
         if self._runpod_card is not None:
-            # The RunPod card is framed like the other cards, so every name in the block looks the same.
+            # The RunPod card is framed like the other cards, so every name in the block looks the same. Its heading is
+            # the first line of the card's own text block, so one drag over the heading and the status lines selects them.
             frame = QFrame(self)
             frame.setObjectName("keys-entry-runpod")
             frame.setFrameShape(QFrame.Shape.StyledPanel)
             frame_column = QVBoxLayout(frame)
-            frame_column.addWidget(_bold(_label(frame, "keys-runpod-name", RUNPOD_HEADING_TEXT)))
             frame_column.addWidget(self._runpod_card)
             column.addWidget(frame)
 
