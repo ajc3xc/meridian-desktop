@@ -170,6 +170,15 @@ def test_a_name_repeated_by_case_or_naming_runpod_is_refused(tmp_path):
     assert "2 of 3 entries were refused" in listing.problem
 
 
+def test_a_refused_runpod_entry_says_it_has_its_own_entry_and_shows_no_value(tmp_path):
+    listing = read_names(_write(tmp_path, {"RunPod": FAKE_VALUE, "OpenAI": FAKE_VALUE_TWO}))
+
+    assert listing.names == ()
+    assert "1 of 2 entries were refused" in listing.problem
+    assert "which has its own entry" in listing.problem, "the refusal says RunPod keeps its own entry"
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
 def test_a_value_longer_than_the_limit_is_refused(tmp_path):
     listing = read_names(_write(tmp_path, {"OpenAI": "x" * (MAX_SECRET_LENGTH + 1)}))
 
@@ -356,6 +365,24 @@ def test_the_choose_dialog_opens_on_the_home_folder_and_a_cancel_changes_nothing
     assert "*.json" in asked["names"]
     assert SettingsStore(settings_path).load().settings.keys_file_path == ""
     assert section.findChild(QLabel, "keys-file-path").text() == NO_FILE_TEXT
+
+
+def test_the_choose_dialog_offers_json_files_only(qtbot, settings_path, monkeypatch):
+    asked: dict[str, object] = {}
+
+    class FakeDialog:
+        @staticmethod
+        def getOpenFileName(parent, title, start, names):
+            asked.update(names=names)
+            return "", ""
+
+    monkeypatch.setattr(keys_module, "QFileDialog", FakeDialog)
+    section = _section(qtbot, settings_path, MemoryKeyring())
+
+    _choose(section)
+
+    assert asked["names"] == "JSON files (*.json)", "the filter lists JSON files only"
+    assert "All files" not in asked["names"]
 
 
 def test_a_refused_file_is_not_chosen_and_its_count_is_shown_without_a_name_or_value(qtbot, settings_path, tmp_path):

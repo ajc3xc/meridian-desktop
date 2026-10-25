@@ -28,7 +28,7 @@ NOT_JSON_TEXT = "Not loaded. The keys file is not valid JSON, so 0 entries were 
 NOT_OBJECT_TEXT = "Not loaded. The keys file must hold one JSON object of name to text, so 0 entries were read."
 REFUSED_TEXT = (
     "Not loaded. {refused} of {total} entries were refused. Each entry must be a key name with a text value of up to "
-    "{limit} characters, and no name may repeat or be {built_in}. Nothing was loaded."
+    "{limit} characters, and no name may repeat or be {built_in}, which has its own entry. Nothing was loaded."
 )
 
 
