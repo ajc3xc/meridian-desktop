@@ -18,7 +18,7 @@ import pytest
 from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton
 
 from _fakes import MemoryKeyring
-from meridian_desktop import tunnel_status, updater
+from meridian_desktop import home_status, tunnel_status, updater
 from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL, RunnerControl
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import (
@@ -27,6 +27,7 @@ from meridian_desktop.settings_store import (
     Settings,
     SettingsStore,
 )
+from meridian_desktop.ui.main_window import TAB_NAMES
 from meridian_desktop.ui.settings_tab import SettingsTab
 
 PY = "C:/Users/tester/core-env/python.exe"
@@ -202,10 +203,32 @@ def test_choosing_a_lifetime_saves_it_and_a_new_tab_shows_it(qtbot, settings_pat
 def test_the_start_hint_is_one_plain_sentence_about_what_the_tunnel_is_for():
     hint = tunnel_status.START_HINT
     assert len(re.split(r"(?<=[.!?])\s+", hint.strip())) == 1
-    for name in ("claude.ai", "codebase-memory", "Serena", "filesystem", "Zotero", "Search", "Projects", "Sessions"):
+    for name in ("claude.ai", "codebase-memory", "Serena", "filesystem", "Zotero",
+                 "Code", "Outputs", "Research", "Projects", "Sessions"):
         assert name in hint
     assert "without it" in hint
     assert "press Start on the Home tunnel card" in hint
+
+
+TUNNEL_TOOL_NAMES = ("codebase-memory", "Serena", "filesystem", "Zotero")
+
+
+def test_the_tool_list_the_dependency_text_and_the_start_hint_name_the_same_tunnel_tools():
+    assert set(tunnel_status.DEPENDENT_TOOLS) == set(TUNNEL_TOOL_NAMES)
+    for text in (tunnel_status.DEPENDENCY_TEXT, tunnel_status.START_HINT):
+        named = {tool for tool in TUNNEL_TOOL_NAMES if tool in text}
+        assert named == set(tunnel_status.DEPENDENT_TOOLS), text
+
+
+def test_the_start_hint_names_only_real_tabs_and_the_zotero_card_on_home():
+    """The seven tabs are main_window.TAB_SPECS. Zotero is a card on Home. "Search" was never a tab."""
+    hint = tunnel_status.START_HINT
+    for tab in ("Code", "Outputs", "Research", "Projects", "Sessions"):
+        assert tab in TAB_NAMES, tab
+        assert tab in hint, tab
+    assert "Zotero card on Home" in hint
+    for word in ("Search", "Writing", "Services", "Tools", "Tunnel"):
+        assert not re.search(rf"\b{word}\b", hint), word
 
 
 def test_the_start_hint_keeps_the_yes_or_no_before_any_start():
@@ -246,6 +269,27 @@ def test_a_release_with_no_zip_says_no_build_is_published_yet_and_that_it_is_not
     assert info.value.reason == (
         "No downloadable build is published for version 0.1.0 yet. This is not an error in the app."
     )
+
+
+def test_the_no_build_yet_refusal_gets_the_no_build_headline_and_keeps_its_explanation():
+    transport = _release_transport(["SHA256SUMS", "SHA256SUMS.sig"])
+    with pytest.raises(updater.Refused) as info:
+        updater.fetch_latest(transport)
+    view = home_status.updates_view(
+        "0.1.0", updater.UpdateResult("refused", reason=info.value.reason), enabled=True, checking=False
+    )
+    assert view.headline == "No downloadable build yet"
+    assert view.detail == (
+        "No downloadable build is published for version 0.1.0 yet. This is not an error in the app."
+    )
+
+
+def test_other_refusals_on_the_updates_card_still_say_could_not_check():
+    view = home_status.updates_view(
+        "0.1.0", updater.UpdateResult("refused", reason=updater.DEV_RUN_REASON), enabled=True, checking=False
+    )
+    assert view.headline == "Could not check"
+    assert view.detail == updater.DEV_RUN_REASON
 
 
 # ----------------------------------------------------------- custom program names: dropped count

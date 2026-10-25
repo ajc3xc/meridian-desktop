@@ -269,8 +269,8 @@ def test_the_status_call_is_made_once_for_the_tunnel_scope():
 # ------------------------------------------------------------------ the wording and the module
 
 
-def test_the_dependency_names_the_three_tools_and_says_they_are_unavailable_while_it_is_down():
-    assert DEPENDENT_TOOLS == ("codebase-memory", "Serena", "filesystem")
+def test_the_dependency_names_the_four_tools_and_says_they_are_unavailable_while_it_is_down():
+    assert DEPENDENT_TOOLS == ("codebase-memory", "Serena", "filesystem", "Zotero")
     for tool in DEPENDENT_TOOLS:
         assert tool in DEPENDENCY_TEXT
     assert "unavailable" in DEPENDENCY_TEXT
