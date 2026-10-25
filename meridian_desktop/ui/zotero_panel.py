@@ -6,6 +6,12 @@ the start action run on the thread pool, so the UI never blocks. Zotero starts o
 picks Start Zotero in a dialog whose default button is Cancel. Results are plain text (PlainText
 labels and plain table cells), so Zotero's text is never read as HTML. The results table is read-only
 and has the shared Copy action (Ctrl+C or the right-click menu).
+
+The bridge line and the Update bridge button are read from the local server only when the panel is given a bridge and
+a Local URL reader. Without them the card shows no bridge line and makes no bridge request. Update bridge sends nothing
+until the owner picks one of three choices in a dialog whose default is Cancel: close Zotero politely, force close
+Zotero, or wait until Zotero restarts. A force close needs a second Yes, whose default is No. A polite close that leaves
+Zotero open is followed by a dialog that offers force, retry or cancel.
 """
 
 from __future__ import annotations
@@ -31,8 +37,22 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop import zotero_client
+from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import TextBlock, enable_table_copy, make_selectable
+from meridian_desktop.zotero_bridge_client import (
+    CHOICE_FORCE,
+    CHOICE_POLITE,
+    CHOICE_WAIT,
+    CHOICES,
+    STATE_CURRENT,
+    STATE_ERROR,
+    STATE_NOT_INSTALLED,
+    STATE_UPDATE_READY,
+    STATE_ZOTERO_RUNNING,
+    BridgeResult,
+    BridgeStatus,
+)
 from meridian_desktop.zotero_client import (
     API_DISABLED,
     API_NOT_RUNNING,
@@ -76,6 +96,55 @@ START_HINT_NOT_INSTALLED = (
     "Install Zotero from zotero.org, then press Refresh."
 )
 START_CANCELLED_TEXT = "Start cancelled. Nothing was started and no file was written."
+# The Zotero bridge: its line on the card, the Update bridge button, and the dialog behind it.
+BRIDGE_NOT_CHECKED_TEXT = "Bridge: not checked yet."
+BRIDGE_CHECKING_TEXT = "Bridge: checking..."
+BRIDGE_ERROR_TEXT = "Bridge: could not be checked. {}"
+BRIDGE_CURRENT_TEXT = "Bridge {installed} installed; expected {expected}."
+BRIDGE_UPDATE_READY_TEXT = "Bridge {installed} installed; expected {expected}. An update is ready."
+BRIDGE_ZOTERO_OPEN_TEXT = (
+    "Bridge {installed} installed; expected {expected}. An update is ready. "
+    "Zotero is open, so it needs Zotero to close and restart."
+)
+BRIDGE_NOT_INSTALLED_TEXT = "Bridge not installed; expected {expected}."
+WAIT_RESULT_TEXT = "Waiting: the bridge will update the next time Zotero starts."
+# A recorded "wait" choice reads as the waiting sentence, in every state that has a bridge line.
+BRIDGE_WAIT_PENDING_TEXT = "Bridge {installed} installed; expected {expected}. " + WAIT_RESULT_TEXT
+BRIDGE_NOT_INSTALLED_WAIT_TEXT = "Bridge not installed; expected {expected}. " + WAIT_RESULT_TEXT
+BRIDGE_SENDING_TEXT = "Sending the bridge update..."
+BRIDGE_DONE_TEXT = "The bridge update was sent. Zotero may take up to a minute to close and restart."
+BRIDGE_UPDATE_UNCHECKED_TEXT = "The bridge update could not be completed."
+UPDATE_BUTTON_TEXT = "Update bridge"
+POLITE_BUTTON_TEXT = "Close Zotero politely, then install"
+FORCE_BUTTON_TEXT = "Force close Zotero, then install"
+WAIT_BUTTON_TEXT = "Wait until Zotero restarts"
+CANCEL_BUTTON_TEXT = "Cancel"
+RETRY_BUTTON_TEXT = "I will close Zotero myself, then try again"
+BRIDGE_DIALOG_TITLE = "Update the Zotero bridge"
+BRIDGE_DIALOG_TEXT = "Choose how the Zotero bridge is updated. Close Zotero politely is recommended."
+BRIDGE_DIALOG_DETAIL = (
+    "Close Zotero politely, then install (recommended): this is a normal close request, the same as closing Zotero "
+    "yourself. It can take up to a minute. If Zotero does not close, nothing is installed and you are offered the "
+    "next steps.\n\n"
+    "Force close Zotero, then install: force ends Zotero at once. Anything unsaved in Zotero is lost. "
+    "You are asked once more before anything is forced.\n\n"
+    "Wait until Zotero restarts: this closes nothing. The bridge is updated the next time Zotero starts.\n\n"
+    "Cancel: nothing is closed, nothing is updated and nothing is sent."
+)
+FORCE_CONFIRM_TITLE = "Force close Zotero"
+FORCE_CONFIRM_TEXT = "Force close ends Zotero immediately. Anything unsaved in Zotero is lost. Continue?"
+AFTER_POLITE_TITLE = "Zotero did not close"
+AFTER_POLITE_TEXT = "Zotero did not close, so the bridge was not installed. Choose what to do next."
+AFTER_POLITE_DETAIL = (
+    "Force close Zotero, then install: force ends Zotero at once. Anything unsaved in Zotero is lost. "
+    "You are asked once more before anything is forced.\n\n"
+    "I will close Zotero myself, then try again: close Zotero yourself, then choose this. The desktop then asks "
+    "Zotero to close normally and installs.\n\n"
+    "Cancel: nothing more is closed, updated or sent."
+)
+# What the follow-up dialog answers. Retry sends the polite choice again. Force goes through the second question.
+FOLLOW_FORCE = "force"
+FOLLOW_RETRY = "retry"
 STARTING_TEXT = "Starting Zotero..."
 API_READY_TEXT = "Local API answering: yes"
 API_NOT_READY_TEXT = "Local API answering: not yet. Zotero can take a little while to open. Press Refresh in a moment."
@@ -87,10 +156,12 @@ NO_RESULTS_TEXT = "No items in your Zotero library match \"{}\"."
 RESULTS_TEXT = "{} result(s) for \"{}\"."
 LIMIT_TEXT = " Showing the first {}; narrow the search to see fewer."
 RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
-# The three kinds of read the panel runs. Each kind has at most one read in flight.
+# The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
 SEARCH = "search"
 ACTION = "action"
+BRIDGE_STATUS = "bridge_status"
+BRIDGE_UPDATE = "bridge_update"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -155,6 +226,128 @@ def ask_start(parent: QWidget | None, command: str, folder: str) -> bool:
     return box.clickedButton() is start
 
 
+def bridge_status_text(status: BridgeStatus | None) -> str:
+    """The bridge line on the card. A version that is not known reads as "unknown". A recorded wait reads as the
+    waiting sentence, whatever the state. An update ready while Zotero is open says so in plain words."""
+    if status is None:
+        return BRIDGE_NOT_CHECKED_TEXT
+    if status.state == STATE_ERROR:
+        return BRIDGE_ERROR_TEXT.format(status.reason)
+    installed = status.installed or "unknown"
+    expected = status.expected or "unknown"
+    if status.state == STATE_NOT_INSTALLED:
+        template = BRIDGE_NOT_INSTALLED_WAIT_TEXT if status.pending_install else BRIDGE_NOT_INSTALLED_TEXT
+        return template.format(expected=expected)
+    if status.pending_install:
+        return BRIDGE_WAIT_PENDING_TEXT.format(installed=installed, expected=expected)
+    if status.state == STATE_UPDATE_READY:
+        return BRIDGE_UPDATE_READY_TEXT.format(installed=installed, expected=expected)
+    if status.state == STATE_ZOTERO_RUNNING:
+        return BRIDGE_ZOTERO_OPEN_TEXT.format(installed=installed, expected=expected)
+    assert status.state == STATE_CURRENT
+    return BRIDGE_CURRENT_TEXT.format(installed=installed, expected=expected)
+
+
+def bridge_update_dialog(
+    parent: QWidget | None,
+) -> tuple[QMessageBox, QPushButton, QPushButton, QPushButton, QPushButton]:
+    """The Update bridge dialog, built but not shown. Its buttons are, in order, Close Zotero politely, Force close
+    Zotero, Wait until Zotero restarts and Cancel. All four are action buttons, which keeps this order in buttons().
+    Cancel is the default and the Escape button, so Enter and Escape change nothing.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle(BRIDGE_DIALOG_TITLE)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+    box.setText(BRIDGE_DIALOG_TEXT)
+    box.setInformativeText(BRIDGE_DIALOG_DETAIL)
+    polite = box.addButton(POLITE_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    force = box.addButton(FORCE_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    wait = box.addButton(WAIT_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    cancel = box.addButton(CANCEL_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    for child in box.findChildren(QLabel):
+        child.setTextFormat(Qt.TextFormat.PlainText)
+        make_selectable(child)
+    return box, polite, force, wait, cancel
+
+
+def ask_bridge_update(parent: QWidget | None) -> str | None:
+    """Show the first dialog. Return the choice for its button, or None for Cancel or a closed dialog.
+    Nothing is sent here.
+    """
+    box, polite, force, wait, _cancel = bridge_update_dialog(parent)
+    box.exec()
+    clicked = box.clickedButton()
+    box.deleteLater()
+    if clicked is polite:
+        return CHOICE_POLITE
+    if clicked is force:
+        return CHOICE_FORCE
+    if clicked is wait:
+        return CHOICE_WAIT
+    return None
+
+
+def after_polite_dialog(parent: QWidget | None) -> tuple[QMessageBox, QPushButton, QPushButton, QPushButton]:
+    """The dialog offered after a polite close left Zotero open, built but not shown. Its buttons are, in order, Force
+    close Zotero, I will close Zotero myself, then try again, and Cancel. Cancel is the default and the Escape button.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle(AFTER_POLITE_TITLE)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+    box.setText(AFTER_POLITE_TEXT)
+    box.setInformativeText(AFTER_POLITE_DETAIL)
+    force = box.addButton(FORCE_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    retry = box.addButton(RETRY_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    cancel = box.addButton(CANCEL_BUTTON_TEXT, QMessageBox.ButtonRole.ActionRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    for child in box.findChildren(QLabel):
+        child.setTextFormat(Qt.TextFormat.PlainText)
+        make_selectable(child)
+    return box, force, retry, cancel
+
+
+def ask_after_polite_failure(parent: QWidget | None) -> str | None:
+    """Show the follow-up. FOLLOW_FORCE or FOLLOW_RETRY for that button, and None for Cancel or a closed dialog."""
+    box, force, retry, _cancel = after_polite_dialog(parent)
+    box.exec()
+    clicked = box.clickedButton()
+    box.deleteLater()
+    if clicked is force:
+        return FOLLOW_FORCE
+    if clicked is retry:
+        return FOLLOW_RETRY
+    return None
+
+
+def ask_force_close(parent: QWidget) -> bool:
+    """The second question before a force close. Its default and Escape are No, so only a click on Yes returns True."""
+    return ask_yes_no(parent, FORCE_CONFIRM_TITLE, FORCE_CONFIRM_TEXT)
+
+
+def update_result_text(choice: str, result: BridgeResult) -> str:
+    """The card's line after a successful update. A wait always says it is waiting. Polite and force show the server's
+    own line."""
+    if choice == CHOICE_WAIT:
+        return WAIT_RESULT_TEXT
+    return result.line or BRIDGE_DONE_TEXT
+
+
+def _bridge_status_read(bridge: Any, local_url: Callable[[], str]) -> BridgeStatus:
+    """Runs on the pool. The Local URL is read here, so the UI thread never reads Settings."""
+    return bridge.status(local_url())
+
+
+def _bridge_update_read(bridge: Any, local_url: Callable[[], str], choice: str) -> BridgeResult:
+    """Runs on the pool, and only after the owner has picked a choice. A force choice has also passed its second
+    question."""
+    return bridge.update(local_url(), choice)
+
+
 @dataclass(frozen=True)
 class _Done:
     """One finished read: its kind, the number it was started with, and the (result, failure_text) its job made."""
@@ -207,11 +400,29 @@ class ZoteroPanel(QWidget):
         client: Any = zotero_client,
         confirm: Callable[[QWidget, str, str], bool] | None = None,
         parent: QWidget | None = None,
+        *,
+        bridge: Any | None = None,
+        local_url: Callable[[], str] | None = None,
+        ask_update: Callable[[QWidget], str | None] | None = None,
+        ask_force: Callable[[QWidget], bool] | None = None,
+        ask_after_polite: Callable[[QWidget], str | None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("zotero-panel")
         self._client = client
         self._confirm = ask_start if confirm is None else confirm
+        # The bridge is on only when a bridge and a Local URL reader are both given. When it is off, the card shows no
+        # bridge line, makes no bridge request and keeps Update bridge disabled. ``bridge`` has status(base_url) and
+        # update(base_url, choice), and both run on the pool.
+        self._bridge = bridge
+        self._local_url = local_url
+        self._bridge_on = bridge is not None and local_url is not None
+        self._ask_update = ask_bridge_update if ask_update is None else ask_update
+        self._ask_force = ask_force_close if ask_force is None else ask_force
+        self._ask_after_polite = ask_after_polite_failure if ask_after_polite is None else ask_after_polite
+        self._bridge_status: BridgeStatus | None = None
+        self._bridge_acting = False
+        self._bridge_choice = ""
         self._exe: str | None = None
         self._running: bool | None = None
         self._checking = False
@@ -232,13 +443,15 @@ class ZoteroPanel(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        # The intro and the status lines are one block, so one drag over them selects all six. The buttons stay below it.
+        # The intro and the status lines are one block, so one drag over them selects them all.
+        # The buttons stay below it.
         status = TextBlock(self, "zotero-status-text", spacing=layout.spacing())
         status.line("zotero-intro", INTRO_TEXT)
         self._installed = status.line("zotero-installed", NOT_CHECKED_TEXT)
         self._process = status.line("zotero-process", "")
         self._api = status.line("zotero-api", "")
         self._api_detail = status.line("zotero-api-detail", "")
+        self._bridge_line = status.line("zotero-bridge", BRIDGE_NOT_CHECKED_TEXT if self._bridge_on else "")
         self._start_hint = status.line("zotero-start-hint", "")
         layout.addWidget(status.label)
 
@@ -250,11 +463,25 @@ class ZoteroPanel(QWidget):
         self._start_button.setEnabled(False)
         actions.addWidget(self._refresh_button)
         actions.addWidget(self._start_button)
+        # The bridge controls are built only when a bridge is given. Without one, the card is the same as before the
+        # bridge.
+        self._bridge_button: QPushButton | None = None
+        self._bridge_result: QLabel | None = None
+        if self._bridge_on:
+            button = QPushButton(UPDATE_BUTTON_TEXT, self)
+            button.setObjectName("zotero-bridge-update")
+            button.setEnabled(False)
+            button.clicked.connect(self._on_bridge_update_clicked)
+            self._bridge_button = button
+            actions.addWidget(button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
         self._start_result = _label(self, "zotero-start-result", "")
         layout.addWidget(self._start_result)
+        if self._bridge_on:
+            self._bridge_result = _label(self, "zotero-bridge-result", "")
+            layout.addWidget(self._bridge_result)
 
         search_row = QHBoxLayout()
         self._search_input = QLineEdit(self)
@@ -309,6 +536,7 @@ class ZoteroPanel(QWidget):
         self._api_detail.setText("")
         self._start_hint.setText("")
         self._start_read(STATUS, self._client.status)
+        self._start_bridge_status()
 
     def _start_read(self, kind: str, work: Callable[[], Any]) -> None:
         """Start one read on the thread pool. Its result comes back to _on_delivered, tagged with kind and number."""
@@ -339,6 +567,10 @@ class ZoteroPanel(QWidget):
             self._on_search_ready(done.payload)
         elif done.kind == ACTION:
             self._on_action_ready(done.payload)
+        elif done.kind == BRIDGE_STATUS:
+            self._on_bridge_status_ready(done.payload)
+        elif done.kind == BRIDGE_UPDATE:
+            self._on_bridge_update_ready(done.payload)
 
     def _on_status_ready(self, payload: tuple) -> None:
         result, failure = payload
@@ -404,6 +636,76 @@ class ZoteroPanel(QWidget):
         self._start_result.setText(f"{line}\n{ready_text}")
         self._refresh()
 
+    # ----------------------------------------------------------- bridge
+
+    def _start_bridge_status(self) -> None:
+        """Check the bridge on the same schedule as the card. The check runs on the pool, and the line says so until
+        it ends."""
+        if not self._bridge_on:
+            return
+        self._bridge_status = None
+        self._bridge_line.setText(BRIDGE_CHECKING_TEXT)
+        self._update_bridge_button()
+        self._start_read(BRIDGE_STATUS, functools.partial(_bridge_status_read, self._bridge, self._local_url))
+
+    def _update_bridge_button(self) -> None:
+        button = self._bridge_button
+        if button is None:
+            return
+        status = self._bridge_status
+        button.setEnabled(status is not None and status.can_update and not self._bridge_acting)
+
+    def _on_bridge_status_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        if failure is not None or not isinstance(result, BridgeStatus):
+            self._bridge_status = BridgeStatus(STATE_ERROR, reason=failure or CHECK_FAILED_TEXT.format("NoResult"))
+        else:
+            self._bridge_status = result
+        self._bridge_line.setText(bridge_status_text(self._bridge_status))
+        self._update_bridge_button()
+
+    @Slot()
+    def _on_bridge_update_clicked(self) -> None:
+        status = self._bridge_status
+        if not self._bridge_on or self._bridge_acting or status is None or not status.can_update:
+            return
+        choice = self._ask_update(self)
+        if choice not in CHOICES:
+            return  # Cancel, or a dialog closed without a choice: nothing is sent and nothing changes
+        self._send_bridge_choice(choice)
+
+    def _send_bridge_choice(self, choice: str) -> None:
+        """Send one choice to the bridge. A force close asks the second question first, and No sends nothing."""
+        if choice == CHOICE_FORCE and not self._ask_force(self):
+            return
+        self._bridge_acting = True
+        self._bridge_choice = choice
+        self._update_bridge_button()
+        self._bridge_result.setText(BRIDGE_SENDING_TEXT)
+        self._start_read(BRIDGE_UPDATE, functools.partial(_bridge_update_read, self._bridge, self._local_url, choice))
+
+    def _offer_after_polite_failure(self) -> None:
+        """A polite close left Zotero open. Offer force, retry or cancel. Retry sends the polite choice again."""
+        follow = self._ask_after_polite(self)
+        if follow == FOLLOW_FORCE:
+            self._send_bridge_choice(CHOICE_FORCE)
+        elif follow == FOLLOW_RETRY:
+            self._send_bridge_choice(CHOICE_POLITE)
+
+    def _on_bridge_update_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        self._bridge_acting = False
+        if failure is not None or not isinstance(result, BridgeResult):
+            self._bridge_result.setText(failure or BRIDGE_UPDATE_UNCHECKED_TEXT)
+        elif not result.ok:
+            self._bridge_result.setText(result.reason or BRIDGE_UPDATE_UNCHECKED_TEXT)
+            if result.still_open and self._bridge_choice == CHOICE_POLITE:
+                self._offer_after_polite_failure()
+        else:
+            self._bridge_result.setText(update_result_text(self._bridge_choice, result))
+            self._refresh()
+        self._update_bridge_button()
+
     # ----------------------------------------------------------- search
 
     @Slot()
@@ -443,14 +745,33 @@ class ZoteroPanel(QWidget):
 
 
 __all__ = [
+    "AFTER_POLITE_TEXT",
     "API_TEXT",
+    "BRIDGE_DIALOG_TEXT",
+    "BRIDGE_NOT_CHECKED_TEXT",
+    "CANCEL_BUTTON_TEXT",
     "CHECKING_TEXT",
+    "FOLLOW_FORCE",
+    "FOLLOW_RETRY",
+    "FORCE_BUTTON_TEXT",
+    "FORCE_CONFIRM_TEXT",
     "NOT_CHECKED_TEXT",
+    "POLITE_BUTTON_TEXT",
+    "RETRY_BUTTON_TEXT",
     "START_CANCELLED_TEXT",
+    "WAIT_BUTTON_TEXT",
+    "WAIT_RESULT_TEXT",
     "ZoteroPanel",
     "api_text",
+    "after_polite_dialog",
+    "ask_after_polite_failure",
+    "ask_bridge_update",
+    "ask_force_close",
     "ask_start",
+    "bridge_status_text",
+    "bridge_update_dialog",
     "process_text",
     "results_text",
     "start_dialog",
+    "update_result_text",
 ]

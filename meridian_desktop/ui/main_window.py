@@ -66,7 +66,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import token_store, updater, zotero_client
+from meridian_desktop import token_store, updater, zotero_bridge_client, zotero_client
 from meridian_desktop.data_source import DataSources, ProjectsProvider
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH
@@ -308,10 +308,14 @@ class MainWindow(QMainWindow):
         runner_actions: RunnerActions | None = None,
         update_root: Path | None = None,
         record_apps_entry: updater.AppsEntryWriter | None = None,
+        zotero_bridge: Any | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
+        # The Zotero bridge calls (status and update, both on the local server at the Local URL). Tests pass a fake.
+        # The app uses the zotero_bridge_client module.
+        self._zotero_bridge = zotero_bridge if zotero_bridge is not None else zotero_bridge_client
         # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
         # The Zotero cards and panel call this object. Tests pass a fake. The app uses the zotero_client module.
@@ -547,7 +551,16 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(container)
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
-        column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
+        # The bridge line and Update bridge read the local server at the saved Local URL, on the pool, the same way the
+        # search tabs read it (_saved_local_url holds the store, never the window).
+        column.addWidget(
+            ZoteroPanel(
+                client=self._zotero,
+                bridge=self._zotero_bridge,
+                local_url=_saved_local_url(self._store),
+                parent=container,
+            )
+        )
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
         column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
         column.addWidget(WritingArea(container))

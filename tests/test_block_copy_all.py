@@ -344,12 +344,16 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # tabs, so it adds two search tabs, and each search tab holds one search button (a QPushButton) and one table corner
 # button (a QAbstractButton). The main window then held 56 QPushButtons and 75 buttons in all.
 # The keys file block adds two push buttons to the Settings page: Choose file and Stop using this file. They are the
-# reason the Settings page now holds 36 QPushButtons and five group headers, 41 buttons in all. The Settings page is in
-# the main window, so the main window holds the same two more: 58 QPushButtons and 77 buttons in all.
-SETTINGS_PUSH_BUTTONS = 36
-SETTINGS_BUTTONS = 41
-MAIN_WINDOW_PUSH_BUTTONS = 58
-MAIN_WINDOW_BUTTONS = 77
+# reason the Settings page held 36 QPushButtons and five group headers, 41 buttons in all. The Settings page is in
+# the main window, so the main window held the same two more: 58 QPushButtons and 77 buttons in all.
+# The Update bridge button (object name zotero-bridge-update) is built in the app now: the Settings Zotero panel is
+# given the bridge and the Local URL reader (run/desk-bridge-updater). It is one more QPushButton, and one more
+# QAbstractButton, on the Settings page and in the main window, so each count goes up by one more. The Settings page
+# now holds 37 QPushButtons and 42 buttons in all, and the main window holds 59 QPushButtons and 78 buttons in all.
+SETTINGS_PUSH_BUTTONS = 37
+SETTINGS_BUTTONS = 42
+MAIN_WINDOW_PUSH_BUTTONS = 59
+MAIN_WINDOW_BUTTONS = 78
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):
