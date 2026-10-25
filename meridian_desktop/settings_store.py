@@ -119,6 +119,9 @@ class Settings:
     # The tunnel sign-in lifetime in days: one of TUNNEL_SIGNIN_DAY_CHOICES. A tunnel start passes it to the core as
     # MERIDIAN_TUNNEL_SIGNIN_DAYS (runner_controls). save() writes the key only when it is not the default.
     tunnel_signin_days: int = DEFAULT_TUNNEL_SIGNIN_DAYS
+    # The keys file the owner chose for the Keys block (keys_file.py). Only its path is stored, never a value. "" means no
+    # file is chosen. save() writes the key only when a path is set, so a file that never chose one keeps no such key.
+    keys_file_path: str = ""
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -255,6 +258,15 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["key_names"] = tuple(item.strip() for item in value)
         else:
             problems.append("key_names must be a list of names; using none")
+
+    # keys_file_path: an absent key means no file is chosen, with no warning. Only text is accepted, and it is kept without
+    # being checked here, so a file that is gone does not break loading. The Keys block says so when it reads the file.
+    if "keys_file_path" in data:
+        value = data["keys_file_path"]
+        if isinstance(value, str):
+            values["keys_file_path"] = value.strip()
+        else:
+            problems.append("keys_file_path must be a path as text or empty; using empty")
 
     # agent_process_names: an absent key means none, with no warning. A list is kept as text. An entry that is not text is
     # kept as an empty name, which agent_processes drops and counts. Anything other than a list is refused with a warning.
@@ -419,6 +431,9 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
+        if not settings.keys_file_path:
+            # No file chosen is the default, so a file that never chose a keys file has no such key.
+            del data["keys_file_path"]
         saved_names = clean_custom_names(settings.agent_process_names)[0]
         if saved_names:
             # Only valid custom names are written. An entry that is not valid, such as an empty or non-text one loaded
