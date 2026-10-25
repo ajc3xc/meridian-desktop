@@ -1,20 +1,20 @@
-"""Main window: a mode selector on top, then five tabs: Home, Projects, Sessions, Search and Settings.
+"""Main window: a mode selector on top, then seven tabs: Home, Projects, Sessions, Code, Outputs, Research and Settings.
 
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
-pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) searches the
-local server's code, outputs and research, and sends queries only to the Local URL. Settings holds the connection
-settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
-Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
-Sessions tabs are read-only.
+pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. The Code, Outputs and Research
+tabs (ui/search_tab.py) each search one kind of the local server's index, and send queries only to the Local URL.
+Settings holds the connection settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and
+Slides, each Not connected), and Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel
+and runner logs. The Projects and Sessions tabs are read-only.
 
 Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through settings_store and the
 RunPod key goes through secret_store, and neither imports Qt. The only network calls, apart from the update check
 below, are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
-its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
+its button is pressed. The search tabs call the local server only when Search or Enter is pressed. Hosted mode calls
 only the hosted URL the owner sets, with the saved token: on the Projects tab, on the Sessions tab when it is first
 shown or its Refresh is pressed (for the project list and the sessions), and on the Test connection button in
 Settings. In hosted mode neither tab reads the local server or the database file. Local mode reads both tabs in one
@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop import token_store, updater, zotero_client
 from meridian_desktop.data_source import DataSources, ProjectsProvider
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
+from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
@@ -88,16 +89,20 @@ from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
-# (tab name, wave that built it). Display order is the tuple order. Five tabs, no more: the rest of the
-# areas are cards on Home, the Search tab's kinds, or sections of Settings.
+# (tab name, wave that built it). Display order is the tuple order. Seven tabs, no more: the rest of the
+# areas are cards on Home or sections of Settings.
 TAB_SPECS = (
     ("Home", 7),
     ("Projects", 2),
     ("Sessions", 3),
-    ("Search", 6),
+    ("Code", 6),
+    ("Outputs", 6),
+    ("Research", 6),
     ("Settings", 2),
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
+# The three search tabs, and the one kind each one searches (see ui/search_tab.py).
+SEARCH_TAB_KINDS = {"Code": KIND_CODE, "Outputs": KIND_OUTPUTS, "Research": KIND_RESEARCH}
 
 ZOTERO_SECTION = "Zotero (the Zotero app on this computer, 127.0.0.1:23119)"
 
@@ -111,7 +116,7 @@ MODE_DESCRIPTIONS = {
     TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
-# The window opens at this size (width, height) when the screen has room for it. The five tab labels fit at 1280 px,
+# The window opens at this size (width, height) when the screen has room for it. The seven tab labels fit at 1280 px,
 # and Home scrolls its cards below that height, so no card is cut off on a short window.
 DEFAULT_WINDOW_SIZE = (1280, 780)
 # On a smaller screen the window opens at most this share of the usable width and height, so its frame and title bar
@@ -202,7 +207,7 @@ def _line_reporter(label: QLabel) -> Callable[[str], None]:
 
 
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
-    """The local URL as saved now, read by the Search tab when a search runs.
+    """The local URL as saved now, read by the search tabs when a search runs.
 
     It holds the store, not the window. A bound method of the window kept the window in a reference
     cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
@@ -289,7 +294,7 @@ class _ConfiguredRunner:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above five tabs: Home, Projects, Sessions, Search and Settings."""
+    """Mode selector above seven tabs: Home, Projects, Sessions, Code, Outputs, Research and Settings."""
 
     def __init__(
         self,
@@ -375,9 +380,10 @@ class MainWindow(QMainWindow):
                     _saved_mode(self._store),
                     parent=self.tabs,
                 )
-            elif name == "Search":
-                # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
-                page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
+            elif name in SEARCH_TAB_KINDS:
+                # Each search tab searches its own kind. Nothing is searched on build or show. Search or Enter reads
+                # the Local URL at that moment.
+                page = SearchTab(_saved_local_url(self._store), SEARCH_TAB_KINDS[name], parent=self.tabs)
             else:
                 page = self._build_settings_page()
                 self._settings_page = page
@@ -385,8 +391,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
         # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
-        # may not shrink below the full bar, so every tab label stays visible. The five labels need about 550 px,
-        # well inside a small laptop screen, so this minimum stays.
+        # may not shrink below the full bar, so every tab label stays visible. The labels are short and fit well
+        # inside a small laptop screen, so this minimum stays.
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
         # The size asked for. The first show fits it to the usable area of the screen (see showEvent).
         self.resize(*DEFAULT_WINDOW_SIZE)
