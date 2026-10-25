@@ -6,8 +6,9 @@ A registry entry names a service, says in one line what its key is for, and says
 plain text, shown as written. Nothing is fetched to build it.
 
 A service may carry a check: one GET to that provider's own https host, which shows whether the saved key is accepted.
-The check runs only when the owner presses Check on a key row. It reads the key from the keychain for that one request,
-sends it to the provider host and nowhere else, and reports one of the fixed messages below. The key is never returned,
+The check runs only when the owner presses Check on a key row. It reads the key for that one request, from the keychain
+or from the keys file the owner chose (keys_file.py), sends it to the provider host and nowhere else, and reports one of
+the fixed messages below. The key is never returned,
 stored past the call, or put in a message. A failure is reported by its kind alone, and no exception is chained, so no
 traceback holds the request headers.
 
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 
 from meridian_desktop import __version__
 from meridian_desktop.api_keys import KEY_SERVICE, account_for, slug
+from meridian_desktop.keys_file import read_value
 from meridian_desktop.secret_store import SecretStore
 
 CHECK_TIMEOUT = 10.0
@@ -35,6 +37,8 @@ REJECTED_TEXT = "Rejected by {service}. Check the key."
 UNREACHABLE_TEXT = "Could not reach {service}."
 NO_KEY_TEXT = "No key is saved for {name}."
 NO_CHECK_TEXT = "No check yet for this service."
+FILE_UNREADABLE_TEXT = "The keys file could not be read. Choose the file again."
+NOT_IN_FILE_TEXT = "{name} is not in the keys file."
 
 # The statuses that mean the provider refused the key. Any other status, and any failure, is "could not reach".
 REFUSED_STATUSES = (401, 403)
@@ -169,19 +173,30 @@ def check_saved_key(
     *,
     transport: Transport | None = None,
     timeout: float = CHECK_TIMEOUT,
+    keys_file: str | None = None,
 ) -> str:
-    """Check the saved key for ``name`` against ``service``. Return one of the fixed messages, and never the key.
+    """Check the key for ``name`` against ``service``. Return one of the fixed messages, and never the key.
 
-    A service without a check returns NO_CHECK_TEXT and reads nothing. A name with no saved value returns NO_KEY_TEXT
-    and sends nothing. A value that cannot go in a header is refused without a request. ``transport`` is injectable, and
-    the default is urllib.
+    The key comes from the keychain, or, when ``keys_file`` names the keys file the owner chose, from that file (see
+    keys_file.py). A service without a check returns NO_CHECK_TEXT and reads nothing. A name with no saved value returns
+    NO_KEY_TEXT and sends nothing. A file that is missing or refused returns FILE_UNREADABLE_TEXT, and a name the file
+    does not hold returns NOT_IN_FILE_TEXT; both send nothing. A value that cannot go in a header is refused without a
+    request. ``transport`` is injectable, and the default is urllib.
     """
     check = service.check
     if check is None:
         return NO_CHECK_TEXT
-    key = _saved_value(secrets, name)
-    if key is None:
-        return NO_KEY_TEXT.format(name=name)
+    if keys_file is None:
+        key = _saved_value(secrets, name)
+        if key is None:
+            return NO_KEY_TEXT.format(name=name)
+    else:
+        try:
+            key = read_value(keys_file, name)
+        except Exception:  # noqa: BLE001 - a refused or missing file is reported by one fixed message, never its text
+            return FILE_UNREADABLE_TEXT
+        if key is None:
+            return NOT_IN_FILE_TEXT.format(name=name)
     if not _sendable(key):
         return REJECTED_TEXT.format(service=service.name)
     return _verdict(service, check, key, transport if transport is not None else _urllib_transport, timeout)
@@ -189,6 +204,8 @@ def check_saved_key(
 
 __all__ = [
     "CHECK_TIMEOUT",
+    "FILE_UNREADABLE_TEXT",
+    "NOT_IN_FILE_TEXT",
     "NO_CHECK_TEXT",
     "NO_KEY_TEXT",
     "REJECTED_TEXT",
