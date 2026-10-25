@@ -32,12 +32,15 @@ and nowhere else, and the only commands it builds are these, run with shell=Fals
   that is no longer running then reads as STOPPED_AFTER_START. Each check is logged as ``start-check``, because it
   settles that start's outcome. It only runs ``status``, never a start or a stop.
 - The desktop never reads or logs a tunnel token (rule 8). It passes none, and it reads none from the environment.
+- The one environment entry the desktop adds is MERIDIAN_TUNNEL_SIGNIN_DAYS, the saved tunnel sign-in lifetime, and only
+  on the tunnel start (tunnel_start_env). Every other call inherits the desktop's environment unchanged.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from meridian_desktop.log_tail import DEFAULT_MAX_BYTES, LogTail, read_log_tail
-from meridian_desktop.settings_store import default_settings_path
+from meridian_desktop.settings_store import DEFAULT_TUNNEL_SIGNIN_DAYS, SettingsStore, default_settings_path
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, UNKNOWN
 
 MODULE = "meridian.local_runner"
@@ -152,6 +155,26 @@ class ControlResult:
     @property
     def confirmed(self) -> bool:
         return self.outcome == CONFIRMED
+
+
+# The environment entry for the tunnel start: the saved tunnel sign-in lifetime in days. It is the only entry the
+# desktop adds to a runner call, and only the tunnel start carries it (tunnel_start_env).
+SIGNIN_DAYS_ENV = "MERIDIAN_TUNNEL_SIGNIN_DAYS"
+
+
+def tunnel_start_env(signin_days: int) -> dict[str, str]:
+    """The environment for the tunnel start: the desktop's own variables, plus MERIDIAN_TUNNEL_SIGNIN_DAYS only."""
+    env = dict(os.environ)
+    env[SIGNIN_DAYS_ENV] = str(int(signin_days))
+    return env
+
+
+def _saved_signin_days() -> int:
+    """The tunnel sign-in lifetime the owner saved. A settings problem reads as the default, and never stops a start."""
+    try:
+        return SettingsStore(default_settings_path()).load().settings.tunnel_signin_days
+    except Exception:  # noqa: BLE001 - a settings problem only means the default lifetime is passed
+        return DEFAULT_TUNNEL_SIGNIN_DAYS
 
 
 def _label(scope: str) -> str:
@@ -332,12 +355,15 @@ class RunnerControl:
         spawn: Callable[..., Any] = subprocess.run,
         log_path: Path | None = None,
         clock: Callable[[], dt.datetime] = _utc_now,
+        signin_days: Callable[[], int] | None = None,
     ) -> None:
         self._python = python or ""
         self._cwd = cwd or ""
         self._spawn = spawn
         self._log_path = log_path
         self._clock = clock
+        # Read at each tunnel start. None reads the saved lifetime from the settings file.
+        self._signin_days = signin_days if signin_days is not None else _saved_signin_days
 
     def status(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._run(STATUS, scope)
@@ -384,16 +410,18 @@ class RunnerControl:
             argv = build_argv(self._python, subcommand, scope)
         except RunnerRefused:
             return ControlResult(subcommand, scope, REFUSED, REFUSED_MESSAGE)
+        kwargs: dict[str, Any] = {
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "timeout": TIMEOUTS[subcommand],
+            "cwd": self._cwd,
+            "creationflags": _NO_WINDOW,
+        }
+        if subcommand == START and scope == SCOPE_TUNNEL:
+            kwargs["env"] = tunnel_start_env(self._signin_days())
         try:
-            completed = self._spawn(
-                argv,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=TIMEOUTS[subcommand],
-                cwd=self._cwd,
-                creationflags=_NO_WINDOW,
-            )
+            completed = self._spawn(argv, **kwargs)
         except subprocess.TimeoutExpired:
             message = TIMEOUT_MESSAGE.format(
                 verb=VERBS[subcommand], label=_label(scope), seconds=int(TIMEOUTS[subcommand]),
@@ -441,6 +469,7 @@ __all__ = [
     "ControlResult",
     "RunnerControl",
     "RunnerRefused",
+    "SIGNIN_DAYS_ENV",
     "build_argv",
     "confirmation_text",
     "default_log_path",
@@ -448,4 +477,5 @@ __all__ = [
     "format_log_line",
     "scope_notes",
     "state_of",
+    "tunnel_start_env",
 ]

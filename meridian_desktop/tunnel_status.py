@@ -71,7 +71,11 @@ DEPENDENCY_TEXT = (
 
 # Where the owner starts or checks the tunnel. The buttons are on the Home tunnel card, and Start asks first. No command
 # is typed by hand, so these hints name the card and never a terminal command.
-START_HINT = "To start it, press Start on the Home tunnel card. The desktop asks first and starts nothing without a yes."
+START_HINT = (
+    "The tunnel only lets claude.ai reach this computer's codebase-memory, Serena, filesystem and Zotero tools, and "
+    "Search, Projects, Sessions and Zotero in the desktop app work without it; to start it, press Start on the Home "
+    "tunnel card, which asks first and starts nothing without a yes."
+)
 CHECK_HINT = "Press Check now on Home to check it again."
 
 # The top bar's one line and its detail line in Tunnel mode. The Home tunnel card shows the same answers

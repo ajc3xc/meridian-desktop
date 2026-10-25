@@ -16,7 +16,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
@@ -48,6 +48,11 @@ CORE_AUTO_KEYS = tuple(CORE_AUTO_FLAGS.values())
 
 # The mode a run starts in when the file names none and a hosted token is saved (owner decision, 2026-10-23).
 HOSTED_MODE = "hosted"
+
+# How long a tunnel sign-in lasts, in days. The owner picks one of these in Settings. A file with no key, or one with a
+# value that is not a choice, reads as the default, 30 days.
+TUNNEL_SIGNIN_DAY_CHOICES = (30, 90, 365)
+DEFAULT_TUNNEL_SIGNIN_DAYS = 30
 
 # The three owner-confirmed control switches. Each is a real true or false. An absent key means the default in
 # CONTROL_FLAG_DEFAULTS, which is set once below the Settings class.
@@ -111,6 +116,9 @@ class Settings:
     # names are stored; agent_processes checks each one. save() writes only the valid names, and the key only when one
     # is left.
     agent_process_names: tuple[str, ...] = ()
+    # The tunnel sign-in lifetime in days: one of TUNNEL_SIGNIN_DAY_CHOICES. A tunnel start passes it to the core as
+    # MERIDIAN_TUNNEL_SIGNIN_DAYS (runner_controls). save() writes the key only when it is not the default.
+    tunnel_signin_days: int = DEFAULT_TUNNEL_SIGNIN_DAYS
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -256,6 +264,16 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["agent_process_names"] = tuple(item if isinstance(item, str) else "" for item in value)
         else:
             problems.append("agent_process_names must be a list of names; using none")
+
+    # tunnel_signin_days: an absent key means the default, with no warning. Only one of the choices is accepted, as a
+    # whole number (a true, a text or a 90.0 is refused). Any other value is reported and the default is used.
+    if "tunnel_signin_days" in data:
+        value = data["tunnel_signin_days"]
+        if isinstance(value, int) and not isinstance(value, bool) and value in TUNNEL_SIGNIN_DAY_CHOICES:
+            values["tunnel_signin_days"] = value
+        else:
+            choices = ", ".join(str(days) for days in TUNNEL_SIGNIN_DAY_CHOICES)
+            problems.append(f"tunnel_signin_days must be one of {choices}; using {DEFAULT_TUNNEL_SIGNIN_DAYS}")
 
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
@@ -409,6 +427,9 @@ class SettingsStore:
         else:
             # No custom program names is the default, so a file that names none has no such key.
             del data["agent_process_names"]
+        if settings.tunnel_signin_days == DEFAULT_TUNNEL_SIGNIN_DAYS:
+            # The default is never written, so a file that keeps it has no such key.
+            del data["tunnel_signin_days"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -455,6 +476,16 @@ class SettingsStore:
         updated = replace(self.load().settings, mode=mode, mode_explicit=True)
         self.save(updated)
         return updated
+
+    def save_custom_program_names(self, names: Iterable[object]) -> int:
+        """Save the custom program names, leaving out the invalid ones. Return how many entries were dropped as invalid.
+
+        Only the count is returned, never the names. A name already listed, or a built-in program, is skipped and not
+        counted, since it is repeated rather than invalid. Every other field in the saved file is kept.
+        """
+        kept, dropped = clean_custom_names(names)
+        self.save(replace(self.load().settings, agent_process_names=kept))
+        return dropped
 
     def set_core_path(self, key: str, value: str) -> Settings:
         """Validate and save one core setting. Raises ValueError with plain words when it is refused.
