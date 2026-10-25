@@ -50,9 +50,12 @@ def test_writing_labels_are_plain_text_and_selectable(qtbot):
     area = WritingArea()
     qtbot.addWidget(area)
     labels = area.findChildren(QLabel)
-    assert len(labels) == 3
+    # The three lines are one rich-text block, so one drag selects them all. Each line in it is inserted as plain text,
+    # and each line keeps its own name as a hidden label.
+    assert {label.objectName() for label in labels} == {"writing-text", "writing-intro", "writing-docx", "writing-slides"}
     for label in labels:
-        assert label.textFormat() == Qt.TextFormat.PlainText
+        if label.objectName() != "writing-text":
+            assert label.textFormat() == Qt.TextFormat.PlainText
         assert label.textInteractionFlags() & SELECTABLE_TEXT == SELECTABLE_TEXT, label.objectName()
 
 
