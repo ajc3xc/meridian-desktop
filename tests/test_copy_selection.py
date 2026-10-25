@@ -362,7 +362,12 @@ def _plain(text: str) -> str:
 def _shown_labels(card) -> list[QLabel]:
     """Every label the owner sees on the card, top to bottom, whoever built it: the card's own lines and the runner
     controls' note and result lines under the Tunnel and Local buttons alike."""
-    shown = [label for label in card.findChildren(QLabel) if label.isVisible() and label.text()]
+    # A line of a block is visible to Qt but has no size: its block draws the text, so the owner sees the block only.
+    shown = [
+        label
+        for label in card.findChildren(QLabel)
+        if label.isVisible() and not label.size().isEmpty() and label.text()
+    ]
     shown.sort(key=lambda label: (label.mapTo(card, QPoint(0, 0)).y(), label.mapTo(card, QPoint(0, 0)).x()))
     return shown
 

@@ -448,7 +448,12 @@ def test_no_label_or_button_is_clipped_at_1280_px(qtbot, settings_path):
     _expand_all(tab)
     _show_at_1280(qtbot, container, page, tab)
 
-    labels = [label for label in tab.findChildren(QLabel) if label.isVisibleTo(tab) and label.text()]
+    # A line of a text block is visible to Qt but has no size: its block draws its text and is checked below.
+    labels = [
+        label
+        for label in tab.findChildren(QLabel)
+        if label.isVisibleTo(tab) and label.text() and not label.size().isEmpty()
+    ]
     assert len(labels) >= 20, "the walk reaches the real labels on every group"
     for label in labels:
         if label.wordWrap():

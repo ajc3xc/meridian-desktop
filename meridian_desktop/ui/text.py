@@ -266,11 +266,14 @@ def visible_text(root: QWidget) -> str:
 
 
 class _BlockLine(QLabel):
-    """One line of a TextBlock: a label under the line's own old name, which is never shown.
+    """One line of a TextBlock: a label under the line's own old name, which its block draws.
+
+    Qt shows and hides the line as it does any child label: isVisible() and isHidden() are Qt's own answers, so a line
+    its owner shows is visible to Qt once its parent is shown, and a hidden line is hidden to Qt. The block draws the
+    line's text, so the line has no size of its own: at 0 by 0 a shown line draws nothing and takes no clicks.
 
     Setting its text, or showing or hiding it, redraws the block, so the code that sets a line does not change. A line
-    with empty text, or one hidden, is left out of the block. Qt never shows the line (it is in no layout), so isVisible()
-    stays False, and isHidden() reports what its owner asked for.
+    with empty text, or one hidden, is left out of the block.
     """
 
     def __init__(
@@ -286,14 +289,16 @@ class _BlockLine(QLabel):
         space_after: float | None,
     ) -> None:
         super().__init__(text, parent)
-        # Qt keeps the line hidden: a child widget that is not hidden would be drawn over its neighbours and take clicks.
-        super().setVisible(False)
         self.setObjectName(name)
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         make_selectable(self)
+        # The block draws the text, so the line keeps no size. Qt would otherwise give a shown child 100 by 30 and draw it.
+        self.setFixedSize(0, 0)
+        # A line starts shown, as a label does. Qt hides a child made under a shown owner until it is shown, so the line
+        # says so here, and a line added later is drawn by its block at once.
+        super().setVisible(True)
         self._block = block
-        self._wanted = True
         self.line_bold = bold
         self.line_point_size = point_size
         self.line_wrap = wrap
@@ -304,17 +309,9 @@ class _BlockLine(QLabel):
         self._block.redraw()
 
     def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt naming
-        # show() and hide() come here too. Qt keeps the line hidden; the block draws the line when it is wanted.
-        self._wanted = bool(visible)
-        super().setVisible(False)
+        # show() and hide() come here too. Qt records the line's state, and the block draws the line when it is shown.
+        super().setVisible(bool(visible))
         self._block.redraw()
-
-    def isHidden(self) -> bool:  # noqa: N802 - Qt naming
-        return not self._wanted
-
-    def isVisibleTo(self, ancestor: QWidget) -> bool:  # noqa: N802 - Qt naming
-        # A line is never drawn on its own: its block draws it, so the line is not visible to any ancestor.
-        return False
 
 
 class TextBlock:

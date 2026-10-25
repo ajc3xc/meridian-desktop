@@ -34,7 +34,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.scope_controls import TUNNEL_OFF_TEXT
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
-from meridian_desktop.ui.text import SELECTABLE_TEXT, paragraph_tops, text_bottom
+from meridian_desktop.ui.text import SELECTABLE_TEXT, TextBlock, paragraph_tops, text_bottom
 from meridian_desktop.ui.writing_area import DOCX_LINE, SLIDES_LINE, WRITING_INTRO, WritingArea
 from test_client_setup_section import _section
 from test_copy_selection import (  # noqa: F401 - ui_font is an autouse fixture: each test runs in the window's font
@@ -297,10 +297,11 @@ def test_the_group_is_one_selectable_label_one_drag_selects_all_of_it_and_ctrl_c
     expected = "\n".join(group.lines)
     assert len(group.lines) >= 2, "a block holds more than one line"
 
-    # One selectable label holds every line, and no old line label is shown on its own.
+    # One selectable label holds every line. Each old line label is visible to Qt when it is shown, but it has no size
+    # of its own, so it draws nothing: its block draws its text.
     assert block.textInteractionFlags() == SELECTABLE_TEXT
     assert block.isVisible()
-    assert [label.objectName() for label in group.old_labels if label.isVisible()] == []
+    assert [label.objectName() for label in group.old_labels if not label.size().isEmpty()] == []
 
     # A left-button drag from the first line to the last selects all of it, and Ctrl+C copies it. The drag needs the
     # block laid out at its full height: a line shown since the group was built is placed by the next layout pass.
@@ -334,3 +335,33 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
     gap = QVBoxLayout(stacked).spacing()
     assert gap == 6, "this style's layout gap between two labels is 6 px"
     assert tops[1] - tops[0] == QFontMetrics(block.font()).lineSpacing() + gap
+
+
+def test_a_block_line_reports_its_visibility_to_qt_and_draws_nothing_of_its_own(qtbot):
+    """A line is hidden to Qt when its owner hides it, and visible to Qt when its owner shows it, so isHidden() and
+    isVisible() are Qt's own answers. A line keeps no size of its own: its block draws its text, and only shown lines
+    are drawn.
+    """
+    owner = QWidget()
+    qtbot.addWidget(owner)
+    block = TextBlock(owner, "visibility-text")
+    shown = block.line("visibility-shown", "Shown line")
+    hidden = block.line("visibility-hidden", "Hidden line")
+    hidden.setVisible(False)
+    assert hidden.isHidden() and not hidden.isVisible()
+    assert not shown.isHidden() and not shown.isVisible(), "a line is not visible until its owner is shown"
+
+    owner.show()
+    qtbot.waitExposed(owner)
+    assert shown.isVisible() and not shown.isHidden()
+    assert hidden.isHidden() and not hidden.isVisible()
+
+    hidden.show()
+    assert hidden.isVisible() and not hidden.isHidden()
+    hidden.hide()
+    assert hidden.isHidden() and not hidden.isVisible()
+
+    late = block.line("visibility-late", "Late line")
+    assert late.isVisible() and not late.isHidden(), "a line added to a shown owner is visible at once"
+    assert shown.size().isEmpty() and late.size().isEmpty(), "a line keeps no size of its own"
+    assert len(paragraph_tops(block.label)) == 2, "the block draws the two shown lines and not the hidden one"
