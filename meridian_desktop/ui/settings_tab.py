@@ -68,6 +68,7 @@ from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
+from meridian_desktop.ui.tab_scroll import let_the_wheel_pass
 from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.text import TextBlock, make_selectable
 
@@ -162,6 +163,8 @@ class _FullHeightScroll(QScrollArea):
         super().__init__(parent)
         # Never taller than the content, so the space left over in the page goes to the RunPod card, not to this box.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        # The wheel over this box goes on to the Settings page, so the page scrolls under the wheel from anywhere on it.
+        let_the_wheel_pass(self, always=True)
 
     def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt naming
         super().setWidget(widget)

@@ -226,14 +226,29 @@ def _plain(text: str) -> str:
     return text.replace(chr(0x2029), "\n").replace(chr(0x2028), "\n").replace(chr(0xA0), " ")
 
 
-def _drag_past_an_edge(window: QWidget, scroll: QScrollArea, label: QLabel, *, down: bool) -> None:
+def _to_the_bottom(bar, name: str) -> None:
+    """Scroll the viewport to its bottom, and check that it got there. A tab's maximum grows when its layout settles,
+    a few events after it is shown, so the events run before the maximum is read. A stale maximum would leave the
+    viewport a pixel or two down, and a drag back up would then prove nothing."""
+    QApplication.processEvents()
+    bar.setValue(bar.maximum())
+    QApplication.processEvents()
+    assert bar.value() == bar.maximum() > 0, f"{name}: the viewport is not at its bottom before the drag"
+
+
+def _drag_past_an_edge(
+    window: QWidget, scroll: QScrollArea, label: QLabel, *, down: bool, until_end: bool = True
+) -> None:
     """Press on ``label`` and move past an edge of ``scroll``'s viewport: the bottom edge when ``down``, else the top.
     The press going down is on the label's first character. Going up it is at the right of the last line that shows in
     the viewport, past the end of short text, so the selection runs from the press back to the start of the text. Hold
-    past the edge until the viewport reaches its end in that direction (or about five seconds pass), then release. Every
-    move and the release go through the window handle."""
+    past the edge until the viewport reaches its end in that direction (or about five seconds pass), then release. With
+    ``until_end`` false, release as soon as the viewport has moved off where it was when the drag began, so the release
+    lands partway through the scroll. Every move and the release go through the window handle."""
     handle = window.windowHandle()
     viewport = scroll.viewport()
+    bar = scroll.verticalScrollBar()
+    start = bar.value()
     if down:
         begin = label.mapTo(window, QPoint(1, 3))
         past = viewport.mapTo(window, QPoint(min(60, viewport.width() - 2), viewport.height() + 25))
@@ -243,20 +258,25 @@ def _drag_past_an_edge(window: QWidget, scroll: QScrollArea, label: QLabel, *, d
         )
         begin = QPoint(shown.right() - 3, shown.bottom() - 3)
         past = viewport.mapTo(window, QPoint(min(60, viewport.width() - 2), -25))
+    # The moves first go to the inside of the edge, where the viewport does not scroll, and only then past it. So the
+    # first scroll step comes after the mouse is past the edge, not during the moves.
+    inside = viewport.mapTo(window, QPoint(min(60, viewport.width() - 2), viewport.height() - 2 if down else 1))
     QTest.mouseMove(handle, begin)
     QTest.mousePress(handle, LEFT, NO_KEYS, begin)
     for step in range(1, 13):
         QTest.mouseMove(
             handle,
-            QPoint(begin.x() + (past.x() - begin.x()) * step // 12, begin.y() + (past.y() - begin.y()) * step // 12),
+            QPoint(begin.x() + (inside.x() - begin.x()) * step // 12, begin.y() + (inside.y() - begin.y()) * step // 12),
         )
         QApplication.processEvents()
-    bar = scroll.verticalScrollBar()
+    QTest.mouseMove(handle, past)
+    QApplication.processEvents()
     end = bar.maximum() if down else bar.minimum()
-    # The button is still held. The scroll goes on while the mouse stays past the edge, so hold until it gets to the end.
+    # The button is still held. The scroll goes on while the mouse stays past the edge, so hold until it gets to the end
+    # (or, when the release is to land partway, until the viewport has moved at all).
     for _ in range(250):
         QTest.qWait(20)
-        if bar.value() == end:
+        if bar.value() == end or (not until_end and bar.value() != start):
             break
     QTest.mouseRelease(handle, LEFT, NO_KEYS, past)
     QApplication.processEvents()
@@ -282,23 +302,7 @@ def test_each_tab_content_sits_inside_one_vertical_scroll_area(qtbot, tmp_path, 
 
 # ----------------------------------------------------------------- the mouse wheel
 
-# Settings' connection section sits in a nested full-height scroll area (settings_tab._FullHeightScroll), which takes the
-# wheel even when it cannot move, so the page does not scroll under the wheel there. That module is outside this change.
-WHEEL_TABS = [
-    pytest.param(
-        name,
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="settings_tab._FullHeightScroll takes the wheel without moving, so Settings does not scroll under it",
-        ),
-    )
-    if name == "Settings"
-    else name
-    for name in TAB_NAMES
-]
-
-
-@pytest.mark.parametrize("name", WHEEL_TABS)
+@pytest.mark.parametrize("name", TAB_NAMES)
 def test_the_mouse_wheel_scrolls_each_tab(qtbot, tmp_path, name):
     window = _shown(qtbot, tmp_path, name)
     scroll = _the_scroll(window, name)
@@ -308,6 +312,46 @@ def test_the_mouse_wheel_scrolls_each_tab(qtbot, tmp_path, name):
     _wheel_notch(label, QPoint(label.width() // 2, label.height() // 2))
     QApplication.processEvents()
     assert bar.value() > 0, f"{name}: the wheel did not scroll the tab"
+
+
+# The Settings connection section sits in a nested full-height scroll area (settings_tab._FullHeightScroll), as tall as
+# its content, so it has nothing of its own to scroll. The wheel over it must go on to the Settings page, not stop there.
+SETTINGS_CONNECTION_WIDGETS = ["settings-mode", "settings-hosted-url", "settings-test-connection"]
+
+
+@pytest.mark.parametrize("widget_name", SETTINGS_CONNECTION_WIDGETS)
+def test_the_wheel_over_the_settings_connection_section_scrolls_the_settings_page(qtbot, tmp_path, widget_name):
+    window = _shown(qtbot, tmp_path, "Settings")
+    scroll = _the_scroll(window, "Settings")
+    bar = scroll.verticalScrollBar()
+    assert bar.maximum() > 0, f"Settings: the content is not taller than the viewport at {WINDOW_SIZE}"
+    assert bar.value() == 0
+    target = _page(window, "Settings").findChild(QWidget, widget_name)
+    assert target is not None, widget_name
+    assert target.isVisible(), f"{widget_name} is not shown, so the wheel is not over the connection section"
+    _wheel_notch(target, QPoint(target.width() // 2, target.height() // 2))
+    QApplication.processEvents()
+    assert bar.value() > 0, f"Settings: the wheel over {widget_name} did not scroll the Settings page"
+
+
+def test_the_wheel_scrolls_the_settings_page_even_where_the_connection_section_can_scroll(qtbot, tmp_path):
+    window = _shown(qtbot, tmp_path, "Settings")
+    page = _page(window, "Settings")
+    scroll = _the_scroll(window, "Settings")
+    bar = scroll.verticalScrollBar()
+    assert bar.maximum() > 0, f"Settings: the content is not taller than the viewport at {WINDOW_SIZE}"
+    section = next(area for area in page.findChildren(QScrollArea, "settings-scroll") if area is not scroll)
+    # Make the connection section shorter than its content, so it has rows of its own to scroll. The wheel must still
+    # go to the Settings page, which is the design of the section: the page does the scrolling.
+    section.setMaximumHeight(120)
+    QApplication.processEvents()
+    assert section.verticalScrollBar().maximum() > 0, "the connection section cannot scroll, so this checks nothing"
+    target = page.findChild(QWidget, "settings-test-connection")
+    assert target is not None
+    _wheel_notch(target, QPoint(target.width() // 2, target.height() // 2))
+    QApplication.processEvents()
+    assert section.verticalScrollBar().value() == 0, "the connection section scrolled itself under the wheel"
+    assert bar.value() > 0, "the wheel over the connection section did not scroll the Settings page"
 
 
 # A table or a pane inside a tab, with nothing of its own to scroll, passes the wheel on to the tab.
@@ -359,7 +403,6 @@ def test_a_drag_past_the_bottom_edge_scrolls_each_tab_and_selects_to_the_end_of_
     assert _plain(label.selectedText()).strip() == _line_plain(label).strip(), (
         f"{name}: the selection did not run on to the end of the line"
     )
-    _assert_scroll_stops_at_release(bar, name)
 
 
 @pytest.mark.parametrize("name", TAB_NAMES)
@@ -368,8 +411,7 @@ def test_a_drag_past_the_top_edge_scrolls_the_tab_back_up_and_selects_back_to_th
     scroll = _the_scroll(window, name)
     bar = scroll.verticalScrollBar()
     assert bar.maximum() > 0, f"{name}: the content is not taller than the viewport at {WINDOW_SIZE}"
-    bar.setValue(bar.maximum())
-    QApplication.processEvents()
+    _to_the_bottom(bar, name)
     label = _last_text_line(scroll)
 
     _drag_past_an_edge(window, scroll, label, down=False)
@@ -378,7 +420,35 @@ def test_a_drag_past_the_top_edge_scrolls_the_tab_back_up_and_selects_back_to_th
     assert label.hasSelectedText(), f"{name}: the drag selected nothing"
     # The selection runs from the press back to the start of the text, so it is the start of the line's text.
     selected = _plain(label.selectedText()).strip()
+    assert label.selectionStart() == 0, f"{name}: the selection does not start at the line's first character"
     assert _line_plain(label).strip().startswith(selected), f"{name}: the selection did not run back to the line's start"
+
+
+# The two tests above hold the drag until the viewport reaches its end, so the release lands at that end, and nothing
+# can move after it. This one releases partway through the scroll, so a scroll that went on after the button came up
+# would show, and the viewport must stay where the release found it.
+@pytest.mark.parametrize("down", [True, False], ids=["bottom", "top"])
+@pytest.mark.parametrize("name", TAB_NAMES)
+def test_a_drag_released_partway_past_an_edge_stops_the_scroll_where_it_was_released(qtbot, tmp_path, name, down):
+    window = _shown(qtbot, tmp_path, name)
+    scroll = _the_scroll(window, name)
+    bar = scroll.verticalScrollBar()
+    assert bar.maximum() > 0, f"{name}: the content is not taller than the viewport at {WINDOW_SIZE}"
+    if down:
+        assert bar.value() == 0
+        label = _first_text_line(scroll)
+    else:
+        _to_the_bottom(bar, name)
+        label = _last_text_line(scroll)
+    start = bar.value()
+    edge = bar.maximum() if down else bar.minimum()
+
+    _drag_past_an_edge(window, scroll, label, down=down, until_end=False)
+
+    released = bar.value()
+    side = "bottom" if down else "top"
+    assert released != start, f"{name}: the viewport did not scroll while the drag was held past the {side}"
+    assert released != edge, f"{name}: the viewport reached its end before the release, so the stop is not tested"
     _assert_scroll_stops_at_release(bar, name)
 
 

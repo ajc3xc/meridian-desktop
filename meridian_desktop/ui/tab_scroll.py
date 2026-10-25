@@ -47,8 +47,12 @@ def scrolled(content: QWidget, parent: QWidget) -> QScrollArea:
     return scroll
 
 
-class _WheelPassOnAtEnd(QObject):
+class _WheelPass(QObject):
     """The filter behind let_the_wheel_pass. It belongs to the scroll area it watches, which is its parent."""
+
+    def __init__(self, area: QAbstractScrollArea, *, always: bool) -> None:
+        super().__init__(area)
+        self._always = always
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
         if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
@@ -56,22 +60,27 @@ class _WheelPassOnAtEnd(QObject):
         turn = event.angleDelta().y() or event.pixelDelta().y()
         if turn == 0:
             return False  # a sideways wheel is the area's own
-        bar = self.parent().verticalScrollBar()
-        at_end = bar.value() >= bar.maximum() if turn < 0 else bar.value() <= bar.minimum()
-        if not at_end:
-            return False
+        if not self._always:
+            bar = self.parent().verticalScrollBar()
+            at_end = bar.value() >= bar.maximum() if turn < 0 else bar.value() <= bar.minimum()
+            if not at_end:
+                return False
         event.ignore()  # not taken, so the window hands it up to the scroll area around this one
         return True
 
 
-def let_the_wheel_pass(area: QAbstractScrollArea) -> None:
+def let_the_wheel_pass(area: QAbstractScrollArea, *, always: bool = False) -> None:
     """Let a wheel that ``area`` cannot move any further, in the direction it turns, go on to the scroll area around it.
 
     A scroll area takes every wheel event, even one that moves nothing, so a table or a pane with nothing to scroll
     would hold the wheel back from the tab around it. The filter on the area and on its viewport ignores the event only
     where the area is at its end in that direction. The area still scrolls when it can.
+
+    With ``always``, the area never takes a vertical wheel, even where it could still move. That is for an area that is
+    as tall as its content, so the scrolling belongs to the page around it, and the wheel must reach that page from
+    anywhere on the area. A sideways wheel is still the area's own.
     """
-    passer = _WheelPassOnAtEnd(area)
+    passer = _WheelPass(area, always=always)
     area.installEventFilter(passer)
     area.viewport().installEventFilter(passer)
 
