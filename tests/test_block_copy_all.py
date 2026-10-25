@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import QLabel, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop import claude_processes
@@ -96,36 +96,45 @@ def _runpod_panel(qtbot, tmp_path: Path) -> tuple[QWidget, RunPodPanel]:
 
 
 def _settings_card_status(qtbot, tmp_path: Path, settings_path: Path) -> Group:
-    """The RunPod card's heading and its server and key status lines (Keys section)."""
+    """The whole RunPod card before any check: the heading, the server and key status lines, and the line for no pods.
+
+    The card is one block, so these lines are in the block's one drag, under the heading and above the buttons.
+    """
     container, panel = _runpod_panel(qtbot, tmp_path)
     heading = panel.findChild(QLabel, "keys-runpod-name")
     server = panel.findChild(QLabel, "runpod-server-status")
     key = panel.findChild(QLabel, "runpod-key-status")
-    lines = [heading.text(), server.text(), key.text()]
+    pods_empty = panel.findChild(QLabel, "runpod-pods-empty")
+    old = [heading, server, key, pods_empty]
+    lines = [label.text() for label in old]
     # The key check sets the key status again, to the same text when no key is stored.
     return Group(
         container,
         panel.findChild(QLabel, "runpod-status"),
         lines,
-        [heading, server, key],
+        old,
         lambda: panel._on_key_checked(False, None),  # noqa: SLF001
     )
 
 
 def _settings_card_result(qtbot, tmp_path: Path, settings_path: Path) -> Group:
-    """The RunPod card's result line and its one plain line for no pods, under the buttons."""
+    """The whole RunPod card after Test key sets its result line: every line of the card, in its one block.
+
+    Test key is pressed on the card, so the result is the one the panel really shows, not a line set by the test.
+    """
     container, panel = _runpod_panel(qtbot, tmp_path)
-    panel._set_result("Key saved in the keychain.")  # noqa: SLF001
-    result = panel.findChild(QLabel, "runpod-result")
-    pods_empty = panel.findChild(QLabel, "runpod-pods-empty")
-    lines = [result.text(), pods_empty.text()]
-    return Group(
-        container,
-        panel.findChild(QLabel, "runpod-result-block"),
-        lines,
-        [result, pods_empty],
-        lambda: panel._set_result(result.text()),  # noqa: SLF001
-    )
+    panel.findChild(QPushButton, "runpod-test-key").click()
+    wait_idle(qtbot, panel)
+    old = [
+        panel.findChild(QLabel, "keys-runpod-name"),
+        panel.findChild(QLabel, "runpod-server-status"),
+        panel.findChild(QLabel, "runpod-key-status"),
+        panel.findChild(QLabel, "runpod-result"),
+        panel.findChild(QLabel, "runpod-pods-empty"),
+    ]
+    lines = [label.text() for label in old]
+    assert lines[3], "Test key sets the result line"
+    return Group(container, panel.findChild(QLabel, "runpod-status"), lines, old, _same_text(old))
 
 
 def _control_status(qtbot, tmp_path: Path, settings_path: Path) -> Group:

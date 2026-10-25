@@ -297,12 +297,17 @@ class RunPodPanel(QWidget):
         layout = QVBoxLayout(self._card)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # The card's heading and its two status lines are one block, so one drag over them selects all three. Each line
-        # keeps the object name it had as a label of its own. The key row and the buttons stay below the block.
+        # The whole card's text is one block, so one drag from the heading to the last line selects all of it. The block
+        # holds the heading, the two status lines, the result line and the one plain line for no pods. Each line keeps the
+        # object name it had as a label of its own. The result line takes no room until it has text, and the pods line
+        # shows only while there are no pods, so neither leaves a gap. The key row and the buttons stay below the block.
         self._status = TextBlock(self._card, "runpod-status", spacing=layout.spacing())
         self._status.line("keys-runpod-name", RUNPOD_HEADING, bold=True)
         self._server_status = self._status.line("runpod-server-status", SERVER_UNCHECKED_TEXT)
         self._key_status = self._status.line("runpod-key-status", "Checking key storage...")
+        self._result = self._status.line("runpod-result", "")
+        self._result.setVisible(False)
+        self._pods_empty = self._status.line("runpod-pods-empty", NOTHING_HERE_TEXT)
         layout.addWidget(self._status.label)
 
         key_row = QHBoxLayout()
@@ -328,14 +333,6 @@ class RunPodPanel(QWidget):
         action_row.addWidget(self._refresh_button)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-
-        # The result line and the one plain line for no pods are one block, above the pods table. The result line takes no
-        # room until it has text, and the pods line shows only while there are no pods, so neither leaves a gap.
-        self._result_block = TextBlock(self._card, "runpod-result-block", spacing=layout.spacing())
-        self._result = self._result_block.line("runpod-result", "")
-        self._result.setVisible(False)
-        self._pods_empty = self._result_block.line("runpod-pods-empty", NOTHING_HERE_TEXT)
-        layout.addWidget(self._result_block.label)
 
         self._pods = QTableWidget(0, len(POD_COLUMNS), self)
         self._pods.setObjectName("runpod-pods")
