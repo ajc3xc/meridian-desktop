@@ -6,7 +6,7 @@ or the old tab names. A card that cannot check says why and what to do.
 
 from datetime import datetime
 
-from meridian_desktop import local_client, updater
+from meridian_desktop import local_client, tunnel_status, updater
 from meridian_desktop.home_status import (
     ACTION_CHECK_TOOLS,
     ACTION_LAUNCH_ZOTERO,
@@ -182,6 +182,23 @@ def test_tunnel_running_names_what_needs_it():
     assert view.headline == "Running"
     assert view.tone == TONE_OK
     assert "codebase-memory" in view.detail
+
+
+TUNNEL_TOOLS = ("codebase-memory", "Serena", "filesystem", "Zotero")
+
+
+def test_tunnel_running_detail_names_all_four_tunnel_tools():
+    view = tunnel_view(TunnelStatus(state=RUNNING, reason="The tunnel process is running.", checked_at=CLOCK))
+    assert view.headline == "Running"
+    for tool in TUNNEL_TOOLS:
+        assert tool in view.detail, tool
+
+
+def test_tunnel_running_detail_names_the_same_tools_as_dependent_tools():
+    assert set(tunnel_status.DEPENDENT_TOOLS) == set(TUNNEL_TOOLS)
+    view = tunnel_view(TunnelStatus(state=RUNNING, reason="The tunnel process is running.", checked_at=CLOCK))
+    for tool in tunnel_status.DEPENDENT_TOOLS:
+        assert tool in view.detail, tool
 
 
 def test_tunnel_not_running_says_how_to_start_it_by_hand_and_names_the_confirm():

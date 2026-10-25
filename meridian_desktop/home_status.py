@@ -54,6 +54,10 @@ CHECKED_TEMPLATE = "Checked at {}."
 NOT_CHECKED_HEADLINE = "Not checked yet"
 CHECKING_HEADLINE = "Checking..."
 COULD_NOT_CHECK_HEADLINE = "Could not check"
+NO_BUILD_YET_HEADLINE = "No downloadable build yet"
+# updater.fetch_latest refuses a release that has no zip yet, and that reason starts with this sentence. Nothing failed,
+# so the Updates card gives that one refusal its own headline and keeps the reason as its explanation.
+NO_BUILD_YET_START = "No downloadable build is published"
 STILL_CHECKING_HEADLINE = "Still checking"
 FAILED_TEMPLATE = "The check failed unexpectedly ({}). Press Check now to try again."
 STALLED_TEMPLATE = (
@@ -250,9 +254,19 @@ TUNNEL_NOT_AVAILABLE_DETAIL = (
     "The tunnel cannot be checked until the Meridian core checkout and its Python are set. "
     "Set them in Settings, then press Check now."
 )
+
+
+def _tool_list(names: tuple[str, ...]) -> str:
+    """Join tool names as a plain list: "a, b and c"."""
+    if len(names) < 2:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+# The names come from tunnel_status.DEPENDENT_TOOLS, so this card cannot drift from the tool list.
 TUNNEL_DEPENDS = (
     "Hosted tools reach this computer through the tunnel, so they need it running: "
-    "codebase-memory, Serena and the filesystem."
+    f"{_tool_list(tunnel_status.DEPENDENT_TOOLS)}."
 )
 
 
@@ -395,6 +409,8 @@ def updates_view(current: str, result: object | None, *, enabled: bool, checking
                 detail=f"{result.reason} Try again later.",
                 tone=TONE_IDLE,
             )
+        if result.reason.startswith(NO_BUILD_YET_START):
+            return CardView(headline=NO_BUILD_YET_HEADLINE, detail=result.reason, tone=TONE_IDLE)
         # Refused: an install that cannot run here (a source run, or a copy outside the install folder), or a held release.
         return CardView(headline=COULD_NOT_CHECK_HEADLINE, detail=result.reason, tone=TONE_IDLE)
     if checking:

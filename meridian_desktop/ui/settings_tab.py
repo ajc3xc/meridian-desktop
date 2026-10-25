@@ -3,7 +3,8 @@
 1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
    Save and Remove, the Test connection button, the local URL and the database file.
 2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
-   launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
+   launch-time switches, the automatic update checkbox, the tunnel sign-in lifetime, and the line that counts custom
+   program names dropped on save. Each control asks the owner first, except the update checkbox and the lifetime choice.
 3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
 4. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
 5. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
@@ -29,7 +30,7 @@ parent, the tab has no RunPod card, and the Keys group lists only the names the 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -38,9 +39,11 @@ from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, S
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -56,7 +59,14 @@ from meridian_desktop.data_source import core_database_path
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import DEFAULT_ENGINE_URL, DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.settings_store import (
+    DEFAULT_ENGINE_URL,
+    DEFAULT_HOSTED_URL,
+    DEFAULT_LOCAL_URL,
+    DEFAULT_TUNNEL_SIGNIN_DAYS,
+    TUNNEL_SIGNIN_DAY_CHOICES,
+    SettingsStore,
+)
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
@@ -112,6 +122,14 @@ USING_CORE_FILE_TEXT = "Not chosen. Using {path}."
 LOCAL_URL_SAVED_TEXT = "Local URL saved."
 DB_SAVED_TEXT = "Database file saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
+# The tunnel sign-in lifetime: its caption, a short line on when a change applies, and each choice's label. The default
+# choice is marked, so the owner can see which one a file without the key gets.
+TUNNEL_SIGNIN_CAPTION = "Tunnel sign-in lifetime:"
+TUNNEL_SIGNIN_HINT = "How long a tunnel sign-in lasts. A change applies the next time the tunnel starts."
+TUNNEL_SIGNIN_OPTION = "{days} days"
+TUNNEL_SIGNIN_DEFAULT_MARK = " (default)"
+# Shown after a save that left out invalid custom program names. Only the count is shown, never the names.
+DROPPED_NAMES_TEXT = "Removed {count} invalid name(s) on save."
 HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
 TOKEN_SET_TEXT = "Hosted token: set"
 TOKEN_NOT_SET_TEXT = "Hosted token: not set"
@@ -132,6 +150,12 @@ ListHostedFn = Callable[[str, str | None], list[Any]]
 def mode_text(mode: str) -> str:
     """The saved mode as this tab shows it."""
     return f"Mode: {MODE_LABELS.get(mode, mode)} (set by the Mode selector above)"
+
+
+def signin_option_text(days: int) -> str:
+    """The label of one tunnel sign-in lifetime choice, with the default marked."""
+    text = TUNNEL_SIGNIN_OPTION.format(days=days)
+    return text + TUNNEL_SIGNIN_DEFAULT_MARK if days == DEFAULT_TUNNEL_SIGNIN_DAYS else text
 
 
 def describe_test_failure(exc: BaseException) -> str:
@@ -424,6 +448,25 @@ class SettingsTab(QWidget):
         self._auto_update.setChecked(self._store.load().settings.auto_update)
         self._auto_update.toggled.connect(self._on_auto_update_toggled)
         group.add_widget(self._auto_update)
+        # Tunnel sign-in lifetime: one choice, passed to the core at the next tunnel start.
+        signin_row = QHBoxLayout()
+        signin_row.setContentsMargins(0, 0, 0, 0)
+        signin_row.addWidget(_caption(group.body(), TUNNEL_SIGNIN_CAPTION))
+        self._signin_days = QComboBox(group.body())
+        self._signin_days.setObjectName("tunnel-signin-days")
+        for days in TUNNEL_SIGNIN_DAY_CHOICES:
+            self._signin_days.addItem(signin_option_text(days), days)
+        signin_row.addWidget(self._signin_days)
+        signin_row.addStretch(1)
+        group.add_layout(signin_row)
+        group.add_widget(_label(group.body(), "settings-signin-days-hint", TUNNEL_SIGNIN_HINT))
+        self._signin_days_message = _label(group.body(), "settings-signin-days-message")
+        self._signin_days_message.setVisible(False)
+        group.add_widget(self._signin_days_message)
+        # Custom program names: a save that left out invalid ones shows how many, and never the names.
+        self._names_message = _label(group.body(), "settings-custom-names-message")
+        self._names_message.setVisible(False)
+        group.add_widget(self._names_message)
         return group
 
     def _build_keys(self, parent: QWidget, runpod_card: QWidget | None) -> CollapsibleGroup:
@@ -483,6 +526,7 @@ class SettingsTab(QWidget):
         # A saved core path turns the launch switches off, so the runner block on this tab shows them as saved now.
         self._client_setup.coreChanged.connect(self._runner.refresh_flags)
         self._actions.coreChanged.connect(self._on_core_changed)
+        self._signin_days.currentIndexChanged.connect(self._on_signin_days_changed)
 
     def refresh(self) -> None:
         """Show the saved mode, the database file, whether a hosted token is set, and the keys.
@@ -495,6 +539,9 @@ class SettingsTab(QWidget):
         self._auto_update.blockSignals(True)  # showing the saved value must not save it again
         self._auto_update.setChecked(settings.auto_update)
         self._auto_update.blockSignals(False)
+        self._signin_days.blockSignals(True)  # showing the saved lifetime must not save it again
+        self._signin_days.setCurrentIndex(max(0, self._signin_days.findData(settings.tunnel_signin_days)))
+        self._signin_days.blockSignals(False)
         self._show_db_path()
         self._latex_section.setText(latex_section_text(settings.engine_url))
         self._refresh_token_status()
@@ -531,6 +578,30 @@ class SettingsTab(QWidget):
     @Slot(bool)
     def _on_auto_update_toggled(self, checked: bool) -> None:
         self._update(auto_update=bool(checked))
+
+    @Slot(int)
+    def _on_signin_days_changed(self, index: int) -> None:
+        days = self._signin_days.itemData(index)
+        if not isinstance(days, int):
+            return
+        try:
+            self._update(tunnel_signin_days=days)
+        except (OSError, ValueError):
+            _set_message(self._signin_days_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        _set_message(self._signin_days_message, "")
+
+    def save_custom_program_names(self, names: Iterable[object]) -> None:
+        """Save the custom program names. Invalid ones are left out, and the count of them is shown, never the names.
+
+        A save that leaves out nothing clears the count line.
+        """
+        try:
+            dropped = self._store.save_custom_program_names(names)
+        except (OSError, ValueError):
+            _set_message(self._names_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        _set_message(self._names_message, DROPPED_NAMES_TEXT.format(count=dropped) if dropped else "")
 
     def _update(self, **changes: object) -> None:
         """Save changed fields through the store. Every other field in the saved file is kept."""
@@ -662,6 +733,7 @@ class SettingsTab(QWidget):
 __all__ = [
     "DB_FILE_FILTER",
     "DB_SAVED_TEXT",
+    "DROPPED_NAMES_TEXT",
     "HOSTED_URL_SAVED_TEXT",
     "LOCAL_URL_SAVED_TEXT",
     "MODE_ITEMS",
