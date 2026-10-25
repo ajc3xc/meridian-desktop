@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from meridian_desktop import claude_processes as cp
 from meridian_desktop import settings_store, token_store
 from meridian_desktop.settings_store import (
     DEFAULT_LOCAL_URL,
@@ -14,6 +15,7 @@ from meridian_desktop.settings_store import (
     core_path_problem,
     default_settings_path,
 )
+from meridian_desktop.ui.sessions_panel import claude_status_text
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -660,3 +662,41 @@ def test_without_a_resolved_launch_mode_a_store_still_reads_local(settings_path)
     _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
 
     assert SettingsStore(settings_path).load().settings.mode == "local"
+
+
+# ----------------------------------------------------------- the saved custom program names (agent_process_names)
+
+
+def test_custom_names_load_with_the_dropped_count_and_save_only_the_valid_ones(settings_path):
+    _write(settings_path, json.dumps({"agent_process_names": ["myagent.exe", "bad/x.exe", 7, None, "ok_agent.exe"]}))
+    loaded = SettingsStore(settings_path).load()
+    # The list loads with no warning. Each non-text entry is kept as an empty name, which the listing counts as dropped.
+    assert loaded.warning is None
+    # The listing counts the three entries that are not valid, and its status line says so.
+    result = cp.list_claude_processes(snapshot=lambda: [], custom_names=loaded.settings.agent_process_names)
+    assert result.dropped == 3
+    assert claude_status_text(result, "12:00:00").endswith("3 saved program names are not valid and were left out.")
+    # Saving writes only the valid names: no empty entry and no broken one.
+    SettingsStore(settings_path).save(loaded.settings)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["agent_process_names"] == ["myagent.exe", "ok_agent.exe"]
+    # The saved file loads back with the two valid names, so nothing is left to drop.
+    again = SettingsStore(settings_path).load()
+    assert again.warning is None
+    assert again.settings.agent_process_names == ("myagent.exe", "ok_agent.exe")
+    assert cp.list_claude_processes(snapshot=lambda: [], custom_names=again.settings.agent_process_names).dropped == 0
+
+
+def test_saving_only_names_that_are_not_valid_writes_no_key(settings_path):
+    SettingsStore(settings_path).save(Settings(agent_process_names=("bad/x.exe", "", "no_extension")))
+    assert "agent_process_names" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.agent_process_names == ()
+
+
+def test_an_old_settings_file_without_the_custom_names_key_still_loads(settings_path):
+    _write(settings_path, json.dumps({"mode": "local", "local_url": DEFAULT_LOCAL_URL}))
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.warning is None
+    assert loaded.settings.agent_process_names == ()
+    SettingsStore(settings_path).save(loaded.settings)
+    assert "agent_process_names" not in json.loads(settings_path.read_text(encoding="utf-8"))

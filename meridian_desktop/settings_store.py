@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
+from meridian_desktop.agent_processes import clean_custom_names
+
 # local: the Meridian server or database file on this computer. hosted: the hosted Meridian account.
 # tunnel: the hosted account, which reaches this computer through the tunnel. Its projects are read
 # the same way as hosted. A saved file with local or hosted reads exactly as it did before.
@@ -106,7 +108,8 @@ class Settings:
     # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
     key_names: tuple[str, ...] = ()
     # The custom program names the process listing counts, in addition to claude.exe, codex.exe and cursor.exe. Only file
-    # names are stored; agent_processes checks each one. save() writes the key only when there is a name.
+    # names are stored; agent_processes checks each one. save() writes only the valid names, and the key only when one
+    # is left.
     agent_process_names: tuple[str, ...] = ()
 
 
@@ -398,7 +401,12 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
-        if not settings.agent_process_names:
+        saved_names = clean_custom_names(settings.agent_process_names)[0]
+        if saved_names:
+            # Only valid custom names are written. An entry that is not valid, such as an empty or non-text one loaded
+            # from the file, is left out, so the file never holds a broken name.
+            data["agent_process_names"] = list(saved_names)
+        else:
             # No custom program names is the default, so a file that names none has no such key.
             del data["agent_process_names"]
         if settings.check_updates:
