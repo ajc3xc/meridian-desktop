@@ -208,7 +208,12 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
     assert _text(page, "logs-tunnel-text") == "<b>bold</b> tunnel line"
     assert _text(page, "logs-runner-text") == "<i>runner</i> line"
     for label in page.findChildren(QLabel):
-        assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+        # The intro and the desktop heading are one rich-text block (its lines are paragraphs). Each line in it is still
+        # inserted as plain text, so only that block is rich.
+        if label.objectName() == "logs-intro-text":
+            assert label.textFormat() == Qt.TextFormat.RichText
+        else:
+            assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
 
 
 def test_nothing_is_read_until_refresh_is_pressed(qtbot):
