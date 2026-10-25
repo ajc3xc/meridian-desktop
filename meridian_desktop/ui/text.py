@@ -265,6 +265,127 @@ def visible_text(root: QWidget) -> str:
     return "\n".join(_label_text(label) for label in found if label.text())
 
 
+class _BlockLine(QLabel):
+    """One line of a TextBlock: a label under the line's own old name, which is never shown.
+
+    Setting its text, or showing or hiding it, redraws the block, so the code that sets a line does not change. A line
+    with empty text, or one hidden, is left out of the block. Qt never shows the line (it is in no layout), so isVisible()
+    stays False, and isHidden() reports what its owner asked for.
+    """
+
+    def __init__(
+        self,
+        block: TextBlock,
+        name: str,
+        parent: QWidget,
+        text: str,
+        *,
+        bold: bool,
+        point_size: float,
+        wrap: bool,
+        space_after: float | None,
+    ) -> None:
+        super().__init__(text, parent)
+        self.setObjectName(name)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        make_selectable(self)
+        self._block = block
+        self._wanted = True
+        self.line_bold = bold
+        self.line_point_size = point_size
+        self.line_wrap = wrap
+        self.line_space_after = space_after
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        super().setText(text)
+        self._block.redraw()
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt naming
+        # show() and hide() come here too. Qt does not show the line itself: it has no place in a layout.
+        self._wanted = bool(visible)
+        self._block.redraw()
+
+    def isHidden(self) -> bool:  # noqa: N802 - Qt naming
+        return not self._wanted
+
+    def isVisibleTo(self, ancestor: QWidget) -> bool:  # noqa: N802 - Qt naming
+        # A line is never drawn on its own: its block draws it, so the line is not visible to any ancestor.
+        return False
+
+
+class TextBlock:
+    """Lines of one block of text, drawn as one selectable label, so one drag over the block selects every line.
+
+    A drag stops at the edge of the label it starts in, so a group of labels stacked in a layout cannot be selected in one
+    drag. ``label`` is the block's one label: the owner adds it to its layout where the group's first line was. Each line
+    is made with line(): a label under the line's old name, never placed in a layout. The owner sets a line's text, or shows
+    and hides it, as before, and each change redraws the block with set_label_text, so a selection survives a redraw.
+    A line with empty text, or hidden, is left out. A block with no line left is hidden, so it takes no room.
+
+    ``spacing`` is the gap between lines, the gap the owner's layout put between the labels it replaces. A line's own
+    ``space_after`` overrides it. The last line has no gap below it, as a label has none below its text.
+    """
+
+    def __init__(self, parent: QWidget, name: str, *, spacing: float = 0.0) -> None:
+        # The block keeps no reference to its parent: its lines and label are the parent's children, as any label is.
+        self._spacing = max(float(spacing), 0.0)
+        self._lines: list[_BlockLine] = []
+        self.label = make_selectable(QLabel(parent))
+        self.label.setObjectName(name)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.label.hide()
+
+    def line(
+        self,
+        name: str,
+        text: str = "",
+        *,
+        bold: bool = False,
+        point_size: float = 0.0,
+        wrap: bool = True,
+        space_after: float | None = None,
+    ) -> QLabel:
+        """A new line of the block, under ``name``, with ``text`` as its plain text. Returns the line's label."""
+        line = _BlockLine(
+            self,
+            name,
+            self.label.parentWidget(),
+            text,
+            bold=bold,
+            point_size=point_size,
+            wrap=wrap,
+            space_after=space_after,
+        )
+        self._lines.append(line)
+        self.redraw()
+        return line
+
+    def redraw(self) -> None:
+        """Draw the shown lines that have text into the block, or hide the block when no line is left to show."""
+        shown = [line for line in self._lines if not line.isHidden() and line.text()]
+        if not shown:
+            self.label.hide()
+            return
+        last = len(shown) - 1
+        lines = []
+        for index, line in enumerate(shown):
+            gap = line.line_space_after if line.line_space_after is not None else self._spacing
+            lines.append(
+                BlockLine(
+                    line.text(),
+                    bold=line.line_bold,
+                    point_size=line.line_point_size,
+                    wrap=line.line_wrap,
+                    space_after=0.0 if index == last else gap,
+                )
+            )
+        set_label_text(self.label, block_html(lines, self.label.font()))
+        self.label.show()
+
+
 def enable_widget_copy(widget: QWidget, text: Callable[[], str] | None = None) -> QAction:
     """A Copy action on ``widget``: in its right-click menu, and on Ctrl+C while the widget itself has focus.
 
