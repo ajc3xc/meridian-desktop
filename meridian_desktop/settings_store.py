@@ -179,6 +179,9 @@ class Settings:
     limit_zip_download_mb: int = _limit_default("limit_zip_download_mb")
     limit_writes: int = _limit_default("limit_writes")
     limit_claims: int = _limit_default("limit_claims")
+    # The keys file the owner chose for the Keys block (keys_file.py). Only its path is stored, never a value. "" means no
+    # file is chosen. save() writes the key only when a path is set, so a file that never chose one keeps no such key.
+    keys_file_path: str = ""
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -334,6 +337,15 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["critical_keys"] = tuple(dict.fromkeys(item.strip() for item in value))
         else:
             problems.append("critical_keys must be a list of names; using none")
+
+    # keys_file_path: an absent key means no file is chosen, with no warning. Only text is accepted, and it is kept without
+    # being checked here, so a file that is gone does not break loading. The Keys block says so when it reads the file.
+    if "keys_file_path" in data:
+        value = data["keys_file_path"]
+        if isinstance(value, str):
+            values["keys_file_path"] = value.strip()
+        else:
+            problems.append("keys_file_path must be a path as text or empty; using empty")
 
     # disabled_tools: an absent key means every tool is on, with no warning. Only a list of non-empty text is accepted.
     # A value that is not such a list is ignored with a warning, so no tool is switched off by a bad file.
@@ -566,6 +578,9 @@ class SettingsStore:
         if settings.limit_approval_enabled:
             # On is the default, so the file-size note switch is written only once the owner turns it off.
             del data["limit_approval_enabled"]
+        if not settings.keys_file_path:
+            # No file chosen is the default, so a file that never chose a keys file has no such key.
+            del data["keys_file_path"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
