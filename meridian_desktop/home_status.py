@@ -254,9 +254,19 @@ TUNNEL_NOT_AVAILABLE_DETAIL = (
     "The tunnel cannot be checked until the Meridian core checkout and its Python are set. "
     "Set them in Settings, then press Check now."
 )
+
+
+def _tool_list(names: tuple[str, ...]) -> str:
+    """Join tool names as a plain list: "a, b and c"."""
+    if len(names) < 2:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+# The names come from tunnel_status.DEPENDENT_TOOLS, so this card cannot drift from the tool list.
 TUNNEL_DEPENDS = (
     "Hosted tools reach this computer through the tunnel, so they need it running: "
-    "codebase-memory, Serena and the filesystem."
+    f"{_tool_list(tunnel_status.DEPENDENT_TOOLS)}."
 )
 
 
