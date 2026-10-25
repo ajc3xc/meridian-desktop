@@ -23,6 +23,7 @@ from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.main_window import TAB_NAMES, MainWindow
 from meridian_desktop.ui.runner_actions import RunnerActions
+from meridian_desktop.zotero_bridge_client import STATE_ERROR, BridgeStatus
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
 LEFT = Qt.MouseButton.LeftButton
@@ -61,6 +62,16 @@ class _Zotero:
 
     def search_items(self, query):
         return []
+
+
+class _Bridge:
+    """The Zotero bridge the Settings panel checks. Nothing is asked of the local server, and no update is sent."""
+
+    def status(self, base_url):
+        return BridgeStatus(STATE_ERROR, reason="The Zotero bridge is not checked in this test.")
+
+    def update(self, base_url, choice):
+        raise AssertionError("no test sends a bridge update")
 
 
 class _Runner:
@@ -115,6 +126,7 @@ def _window(qtbot, tmp_path) -> MainWindow:
         secret_store=KeyringSecretStore(backend=MemoryKeyring()),
         data_sources=sources,
         zotero=_Zotero(),
+        zotero_bridge=_Bridge(),
         tunnel_runner=_Runner(),
         tools_status=lambda: ToolsStatus(rows=(), message="Not checked in this test."),
         update_transport=None,

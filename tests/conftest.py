@@ -23,8 +23,8 @@ from _fakes import MemoryKeyring
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 # The fixed ports the real services on this computer listen on: the core server, the LaTeX engine, the fourteen
-# tunnel slots and Zotero's local API.
-SERVICE_PORTS = frozenset({7878, 8471, 23119, *range(8808, 8822)})
+# tunnel slots, Zotero's local API and the Zotero bridge API.
+SERVICE_PORTS = frozenset({7878, 8471, 23119, 23125, *range(8808, 8822)})
 ALLOW_SERVICE_PORTS = "allow_service_ports"
 
 # The socket library's own methods, taken before the guard replaces them.
