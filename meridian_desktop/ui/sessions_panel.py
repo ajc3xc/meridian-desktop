@@ -34,10 +34,12 @@ The four providers are called on the worker thread, never on the UI thread:
   keychain. The panel passes the token to the client for one request and keeps no copy. It is never shown.
 - project_provider() -> sequence of (project_id, name) pairs: fills the picker. Only a full read calls it. When it
   raises data_source.ProjectsUnresolved, the status line shows that resolver message. Any other failure shows
-  PROJECTS_FAILED_TEXT. The window passes a data_source.ProjectsProvider, which also has local_server_answers(url)
-  (the local-server check), local_file() (the database file and its snapshot label, for the file read) and
-  watch_key() (the settings that choose that file). A provider without them reads no file and never reads again on
-  show, and with no check to ask, its local server is always asked and its answer is final.
+  PROJECTS_FAILED_TEXT. The picker lists the live sources only (the local server, hosted), never a backup project, so
+  a project it offers is one that the per-project read can reach. The window passes a data_source.ProjectsProvider,
+  which also has local_server_answers(url) (the local-server check), local_file() (the database file and its snapshot
+  label, for the file read) and watch_key() (the settings that choose that file). A provider without them reads no
+  file and never reads again on show, and with no check to ask, its local server is always asked and its answer is
+  final.
 - mode_provider() -> str: the mode saved in Settings. Only "local" allows a local read, and a full read follows the
   source order of that mode.
 
