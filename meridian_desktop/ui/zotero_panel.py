@@ -49,7 +49,7 @@ from meridian_desktop.zotero_bridge_client import (
     STATE_ERROR,
     STATE_NOT_INSTALLED,
     STATE_UPDATE_READY,
-    STATE_WAIT_PENDING,
+    STATE_ZOTERO_RUNNING,
     BridgeResult,
     BridgeStatus,
 )
@@ -108,7 +108,9 @@ BRIDGE_ZOTERO_OPEN_TEXT = (
 )
 BRIDGE_NOT_INSTALLED_TEXT = "Bridge not installed; expected {expected}."
 WAIT_RESULT_TEXT = "Waiting: the bridge will update the next time Zotero starts."
+# A recorded "wait" choice reads as the waiting sentence, in every state that has a bridge line.
 BRIDGE_WAIT_PENDING_TEXT = "Bridge {installed} installed; expected {expected}. " + WAIT_RESULT_TEXT
+BRIDGE_NOT_INSTALLED_WAIT_TEXT = "Bridge not installed; expected {expected}. " + WAIT_RESULT_TEXT
 BRIDGE_SENDING_TEXT = "Sending the bridge update..."
 BRIDGE_DONE_TEXT = "The bridge update was sent. Zotero may take up to a minute to close and restart."
 BRIDGE_UPDATE_UNCHECKED_TEXT = "The bridge update could not be completed."
@@ -225,7 +227,8 @@ def ask_start(parent: QWidget | None, command: str, folder: str) -> bool:
 
 
 def bridge_status_text(status: BridgeStatus | None) -> str:
-    """The bridge line on the card. A version that is not known reads as "unknown"."""
+    """The bridge line on the card. A version that is not known reads as "unknown". A recorded wait reads as the
+    waiting sentence, whatever the state. An update ready while Zotero is open says so in plain words."""
     if status is None:
         return BRIDGE_NOT_CHECKED_TEXT
     if status.state == STATE_ERROR:
@@ -233,12 +236,14 @@ def bridge_status_text(status: BridgeStatus | None) -> str:
     installed = status.installed or "unknown"
     expected = status.expected or "unknown"
     if status.state == STATE_NOT_INSTALLED:
-        return BRIDGE_NOT_INSTALLED_TEXT.format(expected=expected)
-    if status.state == STATE_WAIT_PENDING:
+        template = BRIDGE_NOT_INSTALLED_WAIT_TEXT if status.pending_install else BRIDGE_NOT_INSTALLED_TEXT
+        return template.format(expected=expected)
+    if status.pending_install:
         return BRIDGE_WAIT_PENDING_TEXT.format(installed=installed, expected=expected)
     if status.state == STATE_UPDATE_READY:
-        template = BRIDGE_ZOTERO_OPEN_TEXT if status.zotero_running is True else BRIDGE_UPDATE_READY_TEXT
-        return template.format(installed=installed, expected=expected)
+        return BRIDGE_UPDATE_READY_TEXT.format(installed=installed, expected=expected)
+    if status.state == STATE_ZOTERO_RUNNING:
+        return BRIDGE_ZOTERO_OPEN_TEXT.format(installed=installed, expected=expected)
     assert status.state == STATE_CURRENT
     return BRIDGE_CURRENT_TEXT.format(installed=installed, expected=expected)
 

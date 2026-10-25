@@ -54,7 +54,7 @@ from meridian_desktop.zotero_bridge_client import (
     STATE_ERROR,
     STATE_NOT_INSTALLED,
     STATE_UPDATE_READY,
-    STATE_WAIT_PENDING,
+    STATE_ZOTERO_RUNNING,
     STATUS_PATH,
     UPDATE_PATH,
     ZOTERO_DID_NOT_CLOSE_MESSAGE,
@@ -76,9 +76,8 @@ FORCE_BODY = {"when": "now", "close": "force"}
 WAIT_BODY = {"when": "wait"}
 CURRENT = BridgeStatus(STATE_CURRENT, "0.1.4", "0.1.4", False)
 UPDATE_READY = BridgeStatus(STATE_UPDATE_READY, "0.1.3", "0.1.4", False)
-UPDATE_READY_ZOTERO_OPEN = BridgeStatus(STATE_UPDATE_READY, "0.1.3", "0.1.4", True)
+ZOTERO_OPEN_UPDATE_READY = BridgeStatus(STATE_ZOTERO_RUNNING, "0.1.3", "0.1.4", True)
 NOT_INSTALLED = BridgeStatus(STATE_NOT_INSTALLED, None, "0.1.4", False)
-WAIT_PENDING = BridgeStatus(STATE_WAIT_PENDING, "0.1.3", "0.1.4", True)
 STILL_OPEN_BODY = json.dumps({"error": {"code": "zotero_still_open", "message": SENTINEL}}).encode("utf-8")
 # The core route's 409 answers, byte for byte in content (meridian/routes/desktop_bridge.py). A polite or force close
 # that leaves Zotero open is close_failed with zotero_open set, so the route adds error.code "zotero_still_open" next to
@@ -99,8 +98,9 @@ CORE_CLOSE_FAILED_BODY = json.dumps({"status": "close_failed", "message": CORE_C
 FORCED_LINE = "Zotero was closed by force and the bridge updated."
 
 
-def _answer(state, *, installed="0.1.3", expected="0.1.4", running=False):
-    return {"state": state, "installed_version": installed, "expected_version": expected, "zotero_running": running}
+def _answer(state, *, installed="0.1.3", expected="0.1.4", pending=False):
+    """A status answer with the core route's keys: state, installed_version, expected_version and pending_install."""
+    return {"state": state, "installed_version": installed, "expected_version": expected, "pending_install": pending}
 
 
 def _json_reply(payload, status=200):
@@ -262,12 +262,88 @@ def test_build_request_refuses_a_non_loopback_address_with_its_code():
 # ----------------------------------------------------------------- the client: answers
 
 
-@pytest.mark.parametrize("state", [STATE_CURRENT, STATE_UPDATE_READY, STATE_NOT_INSTALLED, STATE_WAIT_PENDING])
-def test_each_status_state_is_read_with_its_versions_and_running_flag(state):
-    transport = Transport(get=_json_reply(_answer(state, running=True)))
-    result = zotero_bridge_client.status(LOCAL, transport=transport)
+# ----------------------------------------------------------------- the core's exact status bodies
+
+# The body the core route answers for each state: bridge_update_status in worktrees/bridge-updater-core/meridian/
+# zotero_plugin_install.py, as JSON. Those four keys are the whole body. installed_version is null when no bridge is
+# installed, and pending_install is true only while a "wait" choice is recorded.
+CORE_STATUS_BODIES = {
+    "current": {
+        "expected_version": "0.1.4",
+        "installed_version": "0.1.4",
+        "state": "current",
+        "pending_install": False,
+    },
+    "update_ready": {
+        "expected_version": "0.1.4",
+        "installed_version": "0.1.3",
+        "state": "update_ready",
+        "pending_install": False,
+    },
+    "zotero_running": {
+        "expected_version": "0.1.4",
+        "installed_version": "0.1.3",
+        "state": "zotero_running",
+        "pending_install": False,
+    },
+    "not_installed": {
+        "expected_version": "0.1.4",
+        "installed_version": None,
+        "state": "not_installed",
+        "pending_install": False,
+    },
+}
+CORE_STATES = ("current", "update_ready", "zotero_running", "not_installed")
+WAITING_LINE = "Waiting: the bridge will update the next time Zotero starts."
+
+
+def _core_body(state, *, pending):
+    return {**CORE_STATUS_BODIES[state], "pending_install": pending}
+
+
+def _core_status(state, *, pending=False):
+    return zotero_bridge_client.parse_status(_json_reply(_core_body(state, pending=pending)))
+
+
+@pytest.mark.parametrize("state", CORE_STATES)
+def test_each_core_status_body_is_read_as_its_own_state(state):
+    body = CORE_STATUS_BODIES[state]
+    result = zotero_bridge_client.status(LOCAL, transport=Transport(get=_json_reply(body)))
     assert result.state == state
-    assert (result.installed, result.expected, result.zotero_running) == ("0.1.3", "0.1.4", True)
+    assert result.reason == ""
+    assert (result.installed, result.expected) == (body["installed_version"], "0.1.4")
+    assert result.pending_install is False
+
+
+@pytest.mark.parametrize("state", CORE_STATES)
+def test_pending_install_true_is_read_for_each_core_state(state):
+    transport = Transport(get=_json_reply(_core_body(state, pending=True)))
+    result = zotero_bridge_client.status(LOCAL, transport=transport)
+    assert (result.state, result.pending_install) == (state, True)
+
+
+def test_zotero_running_is_known_open_and_update_ready_is_known_closed():
+    running = _core_status("zotero_running")
+    ready = _core_status("update_ready")
+    assert (running.state, running.zotero_running) == ("zotero_running", True)
+    assert (ready.state, ready.zotero_running) == ("update_ready", False)
+
+
+def test_the_client_accepts_exactly_the_four_core_states():
+    assert zotero_bridge_client.ANSWER_STATES == frozenset(CORE_STATES)
+
+
+def test_the_retired_wait_pending_state_is_an_unknown_answer():
+    body = {**CORE_STATUS_BODIES["update_ready"], "state": "wait_pending"}
+    result = zotero_bridge_client.parse_status(_json_reply(body))
+    assert result.state == STATE_ERROR
+    assert result.reason == zotero_bridge_client.BAD_ANSWER_MESSAGE
+
+
+def test_a_pending_install_that_is_not_true_or_false_reads_as_not_pending():
+    body = {**CORE_STATUS_BODIES["update_ready"], "pending_install": "yes"}
+    result = zotero_bridge_client.parse_status(_json_reply(body))
+    assert (result.state, result.pending_install) == ("update_ready", False)
 
 
 def test_an_unknown_state_or_an_unreadable_answer_is_an_error_with_fixed_text():
@@ -388,14 +464,14 @@ def test_malformed_optional_fields_read_as_unknown_and_a_non_text_message_is_emp
         "state": "update_ready",
         "installed_version": 3,
         "expected_version": "../escape",
-        "zotero_running": "yes",
+        "pending_install": "yes",
     }
     result = zotero_bridge_client.status(LOCAL, transport=Transport(get=_json_reply(payload)))
-    assert (result.state, result.installed, result.expected, result.zotero_running) == (
+    assert (result.state, result.installed, result.expected, result.pending_install) == (
         STATE_UPDATE_READY,
         None,
         None,
-        None,
+        False,
     )
     assert zotero_bridge_client.update(
         LOCAL, CHOICE_POLITE, transport=Transport(post=_json_reply({"message": 7}))
@@ -497,15 +573,11 @@ def test_the_default_transport_maps_each_connection_failure_to_fixed_text(monkey
         (CURRENT, "Bridge 0.1.4 installed; expected 0.1.4."),
         (UPDATE_READY, "Bridge 0.1.3 installed; expected 0.1.4. An update is ready."),
         (
-            UPDATE_READY_ZOTERO_OPEN,
+            ZOTERO_OPEN_UPDATE_READY,
             "Bridge 0.1.3 installed; expected 0.1.4. An update is ready. "
             "Zotero is open, so it needs Zotero to close and restart.",
         ),
         (NOT_INSTALLED, "Bridge not installed; expected 0.1.4."),
-        (
-            WAIT_PENDING,
-            "Bridge 0.1.3 installed; expected 0.1.4. Waiting: the bridge will update the next time Zotero starts.",
-        ),
         (
             BridgeStatus(STATE_ERROR, reason="The local server address must be 127.0.0.1, localhost or ::1."),
             "Bridge: could not be checked. The local server address must be 127.0.0.1, localhost or ::1.",
@@ -514,6 +586,28 @@ def test_the_default_transport_maps_each_connection_failure_to_fixed_text(monkey
 )
 def test_the_bridge_line_text_for_each_state(status, expected):
     assert bridge_status_text(status) == expected
+
+
+@pytest.mark.parametrize(
+    "state, pending, expected",
+    [
+        ("current", False, "Bridge 0.1.4 installed; expected 0.1.4."),
+        ("update_ready", False, "Bridge 0.1.3 installed; expected 0.1.4. An update is ready."),
+        (
+            "zotero_running",
+            False,
+            "Bridge 0.1.3 installed; expected 0.1.4. An update is ready. "
+            "Zotero is open, so it needs Zotero to close and restart.",
+        ),
+        ("not_installed", False, "Bridge not installed; expected 0.1.4."),
+        ("current", True, "Bridge 0.1.4 installed; expected 0.1.4. " + WAITING_LINE),
+        ("update_ready", True, "Bridge 0.1.3 installed; expected 0.1.4. " + WAITING_LINE),
+        ("zotero_running", True, "Bridge 0.1.3 installed; expected 0.1.4. " + WAITING_LINE),
+        ("not_installed", True, "Bridge not installed; expected 0.1.4. " + WAITING_LINE),
+    ],
+)
+def test_the_bridge_line_reads_each_core_body_and_its_pending_install(state, pending, expected):
+    assert bridge_status_text(_core_status(state, pending=pending)) == expected
 
 
 def test_the_wait_result_line_is_the_waiting_sentence():
@@ -650,13 +744,24 @@ def test_the_bridge_is_checked_on_show_and_again_on_refresh_off_the_ui_thread(qt
     assert all(thread is not threading.main_thread() for thread in bridge.threads)
 
 
-@pytest.mark.parametrize("status", [CURRENT, WAIT_PENDING, BridgeStatus(STATE_ERROR, reason="x")])
+@pytest.mark.parametrize(
+    "status",
+    [CURRENT, _core_status("current", pending=True), BridgeStatus(STATE_ERROR, reason="x")],
+)
 def test_the_update_button_is_disabled_for_current_waiting_and_error(qtbot, status):
     panel = _shown(qtbot, FakeBridge(status=status))
     assert not _button(panel).isEnabled()
 
 
-@pytest.mark.parametrize("status", [UPDATE_READY, UPDATE_READY_ZOTERO_OPEN, NOT_INSTALLED])
+@pytest.mark.parametrize("state", ["update_ready", "zotero_running", "not_installed"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_the_update_button_is_enabled_for_each_core_state_with_an_update_ready(qtbot, state, pending):
+    panel = _shown(qtbot, FakeBridge(status=_core_status(state, pending=pending)))
+    assert _button(panel).isEnabled()
+    assert _button(panel).text() == UPDATE_BUTTON_TEXT
+
+
+@pytest.mark.parametrize("status", [UPDATE_READY, ZOTERO_OPEN_UPDATE_READY, NOT_INSTALLED])
 def test_the_update_button_is_enabled_for_update_ready_zotero_open_with_update_and_not_installed(qtbot, status):
     panel = _shown(qtbot, FakeBridge(status=status))
     assert _button(panel).isEnabled()

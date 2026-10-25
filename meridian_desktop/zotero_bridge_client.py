@@ -19,10 +19,12 @@ Both functions return a plain result and never raise. The address is checked for
 call, so a non-loopback address sends nothing. No request carries a token: the route is loopback-only and no
 Authorization header is sent. Failures carry fixed text. The body of an answer is never copied into a result.
 
-Status answer, HTTP 200, a JSON object:
-    {"state": "current" | "update_ready" | "not_installed" | "wait_pending",
+Status answer, HTTP 200, a JSON object with exactly the keys the core route sends:
+    {"state": "current" | "update_ready" | "zotero_running" | "not_installed",
      "installed_version": "0.1.3" or null, "expected_version": "0.1.4" or null,
-     "zotero_running": true | false | null}
+     "pending_install": true | false}
+"update_ready" means an update is ready and Zotero is closed. "zotero_running" means an update is ready while Zotero
+is open. "pending_install" is true while a "wait" choice is recorded. Any other state is an error.
 Update answer, HTTP 200, a JSON object: {"message": "one short line"}. The message is optional.
 Update failure, any other status, with a JSON error object: {"error": {"code": "short_slug", "message": "..."}}. Only a
 short lowercase code is shown. The code "zotero_still_open" means a polite close left Zotero open, so nothing was
@@ -61,16 +63,16 @@ _BODIES = {
 STILL_OPEN_CODE = "zotero_still_open"
 MAX_MESSAGE_CHARS = 200
 
-# The states status() reports. STATE_ERROR is set by this client for any failed or unreadable check.
+# The states status() reports: the four the core route answers. STATE_ERROR is set by this client for any failed or
+# unreadable check, including an answer whose state is not one of the four.
 STATE_CURRENT = "current"
 STATE_UPDATE_READY = "update_ready"
+STATE_ZOTERO_RUNNING = "zotero_running"
 STATE_NOT_INSTALLED = "not_installed"
-STATE_WAIT_PENDING = "wait_pending"
 STATE_ERROR = "error"
-ANSWER_STATES = frozenset({STATE_CURRENT, STATE_UPDATE_READY, STATE_NOT_INSTALLED, STATE_WAIT_PENDING})
-# The states where Update bridge is offered. A running Zotero with an update ready is STATE_UPDATE_READY with
-# zotero_running set.
-UPDATABLE_STATES = frozenset({STATE_UPDATE_READY, STATE_NOT_INSTALLED})
+ANSWER_STATES = frozenset({STATE_CURRENT, STATE_UPDATE_READY, STATE_ZOTERO_RUNNING, STATE_NOT_INSTALLED})
+# The states where Update bridge is offered: an update is ready (Zotero open or closed), or no bridge is installed.
+UPDATABLE_STATES = frozenset({STATE_UPDATE_READY, STATE_ZOTERO_RUNNING, STATE_NOT_INSTALLED})
 
 BAD_CHOICE_MESSAGE = "The desktop sends only the choices close politely, force close and wait. Nothing was sent."
 ZOTERO_DID_NOT_CLOSE_MESSAGE = "Zotero did not close, so the bridge was not installed."
@@ -101,12 +103,14 @@ Transport = Callable[[str, str, str, dict[str, Any] | None, float], Reply]
 @dataclass(frozen=True)
 class BridgeStatus:
     """What the bridge reports. ``installed`` and ``expected`` are versions, or None when unknown. ``zotero_running``
-    is None when unknown. ``reason`` is fixed text, and it is set only for STATE_ERROR."""
+    is True in STATE_ZOTERO_RUNNING, False in STATE_UPDATE_READY and None otherwise. ``pending_install`` is True while
+    a "wait" choice is recorded. ``reason`` is fixed text, and it is set only for STATE_ERROR."""
 
     state: str
     installed: str | None = None
     expected: str | None = None
     zotero_running: bool | None = None
+    pending_install: bool = False
     reason: str = ""
 
     @property
@@ -212,7 +216,7 @@ def update(
 
 
 def parse_status(reply: Reply) -> BridgeStatus:
-    """The status in one answer. An answer that is not a known state is an error with fixed text."""
+    """The status in one answer. A state that is not one of the four core states is an error with fixed text."""
     if 300 <= reply.status < 400:
         return BridgeStatus(STATE_ERROR, reason=local_client.REDIRECT_MESSAGE)
     if reply.status == 404:
@@ -228,7 +232,9 @@ def parse_status(reply: Reply) -> BridgeStatus:
         state=state,
         installed=_version(payload.get("installed_version")),
         expected=_version(payload.get("expected_version")),
-        zotero_running=_flag(payload.get("zotero_running")),
+        zotero_running=_zotero_running(state),
+        # Only a boolean true counts as a recorded wait. Anything else reads as not pending.
+        pending_install=payload.get("pending_install") is True,
     )
 
 
@@ -272,8 +278,13 @@ def _version(value: object) -> str | None:
     return value if isinstance(value, str) and _VERSION.fullmatch(value) else None
 
 
-def _flag(value: object) -> bool | None:
-    return value if isinstance(value, bool) else None
+def _zotero_running(state: str) -> bool | None:
+    """The Zotero fact a state carries: True while Zotero is open, False when the core found it closed, else None."""
+    if state == STATE_ZOTERO_RUNNING:
+        return True
+    if state == STATE_UPDATE_READY:
+        return False
+    return None
 
 
 def _line(value: object) -> str:
@@ -301,7 +312,7 @@ __all__ = [
     "STATE_ERROR",
     "STATE_NOT_INSTALLED",
     "STATE_UPDATE_READY",
-    "STATE_WAIT_PENDING",
+    "STATE_ZOTERO_RUNNING",
     "STATUS_PATH",
     "STATUS_TIMEOUT",
     "STILL_OPEN_CODE",
