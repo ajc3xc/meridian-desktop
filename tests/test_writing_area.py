@@ -70,13 +70,13 @@ def test_a_markup_looking_line_in_the_writing_block_shows_its_characters_and_no_
     assert_shows_literally(area.findChild(QLabel, "writing-text"), MARKUP_LINE)
 
 
-def test_settings_page_holds_the_writing_area_and_still_five_tabs(qtbot, settings_path):
+def test_settings_page_holds_the_writing_area_and_still_seven_tabs(qtbot, settings_path):
     window = MainWindow(SettingsStore(settings_path), secret_store=KeyringSecretStore(backend=MemoryKeyring()),
                         data_sources=_sources())
     qtbot.addWidget(window)
-    # The Writing area is a section of Settings, never a sixth main tab.
-    assert TAB_NAMES == ("Home", "Projects", "Sessions", "Search", "Settings")
-    assert window.tabs.count() == 5
+    # The Writing area is a section of Settings, never an eighth main tab.
+    assert TAB_NAMES == ("Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings")
+    assert window.tabs.count() == 7
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
     page = window.tabs.widget(names.index("Settings"))
     body = page.findChild(QWidget, "settings-page")

@@ -58,7 +58,7 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
@@ -198,8 +198,11 @@ def test_home_search_and_settings_are_built_pages(qtbot, settings_path):
 
     assert isinstance(_page(window, "Home"), HomeTab)
     assert _page(window, "Home").objectName() == "home-tab"
-    assert isinstance(_page(window, "Search"), SearchTab)
-    assert _page(window, "Search").objectName() == "search-tab"
+    # The Code, Outputs and Research tabs are one search tab each, for its own kind.
+    for name, kind in (("Code", "code"), ("Outputs", "outputs"), ("Research", "research")):
+        assert isinstance(_page(window, name), SearchTab), name
+        assert _page(window, name).objectName() == f"search-tab-{kind}", name
+        assert _page(window, name).kind == kind, name
     assert _page(window, "Projects").objectName() == "projects-tab"
 
 

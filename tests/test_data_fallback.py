@@ -973,7 +973,7 @@ def test_the_window_shows_the_core_file_on_projects_and_sessions(qtbot, settings
     )
     qtbot.addWidget(window)
     names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-    assert names == ["Home", "Projects", "Sessions", "Search", "Settings"]
+    assert names == ["Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings"]
     # Projects is in front before the window shows, so Home's checks (Zotero, the tunnel, the slot ports) never run.
     window.tabs.setCurrentIndex(names.index("Projects"))
     window.show()
