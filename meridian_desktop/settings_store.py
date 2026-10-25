@@ -105,6 +105,9 @@ class Settings:
     # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
     # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
     key_names: tuple[str, ...] = ()
+    # The custom program names the process listing counts, in addition to claude.exe, codex.exe and cursor.exe. Only file
+    # names are stored; agent_processes checks each one. save() writes the key only when there is a name.
+    agent_process_names: tuple[str, ...] = ()
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -241,6 +244,15 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["key_names"] = tuple(item.strip() for item in value)
         else:
             problems.append("key_names must be a list of names; using none")
+
+    # agent_process_names: an absent key means none, with no warning. A list is kept as text. An entry that is not text is
+    # kept as an empty name, which agent_processes drops and counts. Anything other than a list is refused with a warning.
+    if "agent_process_names" in data:
+        value = data["agent_process_names"]
+        if isinstance(value, list):
+            values["agent_process_names"] = tuple(item if isinstance(item, str) else "" for item in value)
+        else:
+            problems.append("agent_process_names must be a list of names; using none")
 
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
@@ -386,6 +398,9 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
+        if not settings.agent_process_names:
+            # No custom program names is the default, so a file that names none has no such key.
+            del data["agent_process_names"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]

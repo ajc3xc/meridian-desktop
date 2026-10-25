@@ -44,10 +44,11 @@ The four providers are called on the worker thread, never on the UI thread:
 Only names, status, last seen (as an age) and the client name reach the table. Session summaries, task log bodies
 and notes are never read by the client, so they cannot reach this panel.
 
-The running Claude Desktop and Claude Code processes are listed on the same worker job as the sessions, on every
-read: the first show, Refresh, a project change and each local tick, so they stay live while the tab is visible. Each
-row is the program's image name and its process id, read by claude_processes. Nothing else about a process is read.
-A failed listing says so in one line and leaves the sessions table as it is.
+The running agent programs (Claude, Codex, Cursor and any saved custom names) are listed on the same worker job as the
+sessions, on every read: the first show, Refresh, a project change and each local tick, so they stay live while the tab
+is visible. Each row is one program: its label, how many of its processes are roots, and how many matching processes it
+has in all, read by claude_processes. Nothing else about a process is shown. A failed listing says so in one line and
+leaves the sessions table as it is.
 """
 
 from __future__ import annotations
@@ -105,14 +106,15 @@ PRESS_REFRESH_TEXT = "Press Refresh to read this project's sessions."
 NO_PROJECTS_TEXT = "No projects are available to pick. Create a project in Meridian first."
 PROJECTS_FAILED_TEXT = "The projects could not be read. Check the local server or the database file in Settings."
 READ_FAILED_TEXT = "The sessions could not be read. Check the local server or the hosted token in Settings."
-CLAUDE_CAPTION = "Claude Desktop and Claude Code processes on this computer. Read-only: program name and id only."
-CLAUDE_CHECKING_TEXT = "Checking the running Claude processes..."
-CLAUDE_NONE_TEXT = "No Claude Desktop or Claude Code process is running on this computer right now."
+CLAUDE_CAPTION = "Agent programs running on this computer. Read-only: each program's label and process counts only."
+CLAUDE_CHECKING_TEXT = "Checking the running agent programs..."
+CLAUDE_NONE_TEXT = "Not connected. No agent program is running on this computer right now."
+CLAUDE_TASKLIST_NOTE = "The process table was not read, so tasklist was used. Each process counts as a root."
 CLAUDE_NOTE_TEXT = (
     "A Claude Code session started through Node.js runs as node.exe. That name is shared with other software, "
     "so it is not listed here."
 )
-CLAUDE_COLUMNS = ("Program", "Process ID")
+CLAUDE_COLUMNS = ("Program", "Root processes", "Total processes")
 UNNAMED_TEXT = "(unnamed)"
 SOURCE_TEXT = {
     SOURCE_LOCAL: "this computer's Meridian server",
@@ -176,18 +178,34 @@ def row_cells(row: SessionRow, now: datetime) -> tuple[str, str, str, str]:
     return (row.name or UNNAMED_TEXT, row.status, last_seen_age(row.last_seen, now), row.client)
 
 
-def claude_status_text(result: ClaudeProcessesResult, checked_at: str) -> str:
-    """The Claude status line for one listing. ``checked_at`` is the local time the listing arrived.
+def _dropped_text(count: int) -> str:
+    """The note for saved custom program names that were not valid and were left out."""
+    if count == 1:
+        return "1 saved program name is not valid and was left out."
+    return f"{count} saved program names are not valid and were left out."
 
-    A failed listing is one plain line: its fixed message, then the time it was checked.
+
+def claude_status_text(result: ClaudeProcessesResult, checked_at: str) -> str:
+    """The processes status line for one listing. ``checked_at`` is the local time the listing arrived.
+
+    A failed listing is one plain line: its fixed message, then the time it was checked. A listing with no matching
+    process says "Not connected" and nothing else. The time comes before any note, so a listing read through tasklist,
+    or with saved names left out, adds its note after the time.
     """
     if result.state != claude_processes.LISTED:
         return f"{result.message} Checked at {checked_at}."
-    count = len(result.processes)
-    if count == 0:
-        return f"{CLAUDE_NONE_TEXT} Checked at {checked_at}."
-    noun = "process" if count == 1 else "processes"
-    return f"{count} Claude {noun} running on this computer. Checked at {checked_at}."
+    total = sum(group.total for group in result.groups)
+    if total == 0:
+        parts = [CLAUDE_NONE_TEXT]
+    else:
+        noun = "process" if total == 1 else "processes"
+        parts = [f"{total} agent {noun} running on this computer."]
+    parts.append(f"Checked at {checked_at}.")
+    if result.source == claude_processes.SOURCE_TASKLIST:
+        parts.append(CLAUDE_TASKLIST_NOTE)
+    if result.dropped:
+        parts.append(_dropped_text(result.dropped))
+    return " ".join(parts)
 
 
 def _table(parent: QWidget, name: str, columns: tuple[str, ...]) -> QTableWidget:
@@ -564,11 +582,12 @@ class SessionsPanel(QWidget):
         self._checked.setVisible(bool(text))
 
     def _show_claude(self, result: ClaudeProcessesResult, now: datetime) -> None:
-        processes = result.processes if result.state == claude_processes.LISTED else ()
-        self._claude_table.setRowCount(len(processes))
-        for row_index, process in enumerate(processes):
-            self._claude_table.setItem(row_index, 0, QTableWidgetItem(process.image))
-            self._claude_table.setItem(row_index, 1, QTableWidgetItem(str(process.pid)))
+        groups = result.groups if result.state == claude_processes.LISTED else ()
+        self._claude_table.setRowCount(len(groups))
+        for row_index, group in enumerate(groups):
+            cells = (group.label, str(group.roots), str(group.total))
+            for column, text in enumerate(cells):
+                self._claude_table.setItem(row_index, column, QTableWidgetItem(text))
         self._claude_processes.setText(claude_status_text(result, now.astimezone().strftime("%H:%M:%S")))
 
     # ----------------------------------------------------------- events

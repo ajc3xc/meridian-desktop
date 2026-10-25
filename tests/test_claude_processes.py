@@ -72,6 +72,11 @@ def _names(processes):
     return [(process.image, process.pid) for process in processes]
 
 
+def _no_snapshot():
+    """A process table that cannot be read, so a listing with no runner goes to tasklist, as these tests expect."""
+    return None
+
+
 # ----------------------------------------------------------------- parser with fixed listing text
 
 
@@ -227,7 +232,7 @@ def test_default_runner_runs_tasklist_in_list_form_with_no_shell_and_a_short_tim
         return subprocess.CompletedProcess(args, 0, stdout=LISTING, stderr="")
 
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
-    result = cp.list_claude_processes()
+    result = cp.list_claude_processes(snapshot=_no_snapshot)
 
     assert result.state == cp.LISTED
     assert len(calls) == 1
@@ -246,7 +251,7 @@ def test_default_runner_nonzero_exit_is_unavailable(monkeypatch):
         return subprocess.CompletedProcess(args, 1, stdout=LISTING, stderr=SECRET_PATH)
 
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
-    result = cp.list_claude_processes()
+    result = cp.list_claude_processes(snapshot=_no_snapshot)
     assert result.state == cp.UNAVAILABLE
     assert result.message == cp.UNAVAILABLE_MESSAGE
     assert SECRET_PATH not in repr(result)
@@ -257,7 +262,7 @@ def test_default_runner_timeout_is_unavailable_with_the_timeout_text(monkeypatch
         raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
 
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
-    result = cp.list_claude_processes()
+    result = cp.list_claude_processes(snapshot=_no_snapshot)
     assert result.state == cp.UNAVAILABLE
     assert result.message == cp.TIMEOUT_MESSAGE
 
@@ -267,6 +272,6 @@ def test_default_runner_missing_program_is_unavailable(monkeypatch):
         raise FileNotFoundError(args[0])
 
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
-    result = cp.list_claude_processes()
+    result = cp.list_claude_processes(snapshot=_no_snapshot)
     assert result.state == cp.UNAVAILABLE
     assert result.message == cp.UNAVAILABLE_MESSAGE
