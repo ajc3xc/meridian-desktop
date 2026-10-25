@@ -94,6 +94,7 @@ from meridian_desktop.sessions_client import (
     local_sessions,
 )
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.tab_scroll import MIN_TABLE_HEIGHT, let_the_wheel_pass, scrolled
 from meridian_desktop.ui.text import TextBlock, enable_table_copy, make_selectable, set_label_text
 
 REFRESH_MS = 5000
@@ -214,6 +215,8 @@ def _table(parent: QWidget, name: str, columns: tuple[str, ...]) -> QTableWidget
     """A read-only table: no editing, whole rows selected (several by a drag, Shift or Ctrl), and Ctrl+C copies them."""
     table = QTableWidget(0, len(columns), parent)
     table.setObjectName(name)
+    # Short windows scroll the tab rather than squeeze the table to nothing (see ui/tab_scroll.py).
+    table.setMinimumHeight(MIN_TABLE_HEIGHT)
     table.setHorizontalHeaderLabels(list(columns))
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -222,6 +225,8 @@ def _table(parent: QWidget, name: str, columns: tuple[str, ...]) -> QTableWidget
     header = table.horizontalHeader()
     header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     header.setStretchLastSection(True)
+    # A table with few rows has nothing to scroll: the wheel goes on to the tab then (see ui/tab_scroll.py).
+    let_the_wheel_pass(table)
     enable_table_copy(table)
     return table
 
@@ -469,7 +474,9 @@ class SessionsPanel(QWidget):
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # The content is one column in a vertical scroll area, so a short window scrolls the tab (see ui/tab_scroll.py).
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
         layout.addWidget(_label(self, "sessions-intro", INTRO_TEXT))
 
         picker_row = QHBoxLayout()
@@ -503,6 +510,9 @@ class SessionsPanel(QWidget):
         self._claude_table = _table(self, "sessions-claude-table", CLAUDE_COLUMNS)
         layout.addWidget(self._claude_table, 1)
         layout.addWidget(_label(self, "sessions-claude-note", CLAUDE_NOTE_TEXT))
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrolled(content, self))
 
     # ----------------------------------------------------------- reads
 

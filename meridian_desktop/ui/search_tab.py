@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH, KINDS, Row, SearchOutcome, run_search
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import submit
+from meridian_desktop.ui.tab_scroll import MIN_TABLE_HEIGHT, let_the_wheel_pass, scrolled
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 # Each tab's intro and search-box placeholder, by kind. The Code intro is the owner's text, verbatim.
@@ -109,7 +110,9 @@ class SearchTab(QWidget):
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # The content is one column in a vertical scroll area, so a short window scrolls the tab (see ui/tab_scroll.py).
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
         layout.addWidget(_label(self, "search-intro", INTRO_TEXTS[self._kind]))
 
         row = QHBoxLayout()
@@ -127,14 +130,21 @@ class SearchTab(QWidget):
 
         self._results = QTableWidget(0, len(RESULT_COLUMNS), self)
         self._results.setObjectName("search-results")
+        # Short windows scroll the tab rather than squeeze the results to nothing (see ui/tab_scroll.py).
+        self._results.setMinimumHeight(MIN_TABLE_HEIGHT)
         self._results.setHorizontalHeaderLabels(list(RESULT_COLUMNS))
         self._results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._results.verticalHeader().setVisible(False)
         self._results.horizontalHeader().setStretchLastSection(True)
+        # A table with few results has nothing to scroll: the wheel goes on to the tab then (see ui/tab_scroll.py).
+        let_the_wheel_pass(self._results)
         enable_table_copy(self._results)
         layout.addWidget(self._results, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrolled(content, self))
 
         self._search_button.clicked.connect(lambda _checked=False: self._on_search_clicked())
         self._search_input.returnPressed.connect(self._on_search_clicked)

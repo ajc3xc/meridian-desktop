@@ -82,6 +82,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
+from meridian_desktop.ui.tab_scroll import install_drag_scroll
 from meridian_desktop.ui.text import TextBlock, make_selectable, set_label_text
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
@@ -363,6 +364,8 @@ class MainWindow(QMainWindow):
             record_apps_entry=record_apps_entry,
         )
 
+        # A left-button drag held past the edge of a tab scrolls it (ui/tab_scroll.py). Installed once per application.
+        install_drag_scroll()
         self.tabs = QTabWidget(central)
         for name, _wave in TAB_SPECS:
             if name == "Home":
