@@ -338,15 +338,18 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 
 
 # The button counts with every Settings group expanded. They were counted at run/desk-fix-integrate (3aad775), before the
-# block changes, and they are the same after them. The Settings page holds 34 QPushButtons and five group headers, which
-# are QToolButtons: 39 buttons in all. The main window holds 54 QPushButtons and 71 buttons in all (every QAbstractButton).
+# block changes, and the block changes left the Settings page as it was. The Settings page holds 34 QPushButtons and five
+# group headers, which are QToolButtons: 39 buttons in all. Before the Search tab split the main window held 54
+# QPushButtons and 71 buttons in all (every QAbstractButton). The split replaces the one Search tab with three search
+# tabs, so it adds two search tabs, and each search tab holds one search button (a QPushButton) and one table corner
+# button (a QAbstractButton). The main window now holds 56 QPushButtons and 75 buttons in all.
 SETTINGS_PUSH_BUTTONS = 34
 SETTINGS_BUTTONS = 39
-MAIN_WINDOW_PUSH_BUTTONS = 54
-MAIN_WINDOW_BUTTONS = 71
+MAIN_WINDOW_PUSH_BUTTONS = 56
+MAIN_WINDOW_BUTTONS = 75
 
 
-def test_the_block_change_leaves_the_button_counts_as_they_were(qtbot, tmp_path):
+def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):
     window = _window(qtbot, tmp_path)
     groups = window.findChildren(CollapsibleGroup)
     assert len(groups) == 5, "the five Settings groups"
