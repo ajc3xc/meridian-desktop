@@ -437,7 +437,12 @@ def test_every_label_is_selectable_and_plain_text(qtbot):
     assert labels
     for label in labels:
         assert (label.textInteractionFlags() & SELECTABLE_TEXT) == SELECTABLE_TEXT, label.objectName()
-        assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+        # The status block is rich text, so its lines can be paragraphs of their own. Each line is still inserted as plain
+        # text (text.block_html), so only the block is rich; every other label is plain.
+        if label.objectName() == "zotero-status-text":
+            assert label.textFormat() == Qt.TextFormat.RichText
+        else:
+            assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
 
 
 def test_no_label_says_not_built_yet(qtbot):

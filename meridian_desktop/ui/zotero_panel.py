@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import zotero_client
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
-from meridian_desktop.ui.text import enable_table_copy, make_selectable
+from meridian_desktop.ui.text import TextBlock, enable_table_copy, make_selectable
 from meridian_desktop.zotero_client import (
     API_DISABLED,
     API_NOT_RUNNING,
@@ -232,15 +232,15 @@ class ZoteroPanel(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(_label(self, "zotero-intro", INTRO_TEXT))
-
-        self._installed = _label(self, "zotero-installed", NOT_CHECKED_TEXT)
-        self._process = _label(self, "zotero-process", "")
-        self._api = _label(self, "zotero-api", "")
-        self._api_detail = _label(self, "zotero-api-detail", "")
-        self._start_hint = _label(self, "zotero-start-hint", "")
-        for label in (self._installed, self._process, self._api, self._api_detail, self._start_hint):
-            layout.addWidget(label)
+        # The intro and the status lines are one block, so one drag over them selects all six. The buttons stay below it.
+        status = TextBlock(self, "zotero-status-text", spacing=layout.spacing())
+        status.line("zotero-intro", INTRO_TEXT)
+        self._installed = status.line("zotero-installed", NOT_CHECKED_TEXT)
+        self._process = status.line("zotero-process", "")
+        self._api = status.line("zotero-api", "")
+        self._api_detail = status.line("zotero-api-detail", "")
+        self._start_hint = status.line("zotero-start-hint", "")
+        layout.addWidget(status.label)
 
         actions = QHBoxLayout()
         self._refresh_button = QPushButton("Refresh", self)
