@@ -51,6 +51,7 @@ from meridian_desktop.projects_reader import PROJECT_COLUMNS
 from meridian_desktop.secret_store import SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
+from meridian_desktop.ui.tab_scroll import MIN_TABLE_HEIGHT, let_the_wheel_pass, scrolled
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
@@ -183,7 +184,9 @@ class ProjectsTab(QWidget):
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # The content is one column in a vertical scroll area, so a short window scrolls the tab (see ui/tab_scroll.py).
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
 
         self._status = make_selectable(QLabel(LOADING_TEXT, self))
         self._status.setObjectName("projects-status")
@@ -193,6 +196,8 @@ class ProjectsTab(QWidget):
 
         self._table = QTableWidget(0, len(TABLE_FIELDS), self)
         self._table.setObjectName("projects-table")
+        # Short windows scroll the tab rather than squeeze the table to nothing (see ui/tab_scroll.py).
+        self._table.setMinimumHeight(MIN_TABLE_HEIGHT)
         self._table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in TABLE_FIELDS])
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         # Whole rows, and several of them: a drag, Shift or Ctrl selects more, and Ctrl+C copies them as tab-separated lines.
@@ -213,6 +218,9 @@ class ProjectsTab(QWidget):
         detail_scroll = QScrollArea(self)
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setWidget(self._detail)
+        # A short detail, or the table with a few rows, has nothing to scroll: the wheel goes on to the tab then.
+        let_the_wheel_pass(detail_scroll)
+        let_the_wheel_pass(self._table)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._table)
@@ -220,6 +228,9 @@ class ProjectsTab(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrolled(content, self))
 
     # ----------------------------------------------------------- loading
 
