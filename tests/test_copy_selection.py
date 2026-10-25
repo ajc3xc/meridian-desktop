@@ -1008,19 +1008,23 @@ def test_the_sessions_table_copies_several_rows_and_a_tick_keeps_the_status_sele
     for name in ("sessions-table", "sessions-claude-table"):
         assert panel.findChild(QTableWidget, name).selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
 
+    # The status line and the time it was checked are one block now, so the selection is the block's. The status line is
+    # its first paragraph, and the drag runs over that paragraph only.
+    block = panel.findChild(QLabel, "sessions-status-text")
     status = panel.findChild(QLabel, "sessions-status")
     checked = panel.findChild(QLabel, "sessions-checked")
     assert status.text() == "3 session(s) from this computer's Meridian server."
     assert checked.text().startswith("Checked at ")
     assert checked.textInteractionFlags() == SELECTABLE_TEXT
-    _drag_over(panel, status)
-    assert status.hasSelectedText()
+    _drag_over_paragraph(panel, block, 0)
+    assert block.hasSelectedText()
+    assert _plain(block.selectedText()) == status.text()
     before = checked.text()
 
     panel._timer.timeout.emit()  # noqa: SLF001 - one 5-second tick
     qtbot.waitUntil(lambda: panel._in_flight is None and checked.text() != before, timeout=5000)  # noqa: SLF001
     assert local.calls == 2
-    assert status.hasSelectedText(), "the tick changes only the time, which has its own line"
+    assert block.hasSelectedText(), "the tick changes only the time, which comes after the status line"
     assert _ctrl_c(panel) == status.text()
 
     viewport = table.viewport()
