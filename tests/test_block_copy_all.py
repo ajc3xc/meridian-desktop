@@ -342,11 +342,15 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # group headers, which are QToolButtons: 39 buttons in all. Before the Search tab split the main window held 54
 # QPushButtons and 71 buttons in all (every QAbstractButton). The split replaces the one Search tab with three search
 # tabs, so it adds two search tabs, and each search tab holds one search button (a QPushButton) and one table corner
-# button (a QAbstractButton). The main window now holds 56 QPushButtons and 75 buttons in all.
-SETTINGS_PUSH_BUTTONS = 34
-SETTINGS_BUTTONS = 39
-MAIN_WINDOW_PUSH_BUTTONS = 56
-MAIN_WINDOW_BUTTONS = 75
+# button (a QAbstractButton). The main window held 56 QPushButtons and 75 buttons in all.
+# The Update bridge button (object name zotero-bridge-update) is built in the app now: the Settings Zotero panel is
+# given the bridge and the Local URL reader (run/desk-bridge-updater). It is one more QPushButton, and one more
+# QAbstractButton, on the Settings page and in the main window, so each count above goes up by one. The Settings page
+# now holds 35 QPushButtons and 40 buttons in all, and the main window holds 57 QPushButtons and 76 buttons in all.
+SETTINGS_PUSH_BUTTONS = 35
+SETTINGS_BUTTONS = 40
+MAIN_WINDOW_PUSH_BUTTONS = 57
+MAIN_WINDOW_BUTTONS = 76
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):

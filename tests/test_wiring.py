@@ -1,4 +1,5 @@
-"""Wiring tests for the Sessions and Tools tabs and the update notice. Offscreen Qt, pytest-qt, fakes only.
+"""Wiring tests for the Sessions and Tools tabs, the update notice and the Settings Zotero panel's bridge. Offscreen Qt,
+pytest-qt, fakes only.
 
 No test reaches the network, the OS keychain or the core. Each update check gets a fake transport that records its
 URLs, and each opener is a fake that records the URLs it is given. The Sessions reads are fakes at the module seam
@@ -31,7 +32,10 @@ from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text, ready_text
+from meridian_desktop.ui.zotero_panel import BRIDGE_NOT_CHECKED_TEXT, UPDATE_BUTTON_TEXT, ZoteroPanel
 from meridian_desktop.version import APP_VERSION
+from meridian_desktop.zotero_bridge_client import STATE_UPDATE_READY, BridgeStatus
+from test_zotero_panel import FakeZotero
 
 @pytest.fixture(autouse=True)
 def no_real_process_listing(monkeypatch):
@@ -105,7 +109,19 @@ def _no_tools() -> ToolsStatus:
     return ToolsStatus(rows=())
 
 
-def _window(qtbot, settings_path, *, sources=None, secrets=None, tools=None, transport=None, shown=False, update_root=None):
+def _window(
+    qtbot,
+    settings_path,
+    *,
+    sources=None,
+    secrets=None,
+    tools=None,
+    transport=None,
+    shown=False,
+    update_root=None,
+    zotero=None,
+    zotero_bridge=None,
+):
     window = MainWindow(
         SettingsStore(settings_path),
         secret_store=secrets if secrets is not None else KeyringSecretStore(backend=MemoryKeyring()),
@@ -113,6 +129,8 @@ def _window(qtbot, settings_path, *, sources=None, secrets=None, tools=None, tra
         tools_status=tools if tools is not None else _no_tools,
         update_transport=transport,
         update_root=update_root,
+        zotero=zotero,
+        zotero_bridge=zotero_bridge,
     )
     qtbot.addWidget(window)
     if shown:
@@ -170,6 +188,52 @@ def test_sessions_sits_after_projects_and_tools_is_no_longer_a_tab(qtbot, settin
     assert not any("Not built yet" in text for text in _label_texts(sessions))
     # The Tools panel is no longer a tab. Home's AI clients card shows its rows, and Settings has the full table.
     assert "Tools" not in _tab_names(window)
+
+
+# ----------------------------------------------------------- the Zotero panel in Settings
+
+
+class _RecordingBridge:
+    """The bridge the Settings panel calls. It answers one state, and records each call with the thread it ran on."""
+
+    def __init__(self, state):
+        self.state = state
+        self.calls = []
+        self.threads = []
+
+    def status(self, base_url):
+        self.calls.append(("status", base_url))
+        self.threads.append(threading.current_thread())
+        return BridgeStatus(self.state, installed="0.1.3", expected="0.1.4", zotero_running=False)
+
+    def update(self, base_url, choice):
+        self.calls.append(("update", base_url, choice))
+        raise AssertionError("this test sends no bridge update")
+
+
+def test_the_app_settings_zotero_panel_has_the_update_bridge_button_and_makes_no_request_before_show(
+    qtbot, settings_path,
+):
+    window = _window(qtbot, settings_path, zotero=FakeZotero())
+    panel = _page(window, "Settings").findChild(ZoteroPanel, "zotero-panel")
+    assert panel is not None
+    assert panel.findChild(QLabel, "zotero-bridge").text() == BRIDGE_NOT_CHECKED_TEXT
+    button = panel.findChild(QPushButton, "zotero-bridge-update")
+    assert button is not None and button.text() == UPDATE_BUTTON_TEXT
+    assert not button.isEnabled(), "the button waits for the first bridge check"
+
+
+def test_the_settings_zotero_panel_checks_the_bridge_at_the_saved_local_url_off_the_ui_thread(qtbot, settings_path):
+    SettingsStore(settings_path).save(Settings(local_url=LOCAL))
+    bridge = _RecordingBridge(STATE_UPDATE_READY)
+    window = _window(qtbot, settings_path, zotero=FakeZotero(), zotero_bridge=bridge, shown=True)
+    _select(window, "Settings")
+    panel = _page(window, "Settings").findChild(ZoteroPanel, "zotero-panel")
+    button = panel.findChild(QPushButton, "zotero-bridge-update")
+    assert button is not None, "the Settings Zotero panel has no Update bridge button"
+    qtbot.waitUntil(lambda: button.isEnabled(), timeout=5000)
+    assert bridge.calls and all(call == ("status", LOCAL) for call in bridge.calls)
+    assert all(thread is not threading.main_thread() for thread in bridge.threads)
 
 
 def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settings_path, tmp_path, monkeypatch):

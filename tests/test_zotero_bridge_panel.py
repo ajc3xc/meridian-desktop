@@ -80,6 +80,22 @@ UPDATE_READY_ZOTERO_OPEN = BridgeStatus(STATE_UPDATE_READY, "0.1.3", "0.1.4", Tr
 NOT_INSTALLED = BridgeStatus(STATE_NOT_INSTALLED, None, "0.1.4", False)
 WAIT_PENDING = BridgeStatus(STATE_WAIT_PENDING, "0.1.3", "0.1.4", True)
 STILL_OPEN_BODY = json.dumps({"error": {"code": "zotero_still_open", "message": SENTINEL}}).encode("utf-8")
+# The core route's 409 answers, byte for byte in content (meridian/routes/desktop_bridge.py). A polite or force close
+# that leaves Zotero open is close_failed with zotero_open set, so the route adds error.code "zotero_still_open" next to
+# the top-level status and message. A close that fails for another reason has no error object at all. Tests feed these
+# bodies, not the shorter stand-in above, so the after-polite offer is checked against the real contract.
+CORE_CLOSE_FAILED_MESSAGE = (
+    "Zotero did not close, so nothing was installed. Close Zotero yourself, then try the install again. "
+    "Nothing was written to the Zotero profile."
+)
+CORE_STILL_OPEN_BODY = json.dumps(
+    {
+        "status": "close_failed",
+        "message": CORE_CLOSE_FAILED_MESSAGE,
+        "error": {"code": "zotero_still_open", "message": CORE_CLOSE_FAILED_MESSAGE},
+    }
+).encode("utf-8")
+CORE_CLOSE_FAILED_BODY = json.dumps({"status": "close_failed", "message": CORE_CLOSE_FAILED_MESSAGE}).encode("utf-8")
 FORCED_LINE = "Zotero was closed by force and the bridge updated."
 
 
@@ -300,6 +316,22 @@ def test_a_polite_close_that_leaves_zotero_open_is_reported_as_not_closed():
 def test_only_the_still_open_code_marks_a_failure_as_not_closed():
     body = json.dumps({"error": {"code": "bridge_busy", "message": "Zotero is busy."}}).encode("utf-8")
     result = zotero_bridge_client.update(LOCAL, CHOICE_POLITE, transport=Transport(post=Reply(409, body)))
+    assert result.still_open is False
+
+
+def test_the_still_open_code_is_the_one_the_core_route_sends():
+    assert zotero_bridge_client.STILL_OPEN_CODE == "zotero_still_open"
+
+
+def test_parse_update_reads_the_core_still_open_409_as_a_close_that_left_zotero_open():
+    result = zotero_bridge_client.parse_update(Reply(409, CORE_STILL_OPEN_BODY))
+    assert result == BridgeResult(False, reason=ZOTERO_DID_NOT_CLOSE_MESSAGE, still_open=True)
+    assert CORE_CLOSE_FAILED_MESSAGE not in result.reason
+
+
+def test_the_core_409_without_an_error_object_is_a_plain_failure_and_not_still_open():
+    result = zotero_bridge_client.parse_update(Reply(409, CORE_CLOSE_FAILED_BODY))
+    assert result == BridgeResult(False, reason=zotero_bridge_client.UPDATE_FAILED_MESSAGE.format(409))
     assert result.still_open is False
 
 
@@ -857,6 +889,44 @@ def test_a_failed_polite_for_another_reason_offers_no_follow_up(qtbot, monkeypat
     answers = _dialogs(monkeypatch, POLITE_BUTTON_TEXT)
     _button(panel).click()
     qtbot.waitUntil(lambda: "bridge_failed" in _text(panel, "zotero-bridge-result"))
+    assert len(answers.shown) == 1
+    assert answers.unexpected == 0
+    assert _posts(transport) == [POLITE_BODY]
+
+
+def test_after_the_core_409_a_polite_close_offers_force_retry_or_cancel(qtbot, monkeypatch):
+    transport = Transport(get=_json_reply(_answer(STATE_UPDATE_READY)), post=Reply(409, CORE_STILL_OPEN_BODY))
+    panel = _shown(qtbot, RealBridge(transport))
+    answers = _dialogs(monkeypatch, POLITE_BUTTON_TEXT, CANCEL_BUTTON_TEXT)
+    _button(panel).click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-result") == ZOTERO_DID_NOT_CLOSE_MESSAGE)
+    assert _posts(transport) == [POLITE_BODY]
+    assert len(answers.shown) == 2
+    follow_up = answers.shown[1]
+    assert follow_up["text"] == AFTER_POLITE_TEXT
+    assert follow_up["buttons"] == [FORCE_BUTTON_TEXT, RETRY_BUTTON_TEXT, CANCEL_BUTTON_TEXT]
+    assert answers.missing == [] and answers.unexpected == 0
+
+
+def test_after_the_core_409_a_force_close_says_zotero_did_not_close_and_offers_no_follow_up(qtbot, monkeypatch):
+    transport = Transport(get=_json_reply(_answer(STATE_UPDATE_READY)), post=Reply(409, CORE_STILL_OPEN_BODY))
+    panel = _shown(qtbot, RealBridge(transport))
+    answers = _dialogs(monkeypatch, FORCE_BUTTON_TEXT, YES_TEXT)
+    _button(panel).click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-result") == ZOTERO_DID_NOT_CLOSE_MESSAGE)
+    assert _posts(transport) == [FORCE_BODY]
+    assert [shown["text"] for shown in answers.shown] == [BRIDGE_DIALOG_TEXT, FORCE_CONFIRM_TEXT]
+    assert answers.unexpected == 0
+    assert _button(panel).isEnabled()
+
+
+def test_the_core_409_without_zotero_open_after_a_polite_close_offers_no_follow_up(qtbot, monkeypatch):
+    transport = Transport(get=_json_reply(_answer(STATE_UPDATE_READY)), post=Reply(409, CORE_CLOSE_FAILED_BODY))
+    panel = _shown(qtbot, RealBridge(transport))
+    answers = _dialogs(monkeypatch, POLITE_BUTTON_TEXT)
+    _button(panel).click()
+    expected = zotero_bridge_client.UPDATE_FAILED_MESSAGE.format(409)
+    qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-result") == expected)
     assert len(answers.shown) == 1
     assert answers.unexpected == 0
     assert _posts(transport) == [POLITE_BODY]
