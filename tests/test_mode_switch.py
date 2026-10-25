@@ -55,6 +55,12 @@ TUNNEL_ROWS = [{"id": "p-tunnel", "name": "Reached through the tunnel"}]
 CHECKED = datetime(2026, 10, 21, 10, 15, 0)
 CHECKED_AT_PATTERN = re.compile(r"Checked at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.")
 START_WORDS = re.compile(r"\b(start|stop|restart)\b", re.IGNORECASE)
+# A runner control is named <scope>-<verb>, for the scope it drives and the verb it runs. The runner check finds them by
+# object name, never by the words on the button.
+RUNNER_CONTROL_NAME = re.compile(r"^(home-local|local|tunnel|zotero)-(start|stop|restart)$")
+# A button whose text says stop but which runs no process: Stop using this file, on the Keys block, only stops listing a
+# keys file's names. It is named by object name, so the text sweep still catches every other start-like button.
+NOT_A_RUNNER_CONTROL = frozenset({"keys-file-stop"})
 
 
 # ------------------------------------------------------------------ fakes
@@ -603,16 +609,20 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     push_buttons = [b for b in buttons if isinstance(b, QPushButton)]
     # The update bar's Restart button restarts the app into a staged update. It is not a runner control, so it is left out.
     push_buttons = [b for b in push_buttons if b.objectName() != "update-notice-restart"]
-    start_like = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
-    # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
+    # Only the owner-confirmed controls are runner controls: the Zotero start, the local scope's three buttons in
     # Settings and on Home's local card, and the tunnel scope's three buttons on the Tunnel tab
-    # (docs/local-trust-contract.md).
-    assert start_like == [
+    # (docs/local-trust-contract.md). They are found by object name.
+    runner_controls = sorted(b.objectName() for b in push_buttons if RUNNER_CONTROL_NAME.match(b.objectName()))
+    assert runner_controls == [
         "home-local-restart", "home-local-start", "home-local-stop",
         "local-restart", "local-start", "local-stop",
         "tunnel-restart", "tunnel-start", "tunnel-stop",
         "zotero-start",
     ]
+    # The text sweep still reads every button, so a start-like control of any other name is caught. Only the named
+    # non-runner button is left out of it.
+    start_by_text = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
+    assert [name for name in start_by_text if name not in NOT_A_RUNNER_CONTROL] == runner_controls
     # The tunnel controls are off until the core is found. The one fix button that turns them on is not a control, so it is
     # left out of the check that the three controls are off.
     tunnel_buttons = [b for b in buttons if b.objectName().startswith("tunnel-") and b.objectName() != "tunnel-fix"]

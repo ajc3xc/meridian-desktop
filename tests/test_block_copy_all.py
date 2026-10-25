@@ -338,15 +338,18 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 
 
 # The button counts with every Settings group expanded. They were counted at run/desk-fix-integrate (3aad775), before the
-# block changes, and the block changes left the Settings page as it was. The Settings page holds 34 QPushButtons and five
+# block changes, and the block changes left the Settings page as it was. The Settings page held 34 QPushButtons and five
 # group headers, which are QToolButtons: 39 buttons in all. Before the Search tab split the main window held 54
 # QPushButtons and 71 buttons in all (every QAbstractButton). The split replaces the one Search tab with three search
 # tabs, so it adds two search tabs, and each search tab holds one search button (a QPushButton) and one table corner
-# button (a QAbstractButton). The main window now holds 56 QPushButtons and 75 buttons in all.
-SETTINGS_PUSH_BUTTONS = 34
-SETTINGS_BUTTONS = 39
-MAIN_WINDOW_PUSH_BUTTONS = 56
-MAIN_WINDOW_BUTTONS = 75
+# button (a QAbstractButton). The main window then held 56 QPushButtons and 75 buttons in all.
+# The keys file block adds two push buttons to the Settings page: Choose file and Stop using this file. They are the
+# reason the Settings page now holds 36 QPushButtons and five group headers, 41 buttons in all. The Settings page is in
+# the main window, so the main window holds the same two more: 58 QPushButtons and 77 buttons in all.
+SETTINGS_PUSH_BUTTONS = 36
+SETTINGS_BUTTONS = 41
+MAIN_WINDOW_PUSH_BUTTONS = 58
+MAIN_WINDOW_BUTTONS = 77
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):
