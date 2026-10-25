@@ -81,7 +81,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
-from meridian_desktop.ui.text import make_selectable, set_label_text
+from meridian_desktop.ui.text import TextBlock, make_selectable, set_label_text
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
@@ -588,20 +588,14 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.settings_warning, 1)
 
         # The chosen mode's description. In Tunnel mode, the detail line names the tools that need the
-        # tunnel and, when the tunnel is not running, how to start it by hand.
-        self.mode_description = make_selectable(QLabel(parent))
-        self.mode_description.setObjectName("mode-description")
-        self.mode_description.setTextFormat(Qt.TextFormat.PlainText)
-        self.mode_description.setWordWrap(True)
-        self.tunnel_detail = make_selectable(QLabel(parent))
-        self.tunnel_detail.setObjectName("tunnel-mode-detail")
-        self.tunnel_detail.setTextFormat(Qt.TextFormat.PlainText)
-        self.tunnel_detail.setWordWrap(True)
-
+        # tunnel and, when the tunnel is not running, how to start it by hand. The two lines are one block, so one drag
+        # over them selects both.
         column = QVBoxLayout()
+        self._mode_text = TextBlock(parent, "mode-text", spacing=column.spacing())
+        self.mode_description = self._mode_text.line("mode-description", "")
+        self.tunnel_detail = self._mode_text.line("tunnel-mode-detail", "")
         column.addLayout(bar)
-        column.addWidget(self.mode_description)
-        column.addWidget(self.tunnel_detail)
+        column.addWidget(self._mode_text.label)
         return column
 
     # ----------------------------------------------------------- tabs
