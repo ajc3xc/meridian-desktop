@@ -40,7 +40,7 @@ def no_real_process_listing(monkeypatch):
     monkeypatch.setattr(claude_processes, "list_claude_processes", lambda run=None: empty)
 
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings")
 LOCAL = "http://127.0.0.1:7999"
 HOSTED = "https://usemeridian.us"
 PID = "5787cc92-ba7d-4788-b17c-28ab7938b839"

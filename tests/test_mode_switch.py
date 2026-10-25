@@ -623,7 +623,7 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     tunnel_card = window.findChild(QFrame, "home-card-tunnel")
     assert tunnel_card is not None
     assert all(b in _user_buttons(tunnel_card) for b in tunnel_buttons)
-    for name in ("Projects", "Sessions", "Search", "Settings"):
+    for name in ("Projects", "Sessions", "Code", "Outputs", "Research", "Settings"):
         other = window.tabs.widget(_tab_index(window, name))
         assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other)), name
     for card in ("local", "services", "zotero", "tools", "updates"):

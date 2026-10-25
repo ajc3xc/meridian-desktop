@@ -1,8 +1,9 @@
-"""Search tab: one search box over the code, outputs and research the local Meridian server holds. Qt code, so it sits in ui/.
+"""Search tabs for Code, Outputs and Research: one kind each, from the local Meridian server. Qt code, so it is in ui/.
 
-The tab reads the Local URL in Settings when a search runs, and sends the query to that address only. The kind filter
-picks one kind or all three. Each kind is one read of a route the local server has (see meridian_desktop/search_kinds.py).
-A route the server does not have is shown as "Not connected", and no result is made up.
+Each tab has its own search box, results table and status line, and it searches only its own kind. The tab reads the
+Local URL in Settings when a search runs, and sends the query to that address only. Each kind is one read of a route the
+local server has (see meridian_desktop/search_kinds.py). A route the server does not have is shown as "Not connected",
+and no result is made up.
 
 A search runs only when Search or Enter is pressed, on the thread pool, so the window never blocks. A second press
 while a search runs does nothing, and an answer from a superseded search is dropped. Results and messages are plain
@@ -19,7 +20,6 @@ from typing import Any
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,29 +30,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop.search_kinds import KIND_LABELS, KINDS, Row, SearchOutcome, run_search
+from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH, KINDS, Row, SearchOutcome, run_search
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import submit
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
-# The intro is the owner's text, verbatim.
-INTRO_TEXT = (
-    "Search the code index of the local Meridian server, at the Local URL set in Settings. "
-    "This tab contacts that address and nothing else."
-)
-SEARCH_PLACEHOLDER = "Search code, outputs and research"
-ALL_KINDS_TEXT = "All kinds"
+# Each tab's intro and search-box placeholder, by kind. The Code intro is the owner's text, verbatim.
+INTRO_TEXTS = {
+    KIND_CODE: (
+        "Search the code index of the local Meridian server, at the Local URL set in Settings. "
+        "This tab contacts that address and nothing else."
+    ),
+    KIND_OUTPUTS: "Search the outputs the local Meridian server has saved.",
+    KIND_RESEARCH: "Search the research sources the local Meridian server can reach.",
+}
+SEARCH_PLACEHOLDERS = {KIND_CODE: "Search code", KIND_OUTPUTS: "Search outputs", KIND_RESEARCH: "Search research"}
 SEARCH_HINT = "Type a search term, then press Search or Enter."
 SEARCHING_TEXT = "Searching the local Meridian server..."
 BLANK_TEXT = "Type a search term first. Nothing was sent to the local Meridian server."
 FAILED_TEXT = "The search could not be completed ({}). Press Search to try again."
 RESULT_COLUMNS = ("Kind", "Where", "Details")
-FILTER_ITEMS = (
-    (ALL_KINDS_TEXT, ""),
-    (KIND_LABELS["code"], "code"),
-    (KIND_LABELS["outputs"], "outputs"),
-    (KIND_LABELS["research"], "research"),
-)
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -61,11 +58,6 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     return make_selectable(label)
-
-
-def kinds_for(choice: str) -> tuple[str, ...]:
-    """The kinds one filter choice searches: every kind for All kinds, or the one kind named."""
-    return KINDS if choice not in KINDS else (choice,)
 
 
 def _search_read(
@@ -85,17 +77,21 @@ def status_text(outcome: SearchOutcome) -> str:
 
 
 class SearchTab(QWidget):
-    """The Search tab: one search box, a kind filter, one results table, and a line per kind."""
+    """One search tab for one kind: a search box, a Search button, a status line and one results table."""
 
     def __init__(
         self,
         local_url_provider: Callable[[], str],
+        kind: str,
         parent: QWidget | None = None,
         *,
         transports: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("search-tab")
+        if kind not in KINDS:
+            raise ValueError(f"unknown search kind: {kind!r}")
+        self._kind = kind
+        self.setObjectName(f"search-tab-{kind}")
         self._url_provider = local_url_provider
         self._transports = dict(transports or {})
         self._searching = False
@@ -105,24 +101,24 @@ class SearchTab(QWidget):
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
+    @property
+    def kind(self) -> str:
+        """The one kind this tab searches: code, outputs or research."""
+        return self._kind
+
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(_label(self, "search-intro", INTRO_TEXT))
+        layout.addWidget(_label(self, "search-intro", INTRO_TEXTS[self._kind]))
 
         row = QHBoxLayout()
         self._search_input = QLineEdit(self)
         self._search_input.setObjectName("search-input")
-        self._search_input.setPlaceholderText(SEARCH_PLACEHOLDER)
-        self._kind = QComboBox(self)
-        self._kind.setObjectName("search-kind")
-        for text, value in FILTER_ITEMS:
-            self._kind.addItem(text, value)
+        self._search_input.setPlaceholderText(SEARCH_PLACEHOLDERS[self._kind])
         self._search_button = QPushButton("Search", self)
         self._search_button.setObjectName("search-button")
         row.addWidget(self._search_input, 1)
-        row.addWidget(self._kind)
         row.addWidget(self._search_button)
         layout.addLayout(row)
 
@@ -160,9 +156,9 @@ class SearchTab(QWidget):
         self._search_button.setEnabled(False)
         self._results.setRowCount(0)
         self._status.setText(SEARCHING_TEXT)
-        kinds = kinds_for(self._kind.currentData() or "")
-        # The job holds the URL provider, the kinds, the query, the transports, the owner token and the shared delivery.
-        work = partial(_search_read, self._url_provider, kinds, query, self._transports)
+        # The job holds the URL provider, this tab's one kind, the query, the transports, the owner token and the
+        # shared delivery.
+        work = partial(_search_read, self._url_provider, (self._kind,), query, self._transports)
         submit(self._owner, generation, work)
 
     @Slot(object)
@@ -195,11 +191,10 @@ class SearchTab(QWidget):
 
 
 __all__ = [
-    "ALL_KINDS_TEXT",
     "BLANK_TEXT",
-    "INTRO_TEXT",
+    "INTRO_TEXTS",
     "SEARCH_HINT",
+    "SEARCH_PLACEHOLDERS",
     "SearchTab",
-    "kinds_for",
     "status_text",
 ]
