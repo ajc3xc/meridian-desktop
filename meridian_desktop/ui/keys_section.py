@@ -12,17 +12,23 @@ the saved value to the Windows user environment.
 Values go to the keychain through api_keys. This block never shows a value, never reads one back into a control, and never
 writes one to the settings file. A status is read only to test whether a value is set. A failed read shows as unreadable.
 Remove asks first, because the saved value is deleted from the keychain.
+
+A name that matches a known service (key_services) also shows what its key is for and where it is made. When that
+service has a check, its card has a Check button. The check runs only when the owner presses it, on the thread pool,
+and shows one fixed message. The form can pick a service, which fills in the name. Other leaves the name as typed.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import count
 from typing import Any
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -42,7 +48,15 @@ from meridian_desktop.api_keys import (
     KeyNameError,
     slug,
 )
-from meridian_desktop.secret_store import SecretStoreError
+from meridian_desktop.key_services import (
+    NO_CHECK_TEXT,
+    SERVICES,
+    UNREACHABLE_TEXT,
+    Transport,
+    check_saved_key,
+    service_for,
+)
+from meridian_desktop.secret_store import SecretStore, SecretStoreError
 from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import submit
@@ -103,6 +117,14 @@ USER_ENV_SET_TEXT = (
 USER_ENV_UNANNOUNCED_TEXT = "Windows did not confirm the change to running programs, so sign out and back in if one does not see it."
 USER_ENV_NOT_SET_TEXT = "Not set. {detail}"
 USER_ENV_OS_TEXT = "Not set. The Windows user environment could not be written. Try again."
+# The service list in the form. Its services come from the registry, and Other keeps the free name.
+SERVICE_LABEL_TEXT = "Service"
+OTHER_CHOICE = "Other"
+SERVICE_CHOICES = (*(service.name for service in SERVICES), OTHER_CHOICE)
+# A known service's card: what the key is for, where it is made, and the check.
+CREATE_TEXT = "Create the key at {page}."
+CHECK_TEXT = "Check"
+CHECKING_TEXT = "Checking {service}..."
 
 # A confirmation: (parent, title, text) -> True only when the owner clicks Yes.
 Confirm = Callable[[QWidget, str, str], bool]
@@ -158,14 +180,25 @@ def _action_row(mark: _Mark) -> QHBoxLayout:
     return row
 
 
+def _store_of(keys: ApiKeys) -> SecretStore:
+    """The keychain store that ``keys`` reads its names' values from. A Check reads its one value through it.
+
+    ApiKeys keeps the store private and returns no value, so this is the one place the block reads the attribute.
+    The value a Check reads goes only to its request, and it is never kept or shown.
+    """
+    return keys._secrets  # noqa: SLF001 - the store the saved names are read from; ApiKeys itself returns no value
+
+
 @dataclass
 class _Card:
-    """One saved name's card and the widgets the section reads and changes."""
+    """One saved name's card and the widgets the section reads and changes. A known service's card also has a Check."""
 
     frame: QFrame
     status: QLabel
     value: QLineEdit
     mark: _Mark
+    check: QPushButton | None = None
+    check_result: QLabel | None = None
 
 
 class KeysSection(QWidget):
@@ -178,6 +211,7 @@ class KeysSection(QWidget):
         parent: QWidget | None = None,
         *,
         confirm: Confirm | None = None,
+        transport: Transport | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("keys-section")
@@ -185,6 +219,9 @@ class KeysSection(QWidget):
         self._runpod_card = runpod_card
         # None means the Yes/No dialog. It is looked up when Remove is pressed, not here, so a test can swap it.
         self._confirm = confirm
+        # The store a Check reads its value from, and the transport it sends with. None for the transport is urllib.
+        self._store = _store_of(keys)
+        self._transport = transport
         self._cards: dict[str, _Card] = {}
         # The RunPod card's frame and its marks, when a RunPod card is hosted. The frame sits in the same list as the others,
         # so a critical RunPod is listed first, and the search filters it by its name like the others.
@@ -194,7 +231,13 @@ class KeysSection(QWidget):
         self._owner = object()
         self._load_generation = 0
         self._loading = False
+        # A Check also runs on the thread pool. Its result comes back under its own owner and token, so it is never
+        # mistaken for a read of the names. The name maps to the token of the one check running for its card.
+        self._check_owner = object()
+        self._check_tokens = count(1)
+        self._pending: dict[str, int] = {}
         shared_delivery().delivered.connect(self._on_names_loaded)
+        shared_delivery().delivered.connect(self._on_check_delivered)
         self._build()
         self._load_names()
 
@@ -256,6 +299,18 @@ class KeysSection(QWidget):
         column.addWidget(self._message)
 
         column.addWidget(_bold(_label(self, "keys-add-heading", ADD_HEADING_TEXT)))
+        service_row = QHBoxLayout()
+        self._new_service = QComboBox(self)
+        self._new_service.setObjectName("keys-new-service")
+        self._new_service.setAccessibleName(SERVICE_LABEL_TEXT)
+        self._new_service.addItems(list(SERVICE_CHOICES))
+        self._new_service.setCurrentText(OTHER_CHOICE)
+        # activated fires only for a pick the owner makes, so the name is never filled by a reset.
+        self._new_service.activated.connect(self._on_service_picked)
+        service_row.addWidget(_label(self, "keys-service-label", SERVICE_LABEL_TEXT))
+        service_row.addWidget(self._new_service)
+        service_row.addStretch(1)
+        column.addLayout(service_row)
         row = QHBoxLayout()
         self._new_name = QLineEdit(self)
         self._new_name.setObjectName("keys-new-name")
@@ -305,6 +360,7 @@ class KeysSection(QWidget):
 
     def _make_card(self, name: str) -> _Card:
         key = slug(name)
+        service = service_for(name)
         frame = QFrame(self)
         frame.setObjectName(f"keys-entry-{key}")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -317,6 +373,11 @@ class KeysSection(QWidget):
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
         column.addLayout(head)
+
+        if service is not None:
+            # A known service says what its key is for and where it is made. Both lines are plain text.
+            column.addWidget(_label(frame, f"keys-entry-{key}-description", service.description))
+            column.addWidget(_label(frame, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
 
         row = QHBoxLayout()
         value = QLineEdit(frame)
@@ -333,10 +394,26 @@ class KeysSection(QWidget):
         column.addLayout(row)
         column.addLayout(_action_row(mark))
 
+        check: QPushButton | None = None
+        check_result: QLabel | None = None
+        if service is not None:
+            check_row = QHBoxLayout()
+            check_result = _label(frame, f"keys-entry-{key}-check-result")
+            if service.check is None:
+                # A service with no check says so in place of a button, so nothing looks as if it were checked.
+                check_result.setText(NO_CHECK_TEXT)
+            else:
+                check = QPushButton(CHECK_TEXT, frame)
+                check.setObjectName(f"keys-entry-{key}-check")
+                check.clicked.connect(lambda *_, n=name: self._on_check(n))
+                check_row.addWidget(check)
+            check_row.addWidget(check_result, 1)
+            column.addLayout(check_row)
+
         save.clicked.connect(lambda *_, n=name: self._on_save_value(n))
         value.returnPressed.connect(lambda *_, n=name: self._on_save_value(n))
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
-        return _Card(frame, status, value, mark)
+        return _Card(frame, status, value, mark, check, check_result)
 
     # ----------------------------------------------------------- state on screen
 
@@ -355,6 +432,7 @@ class KeysSection(QWidget):
         wanted = {entry.name for entry in listed}
         for name in [name for name in self._cards if name not in wanted]:
             card = self._cards.pop(name)
+            self._pending.pop(name, None)  # a check still running for a dropped card has no card to show its result on
             self._entry_layout.removeWidget(card.frame)
             card.frame.hide()
             card.frame.deleteLater()
@@ -426,8 +504,17 @@ class KeysSection(QWidget):
             return
         self._new_name.clear()
         self._new_value.clear()
+        self._new_service.setCurrentText(OTHER_CHOICE)
+        self._reset_check(listed)
         self.refresh()
         self._show(ADDED_TEXT.format(name=listed))
+
+    @Slot(int)
+    def _on_service_picked(self, index: int) -> None:
+        """Fill the name with the service the owner picked. Other leaves the name as the owner typed it."""
+        choice = self._new_service.itemText(index)
+        if choice != OTHER_CHOICE:
+            self._new_name.setText(choice)
 
     def _on_save_value(self, name: str) -> None:
         card = self._cards.get(name)
@@ -449,6 +536,7 @@ class KeysSection(QWidget):
             self._show(NOT_WRITTEN_TEXT)
             return
         card.value.clear()
+        self._reset_check(listed)
         self.refresh()
         self._show(REPLACED_TEXT.format(name=listed))
 
@@ -497,6 +585,54 @@ class KeysSection(QWidget):
             text = f"{text} {USER_ENV_UNANNOUNCED_TEXT}"
         self._show(text)
 
+    def _reset_check(self, name: str) -> None:
+        """A saved value changed, so an older check for the name is dropped and its result cleared.
+
+        A check still running is dropped here too, so its result, when it arrives, has no pending token to match.
+        """
+        self._pending.pop(name, None)
+        card = self._cards.get(name)
+        if card is not None and card.check is not None and card.check_result is not None:
+            card.check.setEnabled(True)
+            card.check_result.setText("")
+
+    def _on_check(self, name: str) -> None:
+        """Start the owner's check of the saved key for ``name``. It runs on the thread pool and sends one GET."""
+        card = self._cards.get(name)
+        service = service_for(name)
+        if card is None or card.check is None or card.check_result is None or service is None:
+            return
+        if name in self._pending:
+            return  # one check at a time for a card
+        token = next(self._check_tokens)
+        self._pending[name] = token
+        card.check.setEnabled(False)
+        card.check_result.setText(CHECKING_TEXT.format(service=service.name))
+        # The job holds the service, the name, the store and the transport, never this block, so no widget is touched.
+        store, transport = self._store, self._transport
+        submit(self._check_owner, token, lambda: check_saved_key(service, name, store, transport=transport))
+
+    @Slot(object)
+    def _on_check_delivered(self, item: object) -> None:
+        # Runs on the GUI thread. A result for another section, for a check that was reset, or for a gone card is dropped.
+        if not isinstance(item, Delivered) or item.owner is not self._check_owner:
+            return
+        token, (message, failure) = item.value
+        name = next((listed for listed, pending in self._pending.items() if pending == token), None)
+        if name is None:
+            return
+        del self._pending[name]
+        card = self._cards.get(name)
+        if card is None or card.check is None or card.check_result is None:
+            return
+        card.check.setEnabled(True)
+        if failure is None and isinstance(message, str):
+            card.check_result.setText(message)
+            return
+        # The worker raised, so there is no message from it. Show the unreachable text, which names no value.
+        service = service_for(name)
+        card.check_result.setText(UNREACHABLE_TEXT.format(service=service.name if service is not None else name))
+
     def _on_remove(self, name: str) -> None:
         if name in BUILT_IN_NAMES:
             return  # RunPod keeps its own Remove key button, on its card
@@ -525,14 +661,19 @@ class KeysSection(QWidget):
 
 __all__ = [
     "ADDED_TEXT",
+    "CHECKING_TEXT",
+    "CHECK_TEXT",
     "CRITICAL_BADGE_TEXT",
     "CRITICAL_TEXT",
+    "CREATE_TEXT",
     "KeysSection",
     "NOT_WRITTEN_TEXT",
+    "OTHER_CHOICE",
     "REMOVED_TEXT",
     "REPLACED_TEXT",
     "SEARCH_EMPTY_TEXT",
     "SEARCH_PLACEHOLDER",
+    "SERVICE_CHOICES",
     "STATUS_TEXT",
     "UNCRITICAL_TEXT",
     "USER_ENV_SET_TEXT",
