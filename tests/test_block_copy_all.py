@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import QLabel, QPushButton, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton, QTableWidget, QToolButton, QVBoxLayout, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop import claude_processes
@@ -335,6 +335,32 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
     gap = QVBoxLayout(stacked).spacing()
     assert gap == 6, "this style's layout gap between two labels is 6 px"
     assert tops[1] - tops[0] == QFontMetrics(block.font()).lineSpacing() + gap
+
+
+# The button counts with every Settings group expanded. They were counted at run/desk-fix-integrate (3aad775), before the
+# block changes, and they are the same after them. The Settings page holds 34 QPushButtons and five group headers, which
+# are QToolButtons: 39 buttons in all. The main window holds 54 QPushButtons and 71 buttons in all (every QAbstractButton).
+SETTINGS_PUSH_BUTTONS = 34
+SETTINGS_BUTTONS = 39
+MAIN_WINDOW_PUSH_BUTTONS = 54
+MAIN_WINDOW_BUTTONS = 71
+
+
+def test_the_block_change_leaves_the_button_counts_as_they_were(qtbot, tmp_path):
+    window = _window(qtbot, tmp_path)
+    groups = window.findChildren(CollapsibleGroup)
+    assert len(groups) == 5, "the five Settings groups"
+    for group in groups:
+        group.set_expanded(True)
+    names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    settings = window.tabs.widget(names.index("Settings"))
+    push = settings.findChildren(QPushButton)
+    headers = settings.findChildren(QToolButton)
+    assert len(headers) == len(groups), "the group headers are the only tool buttons on the Settings page"
+    assert len(push) == SETTINGS_PUSH_BUTTONS
+    assert len(push) + len(headers) == SETTINGS_BUTTONS
+    assert len(window.findChildren(QPushButton)) == MAIN_WINDOW_PUSH_BUTTONS
+    assert len(window.findChildren(QAbstractButton)) == MAIN_WINDOW_BUTTONS
 
 
 def test_a_block_line_reports_its_visibility_to_qt_and_draws_nothing_of_its_own(qtbot):
