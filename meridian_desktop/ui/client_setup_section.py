@@ -51,7 +51,7 @@ from meridian_desktop.core_locator import LocatedCore
 from meridian_desktop.settings_store import CORE_CHECKOUT_KEY, CORE_PYTHON_KEY, SettingsStore
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions
-from meridian_desktop.ui.text import make_box_selectable, make_selectable
+from meridian_desktop.ui.text import TextBlock, make_box_selectable, make_selectable
 
 HEADING_TEXT = "Client setup"
 FIND_AGAIN_TEXT = "Find it again"
@@ -336,12 +336,14 @@ class ClientSetupSection(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(_label(self, "client-setup-heading", HEADING_TEXT))
-        layout.addWidget(_label(self, "client-setup-intro", INTRO_TEXT))
-
-        # What the search found, with the two buttons that search again or let the owner choose the folder.
-        self._finder_status = _label(self, "client-setup-finder-status")
-        layout.addWidget(self._finder_status)
+        # The heading, the intro and what the search found are one block, so one drag over them selects all three. Settings
+        # hides the heading, which repeats its group title. The two buttons that search again or let the owner choose the
+        # folder sit below the block.
+        intro = TextBlock(self, "client-setup-intro-text", spacing=layout.spacing())
+        intro.line("client-setup-heading", HEADING_TEXT)
+        intro.line("client-setup-intro", INTRO_TEXT)
+        self._finder_status = intro.line("client-setup-finder-status", "")
+        layout.addWidget(intro.label)
         finder_row = QHBoxLayout()
         self._find_again = _button(self, "client-setup-find-again", FIND_AGAIN_TEXT)
         self._choose_core = _button(self, "client-setup-choose-core", CHOOSE_CORE_TEXT)
@@ -429,11 +431,13 @@ class ClientSetupSection(QWidget):
         state = _label(self, f"client-setup-{client}-state")
         head.addWidget(state, 1)
         block.addLayout(head)
-        path = _label(self, f"client-setup-{client}-path")
-        block.addWidget(path)
-        detail = _label(self, f"client-setup-{client}-detail")
+        # The path and the detail line are one block, so one drag over them selects both. The name and the state sit on
+        # one row above it, and the buttons below.
+        text = TextBlock(self, f"client-setup-{client}-text", spacing=block.spacing())
+        path = text.line(f"client-setup-{client}-path", "")
+        detail = text.line(f"client-setup-{client}-detail", "")
         _set_message(detail, "")
-        block.addWidget(detail)
+        block.addWidget(text.label)
 
         buttons = QHBoxLayout()
         apply_button = _button(self, f"client-setup-{client}-apply", APPLY_TEXT)
