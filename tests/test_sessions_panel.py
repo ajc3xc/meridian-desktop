@@ -32,6 +32,7 @@ from meridian_desktop.ui.sessions_panel import (
     CLAUDE_CHECKING_TEXT,
     CLAUDE_COLUMNS,
     CLAUDE_NONE_TEXT,
+    CLAUDE_TASKLIST_NOTE,
     COLUMNS,
     LOADING_TEXT,
     NO_PROJECTS_TEXT,
@@ -221,13 +222,22 @@ def claude_status_of(panel):
 
 
 def claude_rows_of(panel):
+    """Every row of the processes table: the program label, the root count and the total count, in that order."""
     table = claude_table_of(panel)
-    return [(table.item(row, 0).text(), table.item(row, 1).text()) for row in range(table.rowCount())]
+    return [
+        tuple(table.item(row, column).text() for column in range(len(CLAUDE_COLUMNS)))
+        for row in range(table.rowCount())
+    ]
 
 
 def listing_of(text):
     """A process lister that reads fixed tasklist text through the real parser, with no process started."""
     return lambda: claude_processes.list_claude_processes(run=lambda: text)
+
+
+def listed_result(*processes):
+    """A listed result built from a fake process table, the way the listing builds one. No process is started."""
+    return claude_processes.list_claude_processes(snapshot=lambda: list(processes), custom_names=())
 
 
 CLAUDE_LISTING = (
@@ -411,8 +421,8 @@ def test_no_text_says_not_built_yet(qtbot):
     assert "not built yet" not in all_visible_text(panel).lower()
 
 
-def test_claude_processes_are_listed_by_program_and_id_next_to_the_sessions(qtbot):
-    # The sessions come from the fake local server, and the Claude processes from fixed tasklist text.
+def test_claude_processes_are_counted_by_program_next_to_the_sessions(qtbot):
+    # The sessions come from the fake local server, and the processes from fixed tasklist text.
     panel, _hosted = make_panel(
         qtbot,
         local=FakeLocal(body=body_of([session(name="auth-refactor")])),
@@ -420,10 +430,13 @@ def test_claude_processes_are_listed_by_program_and_id_next_to_the_sessions(qtbo
     )
     panel.show()
     settle(qtbot, panel)
-    # Only the image name and the id are shown. node.exe is not a Claude program, so it is not listed.
-    assert claude_rows_of(panel) == [("claude.exe", "900"), ("Claude.exe", "14232")]
-    assert [claude_table_of(panel).horizontalHeaderItem(i).text() for i in range(2)] == list(CLAUDE_COLUMNS)
-    assert claude_status_of(panel).startswith("2 Claude processes running on this computer. Checked at ")
+    # One row per program: its label, its root count and its total count. node.exe is not a Claude program, so it is not
+    # counted. tasklist gives no parent id, so each claude.exe image is a root and the two counts are the same.
+    assert claude_rows_of(panel) == [("Claude", "2", "2")]
+    assert [claude_table_of(panel).horizontalHeaderItem(i).text() for i in range(3)] == list(CLAUDE_COLUMNS)
+    assert claude_status_of(panel).startswith("2 agent processes running on this computer. Checked at ")
+    # The line says the process table was not read, so tasklist was used.
+    assert CLAUDE_TASKLIST_NOTE in claude_status_of(panel)
     assert "Not connected" not in all_visible_text(panel)
     # The sessions table still holds the session the local server sent, and only that.
     assert table_of(panel).rowCount() == 1
@@ -431,12 +444,43 @@ def test_claude_processes_are_listed_by_program_and_id_next_to_the_sessions(qtbo
     assert "1 session(s) from this computer's Meridian server" in status_of(panel)
 
 
+def test_the_processes_table_has_one_row_per_program_with_root_and_total_counts(qtbot):
+    # A fake process table, so no process is read. A child of a matching process counts in the total only.
+    process_table = [
+        ClaudeProcess(image="claude.exe", pid=100, ppid=1),
+        ClaudeProcess(image="claude.exe", pid=101, ppid=100),
+        ClaudeProcess(image="Claude.exe", pid=102, ppid=1),
+        ClaudeProcess(image="codex.exe", pid=200, ppid=1),
+        ClaudeProcess(image="cursor.exe", pid=300, ppid=1),
+        ClaudeProcess(image="cursor.exe", pid=301, ppid=300),
+        ClaudeProcess(image="notepad.exe", pid=400, ppid=1),
+    ]
+    panel, _hosted = make_panel(
+        qtbot,
+        local=FakeLocal(body=b"[]"),
+        process_lister=lambda: claude_processes.list_claude_processes(snapshot=lambda: process_table, custom_names=()),
+    )
+    panel.show()
+    settle(qtbot, panel)
+    table = claude_table_of(panel)
+    assert [table.horizontalHeaderItem(i).text() for i in range(3)] == ["Program", "Root processes", "Total processes"]
+    # Claude has two roots (100 and 102) and three processes in all. Codex has one. Cursor has one root and one child.
+    assert claude_rows_of(panel) == [("Claude", "2", "3"), ("Codex", "1", "1"), ("Cursor", "1", "2")]
+    # Each cell is a label or a count: no path, command line or user name reaches the table.
+    for row in claude_rows_of(panel):
+        for cell in row:
+            assert "\\" not in cell and "/" not in cell and "Users" not in cell
+    # The snapshot was read, so the line does not say that tasklist was used.
+    assert claude_status_of(panel).startswith("6 agent processes running on this computer. Checked at ")
+    assert CLAUDE_TASKLIST_NOTE not in claude_status_of(panel)
+
+
 def test_a_single_claude_process_uses_the_singular(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal(), process_lister=listing_of(
         "Image Name: Claude.exe\nPID: 5\n"))
     panel.show()
     settle(qtbot, panel)
-    assert claude_status_of(panel).startswith("1 Claude process running on this computer. Checked at ")
+    assert claude_status_of(panel).startswith("1 agent process running on this computer. Checked at ")
 
 
 def test_no_claude_process_says_so_in_one_line(qtbot):
@@ -511,12 +555,10 @@ def test_claude_processes_are_listed_again_on_each_local_tick(qtbot):
     panel.show()
     settle(qtbot, panel)
     assert claude_rows_of(panel) == []
-    running[0] = ClaudeProcessesResult(
-        claude_processes.LISTED, "", (ClaudeProcess(image="claude.exe", pid=321),),
-    )
+    running[0] = listed_result(ClaudeProcess(image="claude.exe", pid=321))
     panel._timer.timeout.emit()  # noqa: SLF001 - the timer's real connection
     settle(qtbot, panel)
-    assert claude_rows_of(panel) == [("claude.exe", "321")]
+    assert claude_rows_of(panel) == [("Claude", "1", "1")]
     assert counts.claude >= 2
 
 
@@ -531,17 +573,17 @@ def test_claude_processes_stay_live_in_hosted_mode_and_still_read_no_hosted_sess
     panel.show()
     settle(qtbot, panel)
     hosted_calls = len(hosted.calls)
-    running[0] = ClaudeProcessesResult(claude_processes.LISTED, "", (ClaudeProcess(image="Claude.exe", pid=8),))
+    running[0] = listed_result(ClaudeProcess(image="Claude.exe", pid=8))
     panel._timer.timeout.emit()  # noqa: SLF001
     settle(qtbot, panel)
-    assert claude_rows_of(panel) == [("Claude.exe", "8")]
+    assert claude_rows_of(panel) == [("Claude", "1", "1")]
     assert len(hosted.calls) == hosted_calls  # the tick reads the processes, never the hosted sessions
     assert counts.hosted == 1
 
 
 def test_claude_status_text_for_each_listing_state():
-    listed = ClaudeProcessesResult(claude_processes.LISTED, "", (ClaudeProcess(image="a.exe", pid=1),))
-    assert claude_status_text(listed, "12:00:00") == "1 Claude process running on this computer. Checked at 12:00:00."
+    listed = listed_result(ClaudeProcess(image="claude.exe", pid=1))
+    assert claude_status_text(listed, "12:00:00") == "1 agent process running on this computer. Checked at 12:00:00."
     empty = ClaudeProcessesResult(claude_processes.LISTED, "", ())
     assert claude_status_text(empty, "12:00:00") == f"{CLAUDE_NONE_TEXT} Checked at 12:00:00."
     failed = ClaudeProcessesResult(claude_processes.UNAVAILABLE, claude_processes.UNAVAILABLE_MESSAGE)
