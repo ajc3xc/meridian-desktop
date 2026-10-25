@@ -286,6 +286,8 @@ class _BlockLine(QLabel):
         space_after: float | None,
     ) -> None:
         super().__init__(text, parent)
+        # Qt keeps the line hidden: a child widget that is not hidden would be drawn over its neighbours and take clicks.
+        super().setVisible(False)
         self.setObjectName(name)
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
@@ -302,8 +304,9 @@ class _BlockLine(QLabel):
         self._block.redraw()
 
     def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt naming
-        # show() and hide() come here too. Qt does not show the line itself: it has no place in a layout.
+        # show() and hide() come here too. Qt keeps the line hidden; the block draws the line when it is wanted.
         self._wanted = bool(visible)
+        super().setVisible(False)
         self._block.redraw()
 
     def isHidden(self) -> bool:  # noqa: N802 - Qt naming
