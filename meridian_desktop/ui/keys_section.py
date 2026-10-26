@@ -107,9 +107,9 @@ CHECKING_TEXT = "Checking {service}..."
 FILE_HEADING_TEXT = "Load keys from a file"
 FILE_INTRO_TEXT = (
     "Pick a file that holds each key as a name and its value. It can be a JSON object, for example "
-    '{"OpenAI": "..."}, or one NAME=VALUE line per key, such as OpenAI=... A line that starts with # is a comment. '
-    "The values stay in that file. They are not copied to the keychain or to settings, the app never writes the file, "
-    "and a value is read only when you press Check."
+    '{"OpenAI": "..."}, or text with one line per key, as NAME=VALUE or NAME: VALUE, for example OpenAI=... '
+    "A line that starts with # is a comment. The values stay in that file. They are not copied to the keychain or to "
+    "settings, the app never writes the file, and a value is read only when you press Check."
 )
 CHOOSE_FILE_TEXT = "Choose file"
 STOP_FILE_TEXT = "Stop using this file"
