@@ -326,6 +326,10 @@ class _FakeWindow:
         # The real window shows the launch-time notes on its status bar. The fake has no status bar to show them on.
         pass
 
+    def run_home_launch_checks(self):
+        # The real window runs the Overleaf card's launch checks once it shows. The fake has no card, so it does nothing.
+        pass
+
 
 class _FakeTray:
     def __init__(self, window, app):

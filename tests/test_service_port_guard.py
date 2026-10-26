@@ -1,7 +1,7 @@
 """The guard in conftest.py that keeps every test off the real service ports. No test here reaches a real port.
 
-The core server (7878), the LaTeX engine (8471), the tunnel slots (8808 to 8821) and Zotero's local API (23119) may be
-running on the computer that runs the suite. Inside a test, a connect or bind to one of those ports fails at once, before
+The core server (7878), the LaTeX engine (8471), the tunnel slots (8808 to 8821), Zotero's local API (23119) and the Zotero
+bridge (23125) may be running on the computer that runs the suite. Inside a test, a connect or bind to one of those ports fails at once, before
 anything is sent, unless the test is marked allow_service_ports. A marked test here only calls the real socket method on
 a closed socket, which fails inside the socket library without sending anything. Ports the system picks (port 0) work as
 before.
@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-GUARDED_PORTS = (7878, 8471, 23119, *range(8808, 8822))
+GUARDED_PORTS = (7878, 8471, 23119, 23125, *range(8808, 8822))
 
 
 def test_a_connect_to_the_zotero_port_is_refused_inside_a_test(service_port_guard):

@@ -36,7 +36,14 @@ from meridian_desktop.ui.settings_group import CollapsibleGroup
 
 FAKE_KEY = "test-key-not-real"
 # /projects is the Projects tab's read-only GET on the local server, made when the window first shows.
-EXPECTED_PATHS = {"/health", "/projects", "/compute/runpod/check", "/compute/runpod/pods"}
+# /desktop/zotero-bridge/status is the Zotero bridge panel's read-only GET, made when Settings is open. It sends no key.
+EXPECTED_PATHS = {
+    "/health",
+    "/projects",
+    "/compute/runpod/check",
+    "/compute/runpod/pods",
+    "/desktop/zotero-bridge/status",
+}
 NO_KEY_MESSAGE = (
     "No RunPod API key was found in the sources tried. Set RUNPOD_API_KEY, store the key "
     "in the keyring entry, or set up the runpodctl config."
