@@ -353,10 +353,14 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # The Overleaf (LaTeX) card on Home (run/desk-overleaf-login) adds four push buttons to the main window, and so four
 # QAbstractButtons: Check, Log in and Start engine, plus the card's own action button, which the card keeps hidden as every
 # card does. The Settings page does not change. The main window now holds 63 QPushButtons and 82 buttons in all.
+# The Overleaf card's launch-time checks and folder choice (run/desk-overleaf-autostart) add one more push button, Choose
+# engine folder, and two check boxes, the two switches. A check box is a QAbstractButton but not a QPushButton, so the push
+# count goes up by one and the button count by three. The Settings page does not change. The main window now holds 64
+# QPushButtons and 85 buttons in all.
 SETTINGS_PUSH_BUTTONS = 37
 SETTINGS_BUTTONS = 42
-MAIN_WINDOW_PUSH_BUTTONS = 63
-MAIN_WINDOW_BUTTONS = 82
+MAIN_WINDOW_PUSH_BUTTONS = 64
+MAIN_WINDOW_BUTTONS = 85
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):

@@ -463,6 +463,23 @@ START_RUNNING_TEXT = "The LaTeX engine is running. Press Check to see if you are
 START_TIMEOUT_TEMPLATE = "The LaTeX engine did not answer within {} seconds. Press Check now in a moment."
 START_FAILED_TEMPLATE = "The LaTeX engine could not be started ({})."
 
+# The launch-time checks, the engine folder and the two switches on the card. Each is one plain sentence, and none names a
+# folder: the folder is never shown, only the words around it.
+ENGINE_FOLDER_NOT_SET_TEXT = "Engine folder not set: choose it to start the engine automatically"
+LAUNCH_STARTING_TEXT = "Starting the engine..."
+LAUNCH_STARTED_TEXT = "Engine started"
+LAUNCH_NOT_STARTED_TEXT = "Engine did not start"
+NO_STARTER_CHOSEN_TEXT = "That folder has no start_server_hidden.vbs"
+ENGINE_FOLDER_SAVED_TEXT = "Engine folder saved. Nothing was started."
+OPTION_NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
+ENGINE_FOLDER_DIALOG_TITLE = "Choose the LaTeX engine folder"
+CHOOSE_FOLDER_TEXT = "Choose engine folder"
+CHOOSE_FOLDER_TOOLTIP = "Pick the folder that holds the engine's starter. Choosing a folder starts nothing."
+AUTO_START_LABEL = "Start the engine when Meridian opens"
+AUTO_START_TOOLTIP = "When Meridian opens, starts the LaTeX engine if it is down and its folder is chosen."
+AUTO_CHECK_LABEL = "Check the Overleaf session when Meridian opens"
+AUTO_CHECK_TOOLTIP = "When Meridian opens, checks the saved Overleaf session once, if the engine is running."
+
 
 @dataclass(frozen=True)
 class OverleafFacts:
@@ -545,6 +562,13 @@ def overleaf_start_text(running: bool, reason: str, wait_seconds: float) -> str:
     return START_TIMEOUT_TEMPLATE.format(int(wait_seconds))
 
 
+def launch_start_text(running: bool, reason: str) -> str:
+    """The one line the card shows after the launch-time start. ``reason`` is fixed text, set only when the start did not run."""
+    if running:
+        return LAUNCH_STARTED_TEXT
+    return f"{LAUNCH_NOT_STARTED_TEXT}. {reason}" if reason else LAUNCH_NOT_STARTED_TEXT
+
+
 __all__ = [
     "ENGINE_NOT_RUNNING_HEADLINE",
     "OVERLEAF_ENGINE_DOWN",
@@ -553,6 +577,7 @@ __all__ = [
     "OVERLEAF_ENGINE_UNCHECKED",
     "OVERLEAF_TITLE",
     "OverleafFacts",
+    "launch_start_text",
     "overleaf_login_text",
     "overleaf_start_text",
     "overleaf_view",

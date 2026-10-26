@@ -12,7 +12,7 @@ import threading
 
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QFrame, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QCheckBox, QFrame, QLabel, QMessageBox, QPushButton
 
 from meridian_desktop import local_client, overleaf_client, overleaf_engine
 from meridian_desktop.home_status import (
@@ -24,7 +24,7 @@ from meridian_desktop.home_status import (
     START_RUNNING_TEXT,
     START_TITLE,
 )
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import home_tab
 from meridian_desktop.ui.home_tab import CHECK_INTERVAL_MS, HomeDeps, HomeTab, OverleafDeps
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
@@ -80,6 +80,7 @@ class FakeEngine:
         listening_error=None,
         session_error=None,
         session_gate=None,
+        start_gate=None,
     ):
         self.up = up
         self.start_brings_up = start_brings_up
@@ -90,6 +91,7 @@ class FakeEngine:
         self.listening_error = listening_error
         self.session_error = session_error
         self.session_gate = session_gate
+        self.start_gate = start_gate
         self.listening_calls = 0
         self.folder_calls = 0
         self.session_calls = []
@@ -102,12 +104,14 @@ class FakeEngine:
             raise self.listening_error
         return self.up
 
-    def folder(self):
+    def folder(self, settings=None):
         self.folder_calls += 1
         return self.folder_answer
 
     def start(self, folder):
         self.starts.append(folder)
+        if self.start_gate is not None:
+            self.start_gate.wait(5)
         if self.start_brings_up:
             self.up = True
         return self.start_answer
@@ -132,8 +136,10 @@ class _Zotero:
         return ZoteroStatus(exe=None, process_running=False, api=ApiCheck(API_NOT_RUNNING, "not running"))
 
 
-def _deps(tmp_path, engine, *, confirm=None, wait=0.5):
-    """Home's dependencies with the engine fakes. ``confirm`` defaults to the real ask_yes_no, so No stays the default."""
+def _deps(tmp_path, engine, *, confirm=None, wait=0.5, choose=None):
+    """Home's dependencies with the engine fakes. ``confirm`` defaults to the real ask_yes_no, so No stays the default.
+    ``choose`` is the folder picker a test injects; without one the card never opens a picker."""
+    picker = {} if choose is None else {"choose_folder": choose}
     overleaf = OverleafDeps(
         listening=engine.listening,
         folder=engine.folder,
@@ -142,6 +148,7 @@ def _deps(tmp_path, engine, *, confirm=None, wait=0.5):
         login=engine.login,
         confirm=confirm if confirm is not None else home_tab.ask_yes_no,
         wait_seconds=wait,
+        **picker,
     )
     return HomeDeps(
         store=SettingsStore(tmp_path / "settings.json"),
@@ -197,6 +204,7 @@ def _card_texts(tab):
     card = _card(tab)
     texts = [label.text() for label in card.findChildren(QLabel)]
     texts += [button.text() + " " + button.toolTip() for button in card.findChildren(QPushButton)]
+    texts += [box.text() for box in card.findChildren(QCheckBox)]
     return "\n".join(texts)
 
 
@@ -737,3 +745,294 @@ def test_the_login_and_start_words_come_from_the_engine_answer():
     assert overleaf_start_text(True, "", 8.0) == START_RUNNING_TEXT
     assert overleaf_start_text(False, "", 8.0) == "The LaTeX engine did not answer within 8 seconds. Press Check now in a moment."
     assert overleaf_start_text(False, overleaf_engine.WINDOWS_ONLY_TEXT, 8.0) == overleaf_engine.WINDOWS_ONLY_TEXT
+
+
+# ----------------------------------------------------------------- the engine folder: only the one the owner saved
+
+def _folder_with_starter(tmp_path, name="engine"):
+    folder = tmp_path / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / overleaf_engine.STARTER_NAME).write_text("", encoding="utf-8")
+    return folder
+
+
+def test_the_engine_folder_is_the_saved_folder_only_while_it_holds_the_starter(tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    assert overleaf_engine.engine_folder(Settings(engine_folder=str(folder))) == folder
+
+
+def test_the_engine_folder_is_none_when_none_is_saved_or_the_starter_is_missing(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert overleaf_engine.engine_folder(Settings()) is None
+    assert overleaf_engine.engine_folder(Settings(engine_folder=str(empty))) is None
+    assert overleaf_engine.engine_folder(Settings(engine_folder=str(tmp_path / "gone"))) is None
+
+
+# ----------------------------------------------------------------- the card: the launch-time checks and the switches
+
+# The words the owner reads on the card. Each is spelled out here, so a change to any of them is a visible change.
+ENGINE_FOLDER_NOT_SET = "Engine folder not set: choose it to start the engine automatically"
+STARTING = "Starting the engine..."
+ENGINE_STARTED = "Engine started"
+ENGINE_NOT_STARTED = "Engine did not start"
+NO_STARTER = "That folder has no start_server_hidden.vbs"
+FOLDER_SAVED = "Engine folder saved. Nothing was started."
+START_BOX = "Start the engine when Meridian opens"
+CHECK_BOX = "Check the Overleaf session when Meridian opens"
+CHOOSE = "Choose engine folder"
+SIGNED_IN = overleaf_client.SessionStatus("logged_in", chrome_found=True)
+
+
+def _save_settings(tmp_path, **changes):
+    """Save the settings file the card reads: the given fields, and every other field at its default."""
+    SettingsStore(tmp_path / "settings.json").save(dataclasses.replace(Settings(), **changes))
+
+
+def _saved(tmp_path):
+    return SettingsStore(tmp_path / "settings.json").load().settings
+
+
+def _launch_deps(tmp_path, engine, *, choose=None, wait=0.5):
+    """Home's dependencies with the real folder rule: the engine folder is the one saved in settings, if it holds the starter."""
+    deps = _deps(tmp_path, engine, choose=choose, wait=wait)
+    return dataclasses.replace(deps, overleaf=dataclasses.replace(deps.overleaf, folder=overleaf_engine.engine_folder))
+
+
+def _settle(qtbot, tab):
+    """Wait until every Overleaf job the card started has been delivered to it."""
+    qtbot.waitUntil(lambda: not tab._overleaf_busy, timeout=5000)  # noqa: SLF001 - the job count is the test's only view
+
+
+def _launch(qtbot, tab):
+    """Run the launch-time checks the way the window does once it shows, then wait for their answers."""
+    tab.run_launch_checks()
+    _settle(qtbot, tab)
+
+
+def _checkbox(tab, name):
+    box = _card(tab).findChild(QCheckBox, name)
+    assert box is not None, name
+    return box
+
+
+def test_showing_home_alone_runs_no_launch_check(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+    assert engine.starts == []
+    assert engine.session_calls == []
+
+
+def test_with_the_engine_switch_off_the_engine_is_never_started_even_with_a_folder(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_auto_start=False, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == []
+    assert engine.session_calls == []
+    assert _note(tab) == ""
+    assert _headline(tab) == "Engine not running"
+
+
+def test_with_no_engine_folder_the_card_asks_for_one_and_starts_nothing(qtbot, tmp_path):
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _note(tab) == ENGINE_FOLDER_NOT_SET
+    assert engine.starts == []
+    assert engine.session_calls == []
+
+
+def test_a_running_engine_is_not_started_again_at_launch(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == []
+    assert engine.session_calls == [LOOPBACK]
+
+
+def test_a_down_engine_with_a_folder_is_started_once_and_then_checked(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == [folder]
+    assert _note(tab) == ENGINE_STARTED
+    assert engine.session_calls == [LOOPBACK]
+    assert HEADLINE_TIME.match(_headline(tab))
+
+
+def test_a_starter_that_never_brings_the_port_up_is_reported_as_not_started(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=False, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, wait=0.3))
+    _launch(qtbot, tab)
+    assert engine.starts == [folder]
+    assert _note(tab) == ENGINE_NOT_STARTED
+    assert engine.session_calls == []
+    assert _headline(tab) == "Engine not running"
+
+
+def test_the_card_says_starting_while_the_starter_runs_and_holds_the_start_button(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    gate = threading.Event()
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN, start_gate=gate)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    tab.run_launch_checks()
+    qtbot.waitUntil(lambda: engine.starts == [folder], timeout=5000)
+    qtbot.waitUntil(lambda: _note(tab) == STARTING, timeout=5000)
+    assert not _button(tab, "home-overleaf-start-engine").isEnabled()
+    gate.set()
+    qtbot.waitUntil(lambda: _note(tab) == ENGINE_STARTED, timeout=5000)
+    _settle(qtbot, tab)
+    assert engine.starts == [folder]
+
+
+def test_with_the_check_switch_off_overleaf_is_never_asked_at_launch(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_auto_check=False)
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.session_calls == []
+    assert engine.login_calls == []
+    assert engine.starts == []
+
+
+def test_with_the_engine_up_and_the_check_switch_on_overleaf_is_asked_exactly_once(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.session_calls == [LOOPBACK]
+    assert HEADLINE_TIME.match(_headline(tab))
+
+
+def test_a_later_show_or_the_home_timer_never_repeats_the_launch_session_check(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    tab.hide()
+    tab.show()
+    qtbot.waitExposed(tab)
+    qtbot.wait(home_tab.SHOW_DEBOUNCE_MS + 200)
+    timers = [timer for timer in tab.findChildren(QTimer) if timer.interval() == CHECK_INTERVAL_MS]
+    assert len(timers) == 1
+    timers[0].timeout.emit()
+    _settle(qtbot, tab)
+    qtbot.wait(50)
+    assert engine.session_calls == [LOOPBACK]
+
+
+def test_the_launch_checks_run_once_and_a_second_call_does_nothing(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    _launch(qtbot, tab)
+    assert engine.session_calls == [LOOPBACK]
+
+
+def test_with_both_switches_off_nothing_runs_at_launch(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_auto_start=False, overleaf_auto_check=False, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == []
+    assert engine.session_calls == []
+    assert engine.login_calls == []
+
+
+def test_an_expired_session_at_launch_is_said_and_log_in_stays_visible(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=overleaf_client.SessionStatus("expired", chrome_found=True))
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _headline(tab) == "Session expired: click Log in"
+    assert not _button(tab, "home-overleaf-login").isHidden()
+
+
+# ----------------------------------------------------------------- the card: choosing the engine folder
+
+def test_choosing_a_folder_without_the_starter_saves_nothing_and_says_so(qtbot, tmp_path):
+    empty = tmp_path / "no-starter"
+    empty.mkdir()
+    engine = FakeEngine(up=False)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(empty)))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.waitUntil(lambda: _note(tab) == NO_STARTER, timeout=5000)
+    assert not (tmp_path / "settings.json").exists()
+    assert _saved(tmp_path).engine_folder == ""
+    assert engine.starts == []
+
+
+def test_choosing_a_folder_with_the_starter_saves_it_and_starts_nothing(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    engine = FakeEngine(up=False, start_brings_up=True)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder)))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.waitUntil(lambda: _note(tab) == FOLDER_SAVED, timeout=5000)
+    assert _saved(tmp_path).engine_folder == str(folder)
+    assert engine.starts == []
+    assert engine.session_calls == []
+    assert not _button(tab, "home-overleaf-start-engine").isHidden()
+
+
+def test_cancelling_the_folder_choice_changes_nothing(qtbot, tmp_path):
+    engine = FakeEngine(up=False)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: ""))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.wait(100)
+    assert _note(tab) == ""
+    assert not (tmp_path / "settings.json").exists()
+    assert engine.starts == []
+
+
+# ----------------------------------------------------------------- the card: the two switches and the folder button
+
+def test_the_card_has_the_two_switches_and_the_folder_button_with_their_words(qtbot, tmp_path):
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False)))
+    _wait_engine(qtbot, tab)
+    assert _checkbox(tab, "home-overleaf-auto-start").text() == START_BOX
+    assert _checkbox(tab, "home-overleaf-auto-check").text() == CHECK_BOX
+    assert _button(tab, "home-overleaf-choose-folder").text() == CHOOSE
+
+
+def test_the_switches_show_the_saved_values(qtbot, tmp_path):
+    _save_settings(tmp_path, engine_auto_start=False)
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False)))
+    _wait_engine(qtbot, tab)
+    assert _checkbox(tab, "home-overleaf-auto-start").isChecked() is False
+    assert _checkbox(tab, "home-overleaf-auto-check").isChecked() is True
+
+
+def test_each_switch_saves_at_once_when_it_is_clicked(qtbot, tmp_path):
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False)))
+    _wait_engine(qtbot, tab)
+    _checkbox(tab, "home-overleaf-auto-start").click()
+    assert _saved(tmp_path).engine_auto_start is False
+    _checkbox(tab, "home-overleaf-auto-check").click()
+    assert _saved(tmp_path).overleaf_auto_check is False
+    assert _checkbox(tab, "home-overleaf-auto-check").isChecked() is False
+
+
+def test_no_cookie_token_or_path_text_shows_through_the_launch_or_the_folder_choice(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path, name=SENTINEL)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder)))
+    _launch(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    texts = _card_texts(tab)
+    assert SENTINEL not in texts
+    assert str(folder) not in texts
+    assert str(tmp_path) not in texts

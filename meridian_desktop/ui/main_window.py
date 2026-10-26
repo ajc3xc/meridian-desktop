@@ -721,6 +721,10 @@ class MainWindow(QMainWindow):
         """Show what the launch-time starts did, on the status bar. Called on the GUI thread by ui/runner_actions.LaunchStarts."""
         self.show_status(text)
 
+    def run_home_launch_checks(self) -> None:
+        """The Overleaf card's launch-time checks. app.py calls this once, after the window shows. The card runs them once."""
+        self._home_page.run_launch_checks()
+
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""
         self.mode_selector.blockSignals(True)

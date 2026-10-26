@@ -15,7 +15,10 @@ panel uses. The Settings buttons only switch to the Settings tab.
 The Overleaf (LaTeX) card reads only the LaTeX engine's port: when Home is shown, and on Check now. It asks the engine
 about the Overleaf session only on a press of its Check button, once per press, and never on the timer or on show. Log in
 asks the engine to open a login window. Start engine asks first (No is the default), then starts the engine's starter.
-Nothing in this card stops a process.
+Once per app launch, run_launch_checks (called by app.py after the window shows) does two things when the owner's
+switches allow it: it starts the engine when the engine is down and the owner has chosen its folder, and it checks the
+saved session once when the engine is running. Its two switches and Choose engine folder sit on this card. Nothing in
+this card stops a process.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -37,6 +40,8 @@ from typing import Any
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QHideEvent, QShowEvent, QTextDocument
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -56,8 +61,20 @@ from meridian_desktop.home_status import (
     ACTION_LAUNCH_ZOTERO,
     ACTION_RELEASE_PAGE,
     ACTION_SETTINGS,
+    AUTO_CHECK_LABEL,
+    AUTO_CHECK_TOOLTIP,
+    AUTO_START_LABEL,
+    AUTO_START_TOOLTIP,
     CHECKING_HEADLINE,
+    CHOOSE_FOLDER_TEXT,
+    CHOOSE_FOLDER_TOOLTIP,
+    ENGINE_FOLDER_DIALOG_TITLE,
+    ENGINE_FOLDER_NOT_SET_TEXT,
+    ENGINE_FOLDER_SAVED_TEXT,
+    LAUNCH_STARTING_TEXT,
     LOGIN_FAILED_TEXT,
+    NO_STARTER_CHOSEN_TEXT,
+    OPTION_NOT_SAVED_TEXT,
     OVERLEAF_ENGINE_DOWN,
     OVERLEAF_ENGINE_FAILED,
     OVERLEAF_ENGINE_RUNNING,
@@ -78,6 +95,7 @@ from meridian_desktop.home_status import (
     checked_text,
     checking_view,
     failed_view,
+    launch_start_text,
     local_view,
     overleaf_login_text,
     overleaf_start_text,
@@ -92,7 +110,7 @@ from meridian_desktop.home_status import (
 from meridian_desktop.latex_client import EngineStatus, address_text, port_text
 from meridian_desktop.runner_client import RunnerResult
 from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
@@ -234,9 +252,10 @@ class OverleafProbe:
 
 
 def _overleaf_probe(store: SettingsStore, deps: OverleafDeps) -> OverleafProbe:
-    """The engine's port and starter folder. Runs on the thread pool. It never sends a request to Overleaf."""
-    url = store.load().settings.engine_url
-    return OverleafProbe(url=url, listening=bool(deps.listening(url)), folder=deps.folder())
+    """The engine's port and the folder the owner chose. Runs on the thread pool. It never sends a request to Overleaf."""
+    settings = store.load().settings
+    url = settings.engine_url
+    return OverleafProbe(url=url, listening=bool(deps.listening(url)), folder=deps.folder(settings))
 
 
 def _overleaf_session_read(store: SettingsStore, deps: OverleafDeps) -> Any:
@@ -269,7 +288,7 @@ def _default_overleaf_deps() -> OverleafDeps:
     """The real LaTeX engine calls. Looked up when called, so a test can replace this function."""
     return OverleafDeps(
         listening=lambda url: overleaf_engine.engine_listening(url),
-        folder=lambda: overleaf_engine.engine_folder(),
+        folder=lambda settings: overleaf_engine.engine_folder(settings),
         start=lambda folder: overleaf_engine.start_engine(folder),
         session=lambda url: overleaf_client.session_status(url),
         login=lambda url: overleaf_client.start_login(url),
@@ -811,25 +830,31 @@ class _Card(QFrame):
 
 # ----------------------------------------------------------------- the tab
 
+def _choose_engine_folder(parent: QWidget | None, start_dir: str) -> str:
+    """Ask for the LaTeX engine's folder. Return its path, or "" when the dialog is cancelled. Nothing is started here."""
+    return QFileDialog.getExistingDirectory(parent, ENGINE_FOLDER_DIALOG_TITLE, start_dir)
+
+
 @dataclass(frozen=True)
 class OverleafDeps:
     """The LaTeX engine calls the Overleaf card makes. The window passes the real ones, and tests pass fakes.
 
-    ``listening(url)`` is whether the engine's port accepts a connection (overleaf_engine.engine_listening). ``folder()``
-    is where the engine's starter is, or None (overleaf_engine.engine_folder). ``start(folder)`` runs the starter
+    ``listening(url)`` is whether the engine's port accepts a connection (overleaf_engine.engine_listening). ``folder(settings)``
+    is the folder the owner chose, or None (overleaf_engine.engine_folder). ``start(folder)`` runs the starter
     (overleaf_engine.start_engine). ``session(url)`` asks the engine once about the Overleaf session, and ``login(url)``
     opens its login window (overleaf_client.session_status and start_login). ``confirm`` asks the owner yes or no before
     Start engine (ask_yes_no, where No is the default and Escape is No). ``wait_seconds`` is how long Start engine waits
-    for the port.
+    for the port. ``choose_folder(parent, start_dir)`` opens the folder picker and returns the folder, or "" when cancelled.
     """
 
     listening: Callable[[str], bool]
-    folder: Callable[[], Path | None]
+    folder: Callable[[Settings], Path | None]
     start: Callable[[Path], Any]
     session: Callable[[str], Any]
     login: Callable[[str], Any]
     confirm: Callable[[QWidget, str, str], bool] = ask_yes_no
     wait_seconds: float = START_WAIT_SECONDS
+    choose_folder: Callable[[QWidget | None, str], str] = _choose_engine_folder
 
 
 @dataclass(frozen=True)
@@ -894,6 +919,8 @@ class HomeTab(QWidget):
         self._overleaf_checked = ""
         self._overleaf_busy: set[str] = set()
         self._overleaf_done: dict[str, Callable[[Any, str], None]] = {}
+        # The launch-time checks run once per app launch (run_launch_checks). This flag is set on that one run.
+        self._launch_checks_ran = False
         shared_delivery().delivered.connect(self._on_overleaf_delivered)
 
         layout = QVBoxLayout(self)
@@ -1002,10 +1029,12 @@ class HomeTab(QWidget):
         self._refresh_overleaf()
 
     def _build_overleaf_card(self, container: QWidget) -> _Card:
-        """The Overleaf (LaTeX) card: its status lines, then Check, Log in and Start engine in one row under them.
+        """The Overleaf (LaTeX) card: its status lines, then Check, Log in, Start engine and Choose engine folder in one row
+        under them, then the two switches.
 
-        All three buttons are made here, and Start engine is hidden until it is offered, so the widget count does not depend
-        on the engine's state or on whether its folder is known. Nothing is read here.
+        The buttons are made here, and Start engine is hidden until it is offered, so the widget count does not depend on the
+        engine's state or on whether its folder is known. The switches start checked, the defaults, and showing Home sets them
+        to the saved values. Nothing is read here.
         """
         card = _Card("overleaf", OVERLEAF_TITLE, work=None, render=None, on_action=self._on_action, parent=container)
         row = QWidget(card)
@@ -1021,11 +1050,45 @@ class HomeTab(QWidget):
         self._overleaf_start_button = self._overleaf_button(
             row, "home-overleaf-start-engine", "Start engine", OVERLEAF_START_TOOLTIP, self._on_overleaf_start
         )
-        for button in (self._overleaf_check_button, self._overleaf_login_button, self._overleaf_start_button):
+        self._overleaf_choose_button = self._overleaf_button(
+            row, "home-overleaf-choose-folder", CHOOSE_FOLDER_TEXT, CHOOSE_FOLDER_TOOLTIP, self._on_overleaf_choose_folder
+        )
+        for button in (
+            self._overleaf_check_button,
+            self._overleaf_login_button,
+            self._overleaf_start_button,
+            self._overleaf_choose_button,
+        ):
             flow.addWidget(button)
         self._overleaf_start_button.setVisible(False)
         card.add_body(row)
+        card.add_body(self._build_overleaf_switches(card))
         return card
+
+    def _build_overleaf_switches(self, card: QWidget) -> QWidget:
+        """The two Overleaf card switches: start the engine when Meridian opens, and check the session when it opens."""
+        box = QWidget(card)
+        box.setObjectName("home-overleaf-switches")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._overleaf_auto_start_box = self._overleaf_switch(
+            box, "home-overleaf-auto-start", AUTO_START_LABEL, AUTO_START_TOOLTIP, "engine_auto_start"
+        )
+        self._overleaf_auto_check_box = self._overleaf_switch(
+            box, "home-overleaf-auto-check", AUTO_CHECK_LABEL, AUTO_CHECK_TOOLTIP, "overleaf_auto_check"
+        )
+        layout.addWidget(self._overleaf_auto_start_box)
+        layout.addWidget(self._overleaf_auto_check_box)
+        return box
+
+    def _overleaf_switch(self, parent: QWidget, name: str, text: str, tooltip: str, key: str) -> QCheckBox:
+        box = QCheckBox(text, parent)
+        box.setObjectName(name)
+        box.setToolTip(tooltip)
+        # Checked is the default. The signal is connected after that, so setting the default writes nothing.
+        box.setChecked(True)
+        box.toggled.connect(lambda checked, key=key: self._on_overleaf_switch(key, checked))
+        return box
 
     @staticmethod
     def _overleaf_button(parent: QWidget, name: str, text: str, tooltip: str, on_click: Callable[[], None]) -> QPushButton:
@@ -1229,19 +1292,22 @@ class HomeTab(QWidget):
         self._refresh_overleaf()
 
     def _refresh_overleaf(self) -> None:
-        """Draw the card's status from what it holds, and show or enable its three buttons to match."""
+        """Draw the card's status from what it holds, and show or enable its buttons to match. A launch-time check reads
+        as Checking while it runs, and Start engine is held while a start runs, by hand or at launch."""
         busy = self._overleaf_busy
+        launching = "launch" in busy or "launch_start" in busy
         facts = OverleafFacts(
             engine=self._overleaf_engine,
             session=self._overleaf_session,
             checked=self._overleaf_checked,
-            checking="session" in busy,
+            checking="session" in busy or launching,
             port=port_text(self._overleaf_url),
         )
         self._overleaf.show_view(overleaf_view(facts))
         self._overleaf_check_button.setEnabled("session" not in busy)
         self._overleaf_login_button.setEnabled("login" not in busy)
-        self._overleaf_start_button.setEnabled("start" not in busy)
+        starting = "start" in busy or "launch_start" in busy
+        self._overleaf_start_button.setEnabled(not starting)
         offered = self._overleaf_engine == OVERLEAF_ENGINE_DOWN and self._overleaf_folder is not None
         self._overleaf_start_button.setVisible(offered)
 
@@ -1329,12 +1395,116 @@ class HomeTab(QWidget):
         self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
         self._overleaf.set_note(overleaf_start_text(bool(running), str(reason), self._overleaf_deps.wait_seconds))
 
+    # ------------------------------------------------------------ the Overleaf (LaTeX) card: launch, switches and folder
+
+    def run_launch_checks(self) -> None:
+        """The launch-time checks. app.py calls this once, after the window shows. The first call runs them; a later call,
+        a show or the Home timer does nothing, so they never repeat within a launch.
+
+        Each step runs only when its own switch is on, and nothing here asks the owner. The engine is started when it is
+        down and the owner has chosen its folder (engine_auto_start). The saved session is checked once when the engine is
+        running (overleaf_auto_check). With both switches off, nothing runs.
+        """
+        if self._launch_checks_ran:
+            return
+        self._launch_checks_ran = True
+        settings = self._deps.store.load().settings
+        if not (settings.engine_auto_start or settings.overleaf_auto_check):
+            return
+        self._run_overleaf(
+            "launch",
+            partial(_overleaf_probe, self._deps.store, self._overleaf_deps),
+            self._overleaf_launch_probed,
+        )
+
+    def _overleaf_launch_probed(self, value: Any, failure: str) -> None:
+        """The engine's port and folder, read at launch. Then the one session check if the engine is up, or else the start."""
+        self._overleaf_engine_done(value, failure)
+        if failure or not isinstance(value, OverleafProbe):
+            return
+        settings = self._deps.store.load().settings
+        if value.listening:
+            self._check_session_at_launch()
+            return
+        if not settings.engine_auto_start:
+            return
+        if value.folder is None:
+            self._overleaf.set_note(ENGINE_FOLDER_NOT_SET_TEXT)
+            return
+        self._overleaf.set_note(LAUNCH_STARTING_TEXT)
+        self._run_overleaf(
+            "launch_start",
+            partial(_overleaf_start_read, self._deps.store, self._overleaf_deps, value.folder),
+            self._overleaf_launch_started,
+        )
+
+    def _overleaf_launch_started(self, value: Any, failure: str) -> None:
+        """The launch-time start has run and waited for the port. The engine's state and the line follow, and the session is
+        checked once when the engine is up."""
+        running, reason = False, ""
+        if not failure and isinstance(value, tuple) and len(value) == 2:
+            running, reason = bool(value[0]), str(value[1])
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
+        self._overleaf.set_note(launch_start_text(running, reason))
+        if running:
+            self._check_session_at_launch()
+
+    def _check_session_at_launch(self) -> None:
+        """The launch-time session check, when its switch is on. It is the one Overleaf request the launch makes."""
+        if not self._deps.store.load().settings.overleaf_auto_check:
+            return
+        self._run_overleaf(
+            "session",
+            partial(_overleaf_session_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_session_done,
+        )
+
+    def _sync_overleaf_options(self) -> None:
+        """Set the two switches to the saved values. Their signals are blocked meanwhile, so nothing is written."""
+        settings = self._deps.store.load().settings
+        pairs = (
+            (self._overleaf_auto_start_box, settings.engine_auto_start),
+            (self._overleaf_auto_check_box, settings.overleaf_auto_check),
+        )
+        for box, value in pairs:
+            box.blockSignals(True)
+            box.setChecked(value)
+            box.blockSignals(False)
+
+    def _on_overleaf_switch(self, key: str, checked: bool) -> None:
+        """A switch was clicked: its value is saved at once, and every other field is kept. A write that fails says so, and
+        the switch goes back to the saved value."""
+        try:
+            self._deps.store.save(replace(self._deps.store.load().settings, **{key: checked}))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            self._sync_overleaf_options()
+
+    def _on_overleaf_choose_folder(self) -> None:
+        """Choose engine folder: the folder is saved only when it holds the engine's starter. Choosing starts nothing."""
+        settings = self._deps.store.load().settings
+        chosen = self._overleaf_deps.choose_folder(self, settings.engine_folder)
+        if not chosen:
+            return
+        if not overleaf_engine.has_starter(Path(chosen)):
+            self._overleaf.set_note(NO_STARTER_CHOSEN_TEXT)
+            return
+        try:
+            self._deps.store.save(replace(settings, engine_folder=chosen))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            return
+        self._overleaf_folder = Path(chosen)
+        self._overleaf.set_note(ENGINE_FOLDER_SAVED_TEXT)
+        self._refresh_overleaf()
+
     # ------------------------------------------------------------ events
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
         self._timer.start()
         self.refresh_tunnel_gate()
+        self._sync_overleaf_options()
         stale = self._last_run is None or time.monotonic() - self._last_run >= CHECK_INTERVAL_SECONDS
         if stale:
             self._show_timer.stop()

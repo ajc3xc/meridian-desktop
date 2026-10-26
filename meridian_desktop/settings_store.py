@@ -57,6 +57,8 @@ DEFAULT_TUNNEL_SIGNIN_DAYS = 30
 # The three owner-confirmed control switches. Each is a real true or false. An absent key means the default in
 # CONTROL_FLAG_DEFAULTS, which is set once below the Settings class.
 CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+# The two Overleaf (LaTeX) card switches. Both default to on, and save() writes one only when it is off.
+ENGINE_SWITCH_KEYS = ("engine_auto_start", "overleaf_auto_check")
 
 # The exact values the owner saw in the confirmation dialog when a launch-time switch was turned on (amendments A and B
 # of docs/local-trust-contract.md). The launch-time starts run only with these, and never with the current core setup.
@@ -122,6 +124,15 @@ class Settings:
     # The keys file the owner chose for the Keys block (keys_file.py). Only its path is stored, never a value. "" means no
     # file is chosen. save() writes the key only when a path is set, so a file that never chose one keeps no such key.
     keys_file_path: str = ""
+    # The folder the owner chose for the LaTeX engine's hidden starter (start_server_hidden.vbs). Only the text the owner
+    # picked is kept, and "" means no folder is chosen. save() writes the key only when a folder is chosen.
+    engine_folder: str = ""
+    # Start the LaTeX engine when Meridian opens, if it is not running and its folder is chosen. On by default, and the
+    # Overleaf card shows it as a checkbox. save() writes this key only when it is off.
+    engine_auto_start: bool = True
+    # Check the saved Overleaf session once when Meridian opens, if the engine is running. On by default, and the Overleaf
+    # card shows it as a checkbox. save() writes this key only when it is off.
+    overleaf_auto_check: bool = True
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -303,6 +314,26 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("auto_update must be true or false; using true")
 
+    # engine_folder: an absent key means no folder is chosen, with no warning. Only text is accepted, and it is kept without
+    # being checked here, so a folder that is gone does not break loading. The Overleaf card checks for the starter.
+    if "engine_folder" in data:
+        value = data["engine_folder"]
+        if isinstance(value, str):
+            values["engine_folder"] = value.strip()
+        else:
+            problems.append("engine_folder must be a path as text or empty; using empty")
+
+    # The two Overleaf card switches, both on by default. An absent key means on, with no warning. Only a real true or false
+    # is accepted; any other value is reported and the default (on) is used, as check_updates does.
+    for key in ENGINE_SWITCH_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be true or false; using true")
+
     # The runner control switches: an absent key means its default in CONTROL_FLAG_DEFAULTS (tunnel on, the two launch
     # switches off), with no warning. Only a real true or false is accepted. Any other value is read as false, never as
     # the default, so a malformed tunnel switch fails closed instead of turning the tunnel buttons on.
@@ -434,6 +465,13 @@ class SettingsStore:
         if not settings.keys_file_path:
             # No file chosen is the default, so a file that never chose a keys file has no such key.
             del data["keys_file_path"]
+        if not settings.engine_folder:
+            # No folder chosen is the default, so a file that never chose one has no such key.
+            del data["engine_folder"]
+        for key in ENGINE_SWITCH_KEYS:
+            if data[key]:
+                # On is the default, so a file that keeps both Overleaf card switches on has no such key.
+                del data[key]
         saved_names = clean_custom_names(settings.agent_process_names)[0]
         if saved_names:
             # Only valid custom names are written. An entry that is not valid, such as an empty or non-text one loaded

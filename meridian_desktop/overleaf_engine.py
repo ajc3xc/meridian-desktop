@@ -1,10 +1,11 @@
 """The LaTeX engine's port and its start, for the Overleaf card on Home. Pure Python: stdlib only, no Qt import.
 
     engine_listening(base_url)  is something listening on the engine's TCP port? A plain TCP connect, no HTTP request.
-    engine_folder()             the folder of the engine's hidden starter, or None (see its docstring).
+    has_starter(folder)         does this folder hold the engine's hidden starter? Reads the folder only.
+    engine_folder(settings)     the folder the owner chose and saved, when it still holds the starter, or None.
     start_engine(folder)        Windows only. Starts the engine's hidden starter in the background and returns at once.
 
-start_engine never kills, stops or restarts a process. The card asks the owner first, and only a yes reaches it.
+start_engine never kills, stops or restarts a process. The card asks the owner first, or the owner's launch switch says yes.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 from meridian_desktop import local_client
 from meridian_desktop.local_client import LocalClientError
+from meridian_desktop.settings_store import Settings
 
 STARTER_NAME = "start_server_hidden.vbs"
 PROBE_TIMEOUT = 0.5
@@ -58,14 +60,26 @@ def engine_listening(base_url: str, *, connector: Connector | None = None, timeo
     return True
 
 
-def engine_folder() -> Path | None:
-    """The folder of the LaTeX engine's hidden starter, or None when the desktop does not know where that folder is.
+def has_starter(folder: Path) -> bool:
+    """True when ``folder`` holds the engine's hidden starter. It only looks at the folder; nothing is started."""
+    try:
+        return (folder / STARTER_NAME).is_file()
+    except (OSError, ValueError):
+        return False
 
-    Not wired yet. The engine folder is the one path that repo boundary rule (b) in tools/check_boundary.py forbids any
-    repo file to name, so this returns None, and the Overleaf card does not offer Start engine. The owner decides how
-    the desktop learns the folder. That decision belongs here, and nowhere else.
+
+def engine_folder(settings: Settings) -> Path | None:
+    """The folder the owner chose for the LaTeX engine, or None when none is chosen or the chosen one has no starter.
+
+    The folder comes only from the saved settings (Settings.engine_folder), and the owner picks it in the Overleaf card.
+    No folder is named in code, so nothing here guesses where the engine is installed. A folder that no longer holds the
+    starter reads as None, so the card asks the owner to choose it again.
     """
-    return None
+    chosen = settings.engine_folder.strip()
+    if not chosen:
+        return None
+    folder = Path(chosen)
+    return folder if has_starter(folder) else None
 
 
 @dataclass(frozen=True)
@@ -89,7 +103,8 @@ def start_engine(
 ) -> EngineStart:
     """Start the engine's hidden starter from ``folder``, detached and with no window, and return at once.
 
-    Windows only. Elsewhere it returns a result that says so, and starts nothing. Call this only after the owner says yes.
+    Windows only. Elsewhere it returns a result that says so, and starts nothing. Call this only after the owner says yes
+    to Start engine, or when the owner's launch switch is on and the folder is the one the owner chose.
     ``launcher`` replaces subprocess.Popen in tests, so no test starts a process.
     """
     if (sys.platform if platform is None else platform) != "win32":
@@ -119,5 +134,6 @@ __all__ = [
     "EngineStart",
     "engine_folder",
     "engine_listening",
+    "has_starter",
     "start_engine",
 ]

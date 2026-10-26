@@ -162,7 +162,7 @@ def no_overleaf_engine(monkeypatch):
     def stand_in_deps():
         return home_tab.OverleafDeps(
             listening=lambda url: False,
-            folder=lambda: None,
+            folder=lambda settings: None,
             start=refuse,
             session=refuse,
             login=refuse,

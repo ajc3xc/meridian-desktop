@@ -385,6 +385,84 @@ def test_check_updates_that_is_not_true_or_false_warns_and_stays_on(settings_pat
     assert result.warning is not None and "check_updates" in result.warning
 
 
+# ----------------------------------------------------------- the LaTeX engine folder and the Overleaf card's switches
+
+
+def test_the_engine_settings_default_without_a_warning(settings_path):
+    assert Settings().engine_folder == ""
+    assert Settings().engine_auto_start is True
+    assert Settings().overleaf_auto_check is True
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == ""
+    assert result.settings.engine_auto_start is True
+    assert result.settings.overleaf_auto_check is True
+
+
+def test_absent_engine_keys_give_the_defaults_and_keep_the_other_fields(settings_path):
+    _write(settings_path, json.dumps({"check_updates": False}))
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == ""
+    assert result.settings.engine_auto_start is True
+    assert result.settings.overleaf_auto_check is True
+    assert result.settings.check_updates is False
+
+
+def test_engine_folder_round_trips_and_is_written_only_when_chosen(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    chosen = str(tmp_path / "engine")
+    store.save(Settings(engine_folder=chosen))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["engine_folder"] == chosen
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == chosen
+    # Cleared, the key goes, so a file that never chose a folder is written as before.
+    store.save(Settings(engine_folder=""))
+    assert "engine_folder" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.engine_folder == ""
+
+
+@pytest.mark.parametrize("key", ["engine_auto_start", "overleaf_auto_check"])
+def test_each_engine_switch_round_trips_off_and_back_on(settings_path, key):
+    store = SettingsStore(settings_path)
+    store.save(replace(Settings(), **{key: False}))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))[key] is False
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert getattr(result.settings, key) is False
+    # On is the default, so turning it back on removes the key again.
+    store.save(replace(Settings(), **{key: True}))
+    assert key not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert getattr(SettingsStore(settings_path).load().settings, key) is True
+
+
+def test_saving_the_engine_folder_keeps_the_switches_and_the_other_fields(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    store.save(replace(Settings(), check_updates=False, engine_auto_start=False))
+    store.save(replace(SettingsStore(settings_path).load().settings, engine_folder=str(tmp_path)))
+    kept = SettingsStore(settings_path).load().settings
+    assert kept.engine_folder == str(tmp_path)
+    assert kept.engine_auto_start is False
+    assert kept.check_updates is False
+
+
+@pytest.mark.parametrize("key", ["engine_auto_start", "overleaf_auto_check"])
+@pytest.mark.parametrize("value", ["no", 0, None, [True]])
+def test_a_non_boolean_engine_switch_warns_and_uses_its_default(settings_path, key, value):
+    _write(settings_path, json.dumps({key: value}))
+    result = SettingsStore(settings_path).load()
+    assert getattr(result.settings, key) is True
+    assert result.warning is not None and key in result.warning
+
+
+def test_an_engine_folder_that_is_not_text_warns_and_is_empty(settings_path):
+    _write(settings_path, json.dumps({"engine_folder": 5}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.engine_folder == ""
+    assert result.warning is not None and "engine_folder" in result.warning
+
+
 # ----------------------------------------------------------- the runner control switches (contract rule 10, amendments A to C)
 
 CONTROL_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")

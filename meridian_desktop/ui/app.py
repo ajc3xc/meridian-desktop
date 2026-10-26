@@ -131,4 +131,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
     # by this frame, so it lives as long as the event loop runs.
     launch = LaunchStarts(actions, report=window.show_launch_notes)
     QTimer.singleShot(0, launch.start)
+    # The Overleaf card's launch-time checks (ui/home_tab.py run_launch_checks): the engine start and one session check, each
+    # only when its own switch is on. The card runs them once, after the window shows, and never on a later show.
+    QTimer.singleShot(0, window.run_home_launch_checks)
     return int(app.exec())
