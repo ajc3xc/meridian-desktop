@@ -26,6 +26,7 @@ from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -156,6 +157,7 @@ NO_RESULTS_TEXT = "No items in your Zotero library match \"{}\"."
 RESULTS_TEXT = "{} result(s) for \"{}\"."
 LIMIT_TEXT = " Showing the first {}; narrow the search to see fewer."
 RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
+RESULT_TITLE_COLUMN = 0
 # The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
 SEARCH = "search"
@@ -503,7 +505,14 @@ class ZoteroPanel(QWidget):
         self._results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._results.verticalHeader().setVisible(False)
-        self._results.horizontalHeader().setStretchLastSection(True)
+        # Title takes the spare width, so long titles have room. The other columns fit their contents, so the key is
+        # never stretched wider than it needs to be.
+        header = self._results.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(RESULT_TITLE_COLUMN, QHeaderView.ResizeMode.Stretch)
+        for column in range(len(RESULT_COLUMNS)):
+            if column != RESULT_TITLE_COLUMN:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         enable_table_copy(self._results)
         layout.addWidget(self._results, 1)
 
