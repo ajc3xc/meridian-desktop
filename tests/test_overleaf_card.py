@@ -77,6 +77,7 @@ class FakeEngine:
         session=None,
         login=None,
         start=None,
+        start_error=None,
         listening_error=None,
         session_error=None,
         session_gate=None,
@@ -88,6 +89,7 @@ class FakeEngine:
         self.session_answer = session
         self.login_answer = login
         self.start_answer = start if start is not None else overleaf_engine.EngineStart(True)
+        self.start_error = start_error
         self.listening_error = listening_error
         self.session_error = session_error
         self.session_gate = session_gate
@@ -110,6 +112,8 @@ class FakeEngine:
 
     def start(self, folder):
         self.starts.append(folder)
+        if self.start_error is not None:
+            raise self.start_error
         if self.start_gate is not None:
             self.start_gate.wait(5)
         if self.start_brings_up:
@@ -879,6 +883,18 @@ def test_a_starter_that_never_brings_the_port_up_is_reported_as_not_started(qtbo
     assert _note(tab) == ENGINE_NOT_STARTED
     assert engine.session_calls == []
     assert _headline(tab) == "Engine not running"
+
+
+def test_a_launch_start_that_raises_says_the_class_name_and_never_the_message(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_error=PermissionError(SENTINEL), session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == [folder]
+    assert _note(tab) == f"{ENGINE_NOT_STARTED}. PermissionError"
+    assert SENTINEL not in _note(tab)
+    assert engine.session_calls == []
 
 
 def test_the_card_says_starting_while_the_starter_runs_and_holds_the_start_button(qtbot, tmp_path):

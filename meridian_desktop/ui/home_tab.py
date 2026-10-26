@@ -1441,7 +1441,7 @@ class HomeTab(QWidget):
     def _overleaf_launch_started(self, value: Any, failure: str) -> None:
         """The launch-time start has run and waited for the port. The engine's state and the line follow, and the session is
         checked once when the engine is up."""
-        running, reason = False, ""
+        running, reason = False, failure
         if not failure and isinstance(value, tuple) and len(value) == 2:
             running, reason = bool(value[0]), str(value[1])
         self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
