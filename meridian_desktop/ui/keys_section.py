@@ -106,9 +106,10 @@ CHECKING_TEXT = "Checking {service}..."
 # The keys file: its control, what it says about the file, and the names it lists.
 FILE_HEADING_TEXT = "Load keys from a file"
 FILE_INTRO_TEXT = (
-    'Pick a JSON file that holds each key as a name and its value, for example {"OpenAI": "..."}. The values stay in that '
-    "file. They are not copied to the keychain or to settings, the app never writes the file, and a value is read only "
-    "when you press Check."
+    "Pick a file that holds each key as a name and its value. It can be a JSON object, for example "
+    '{"OpenAI": "..."}, or one NAME=VALUE line per key, such as OpenAI=... A line that starts with # is a comment. '
+    "The values stay in that file. They are not copied to the keychain or to settings, the app never writes the file, "
+    "and a value is read only when you press Check."
 )
 CHOOSE_FILE_TEXT = "Choose file"
 STOP_FILE_TEXT = "Stop using this file"
@@ -118,7 +119,7 @@ FILE_LISTED_ONE_TEXT = "The file lists 1 key name. Its value stays in the file."
 FILE_LISTED_MANY_TEXT = "The file lists {count} key names. Their values stay in the file."
 FILE_STOPPED_TEXT = "Stopped using the keys file. The file itself is unchanged."
 FILE_CHOOSER_TITLE = "Choose a keys file"
-FILE_CHOOSER_FILTER = "JSON files (*.json)"
+FILE_CHOOSER_FILTER = "Keys files (*.json *.env *.txt)"
 FROM_FILE_NOTE = "From file"
 FROM_FILE_DETAIL = "The value stays in the keys file. It is read only when you press Check."
 REMOVED_FROM_FILE_TEXT = "Removed {name} from the list for this session. The keys file is unchanged."

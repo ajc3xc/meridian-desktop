@@ -1,4 +1,4 @@
-"""Tests for the keys file: a JSON file of key names and values that the owner chooses, and the Keys block listing it.
+"""Tests for the keys file: a JSON or NAME=VALUE file of key names and values, and the Keys block listing it.
 
 The file belongs to the owner, so the app never writes it. Every test that could touch it checks its bytes and its
 modification time before and after. FAKE_VALUE is an obviously fake key, so the leak checks can search every output for
@@ -19,7 +19,7 @@ import pytest
 from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
 
 from _fakes import MemoryKeyring
-from meridian_desktop.api_keys import KEY_SERVICE, STATUS_SET, ApiKeys, account_for
+from meridian_desktop.api_keys import KEY_SERVICE, MAX_NAME_LENGTH, STATUS_SET, ApiKeys, account_for
 from meridian_desktop.key_services import (
     FILE_UNREADABLE_TEXT,
     NO_CHECK_TEXT,
@@ -80,11 +80,11 @@ def _all_text(widget: QWidget) -> str:
     return "\n".join(parts)
 
 
-def _write(tmp_path: Path, content) -> str:
+def _write(tmp_path: Path, content, name: str = "my-keys.json") -> str:
     """Write the keys file under tmp_path and return its path. A dict is written as JSON; text is written as it is."""
     folder = tmp_path / "keys"
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / "my-keys.json"
+    path = folder / name
     text = content if isinstance(content, str) else json.dumps(content)
     path.write_text(text, encoding="utf-8")
     return str(path)
@@ -138,8 +138,8 @@ def test_an_empty_object_lists_no_names_and_is_not_a_refusal(tmp_path):
     assert read_names(_write(tmp_path, {})) == FileNames(names=(), problem=None)
 
 
-@pytest.mark.parametrize("content", ['["OpenAI"]', '"sk-fake"', "", "{not json"])
-def test_a_file_that_is_not_a_json_object_is_refused_with_a_count_and_no_value(tmp_path, content):
+@pytest.mark.parametrize("content", ['{"OpenAI": "sk-fake"', '{"OpenAI": "sk-fake"} trailing', "{not json"])
+def test_a_brace_file_that_is_not_valid_json_is_refused_with_a_count_and_no_value(tmp_path, content):
     listing = read_names(_write(tmp_path, content))
 
     assert listing.names == ()
@@ -238,6 +238,234 @@ def test_listing_and_checking_never_write_the_file(tmp_path):
     read_names(path)
     read_value(path, "OpenAI")
     read_names(str(tmp_path / "gone.json"))
+
+    assert _state(path) == before
+
+
+# ----------------------------------------------------------- the NAME=VALUE format
+
+
+REFUSED_ENV_LINES = [
+    f"={FAKE_VALUE}",
+    f"Bad/Name={FAKE_VALUE}",
+    f"{'N' * (MAX_NAME_LENGTH + 1)}={FAKE_VALUE}",
+    "Blank=   ",
+    'Quoted=""',
+    f"Long={'x' * (MAX_SECRET_LENGTH + 1)}",
+]
+
+
+def test_a_name_equals_value_file_lists_its_names_in_file_order_and_no_value(tmp_path):
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE}\nAnthropic={FAKE_VALUE_TWO}\n", name="my-keys.env")
+
+    listing = read_names(path)
+
+    assert listing == FileNames(names=("OpenAI", "Anthropic"), problem=None)
+    assert FAKE_VALUE not in repr(listing) and FAKE_VALUE_TWO not in repr(listing)
+
+
+@pytest.mark.parametrize("content", ["", "# nothing yet\n\n   \n"])
+def test_an_empty_or_comment_only_name_equals_value_file_lists_no_names_and_is_not_a_refusal(tmp_path, content):
+    assert read_names(_write(tmp_path, content, name="my-keys.env")) == FileNames(names=(), problem=None)
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("my-keys.json", json.dumps({"OpenAI": f"  {FAKE_VALUE}  "})),
+        ("my-keys.env", f'OpenAI="  {FAKE_VALUE}  "\n'),
+    ],
+)
+def test_a_check_reads_the_same_stripped_value_from_either_format(tmp_path, name, text):
+    path = _write(tmp_path, text, name=name)
+
+    assert read_value(path, "OpenAI") == FAKE_VALUE, "the value comes back stripped of its spaces in either format"
+    assert read_value(path, "openai") == FAKE_VALUE, "a name matches by its slug"
+    assert read_value(path, "Anthropic") is None
+
+
+def test_comments_blank_lines_spaces_and_quotes_are_handled_in_a_name_equals_value_file(tmp_path):
+    text = (
+        "# keys for the desk\n"
+        "# Retired=sk-fake-keys-file-0002\n"
+        "\n"
+        "   # an indented comment is still a comment\n"
+        f"  OpenAI  =  {FAKE_VALUE}  \n"
+        f'Anthropic="{FAKE_VALUE_TWO}"\n'
+        "Gemini='  spaced inside quotes  '\n"
+        "\r\n"
+        "Mistral=abc=def\n"
+    )
+    path = _write(tmp_path, text, name="my-keys.env")
+
+    assert read_names(path) == FileNames(names=("OpenAI", "Anthropic", "Gemini", "Mistral"), problem=None)
+    assert read_value(path, "OpenAI") == FAKE_VALUE, "spaces at both ends of the name and the value are stripped"
+    assert read_value(path, "Anthropic") == FAKE_VALUE_TWO, "one matching pair of double quotes is removed"
+    assert read_value(path, "Gemini") == "spaced inside quotes", "spaces inside quotes are stripped as a value is"
+    assert read_value(path, "Mistral") == "abc=def", "the value keeps any = after its first one"
+    assert read_value(path, "Retired") is None, "a commented line names no key"
+
+
+def test_quotes_are_removed_only_as_a_matching_pair_and_nothing_else_is_interpreted(tmp_path):
+    text = (
+        'Alpha="one\'\n'  # mismatched quotes are kept
+        "Beta=${HOME}\n"  # no variable expansion
+        "Gamma=back\\nslash\n"  # no escapes
+        'Delta="it\'s"\n'  # a quote inside a matching pair is kept
+    )
+    path = _write(tmp_path, text, name="my-keys.env")
+
+    assert read_value(path, "Alpha") == "\"one'"
+    assert read_value(path, "Beta") == "${HOME}"
+    assert read_value(path, "Gamma") == "back\\nslash"
+    assert read_value(path, "Delta") == "it's"
+
+
+@pytest.mark.parametrize("line", ["just some words", FAKE_VALUE, '["OpenAI"]', '"sk-fake"'])
+def test_a_line_with_no_equals_sign_refuses_the_whole_file_with_a_count_and_no_text(tmp_path, line):
+    # A JSON array does not start with a brace, so it is read as NAME=VALUE lines, and its line has no =.
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE_TWO}\n{line}\nAnthropic=ok\n", name="my-keys.env")
+
+    listing = read_names(path)
+
+    assert listing.names == ()
+    assert "1 of 3 entries were refused" in listing.problem
+    for hidden in (line, FAKE_VALUE, FAKE_VALUE_TWO, "OpenAI", "Anthropic"):
+        assert hidden not in listing.problem, "a refusal shows neither the line nor a name or a value"
+    with pytest.raises(KeysFileError):
+        read_value(path, "OpenAI")
+
+
+@pytest.mark.parametrize("line", REFUSED_ENV_LINES)
+def test_an_invalid_name_or_value_refuses_the_whole_name_equals_value_file(tmp_path, line):
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE_TWO}\n{line}\n", name="my-keys.env")
+
+    listing = read_names(path)
+
+    assert listing.names == ()
+    assert "1 of 2 entries were refused" in listing.problem
+    for hidden in (FAKE_VALUE, FAKE_VALUE_TWO, "OpenAI", "Bad/Name", "Blank", "Quoted", "Long"):
+        assert hidden not in listing.problem
+
+
+def test_a_repeated_name_in_a_name_equals_value_file_is_refused_by_its_slug(tmp_path):
+    text = f"OpenAI={FAKE_VALUE}\nopenai={FAKE_VALUE_TWO}\nOpen AI={FAKE_VALUE}\nopen-ai={FAKE_VALUE_TWO}\n"
+
+    listing = read_names(_write(tmp_path, text, name="my-keys.env"))
+
+    assert listing.names == ()
+    assert "2 of 4 entries were refused" in listing.problem
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
+def test_a_built_in_name_in_a_name_equals_value_file_is_refused(tmp_path):
+    text = f"RunPod={FAKE_VALUE}\nrunpod={FAKE_VALUE_TWO}\nOpenAI=ok\n"
+
+    listing = read_names(_write(tmp_path, text, name="my-keys.env"))
+
+    assert listing.names == ()
+    assert "2 of 3 entries were refused" in listing.problem
+    assert "which has its own entry" in listing.problem
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
+def test_a_json_line_inside_a_name_equals_value_file_is_refused_whole(tmp_path):
+    text = f'OpenAI={FAKE_VALUE}\n{{"Anthropic": "{FAKE_VALUE_TWO}"}}\n'
+
+    listing = read_names(_write(tmp_path, text, name="my-keys.env"))
+
+    assert listing.names == ()
+    assert "1 of 2 entries were refused" in listing.problem
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
+def test_a_json_object_followed_by_name_equals_value_lines_is_refused_as_json(tmp_path):
+    text = '{"OpenAI": "%s"}\nAnthropic=%s\n' % (FAKE_VALUE, FAKE_VALUE_TWO)
+
+    listing = read_names(_write(tmp_path, text))
+
+    assert listing.names == ()
+    assert "0 entries were read" in listing.problem
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
+def test_a_name_equals_value_file_over_the_limit_is_refused_before_it_is_read(tmp_path):
+    lines = "".join(f"Key{index}=value-{index}\n" for index in range(4000))
+    path = tmp_path / "many.env"
+    path.write_bytes(lines.encode("utf-8"))
+    assert len(lines) > MAX_FILE_BYTES, "each line is valid, so only the size refuses the file"
+
+    listing = read_names(str(path))
+
+    assert listing.names == ()
+    assert "larger than" in listing.problem
+
+
+def test_a_name_equals_value_file_of_exactly_the_limit_is_read_and_one_byte_more_is_refused(tmp_path):
+    body = b"OpenAI=ok\n"
+    padding = b"#" + b" " * (MAX_FILE_BYTES - len(body) - 2) + b"\n"
+    path = tmp_path / "limit.env"
+
+    path.write_bytes(padding + body)
+    assert path.stat().st_size == MAX_FILE_BYTES
+    assert read_names(str(path)) == FileNames(names=("OpenAI",), problem=None)
+
+    path.write_bytes(padding + body + b" ")
+    assert "larger than" in read_names(str(path)).problem
+
+
+def test_a_file_that_is_not_utf8_text_is_refused_with_a_count_and_no_value(tmp_path):
+    plain = tmp_path / "plain.env"
+    plain.write_bytes(b"OpenAI=" + FAKE_VALUE.encode("utf-8") + b"\xff\n")
+    brace = tmp_path / "brace.json"
+    brace.write_bytes(b'{"OpenAI": "' + FAKE_VALUE.encode("utf-8") + b'\xff"}')
+
+    plain_listing = read_names(str(plain))
+    brace_listing = read_names(str(brace))
+
+    assert plain_listing.names == () and "is not UTF-8 text" in plain_listing.problem
+    assert brace_listing.names == () and "is not valid JSON" in brace_listing.problem
+    assert FAKE_VALUE not in plain_listing.problem and FAKE_VALUE not in brace_listing.problem
+
+
+def test_a_json_file_with_leading_spaces_and_a_byte_order_mark_still_loads(tmp_path):
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf \n" + json.dumps({"OpenAI": FAKE_VALUE}).encode("utf-8"))
+
+    assert read_names(str(path)) == FileNames(names=("OpenAI",), problem=None)
+    assert read_value(str(path), "OpenAI") == FAKE_VALUE
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("my-keys.json", '{"ZetaKey": "%s", "zetakey": "%s"}' % (FAKE_VALUE, FAKE_VALUE_TWO)),
+        ("my-keys.json", '{"Zeta/Key": "%s"}' % FAKE_VALUE),
+        ("my-keys.json", '{"ZetaKey": "%s"}' % ("y" * (MAX_SECRET_LENGTH + 1))),
+        ("my-keys.env", f"ZetaKey={FAKE_VALUE}\nzetakey={FAKE_VALUE_TWO}\n"),
+        ("my-keys.env", f"Zeta/Key={FAKE_VALUE}\n"),
+        ("my-keys.env", f"RunPod={FAKE_VALUE}\n"),
+        ("my-keys.env", f"{FAKE_VALUE} ZetaKey\n"),
+        ("my-keys.env", "ZetaKey=\n"),
+        ("my-keys.env", "ZetaKey=" + "y" * (MAX_SECRET_LENGTH + 1) + "\n"),
+    ],
+)
+def test_no_refusal_message_holds_a_name_or_a_value_in_either_format(tmp_path, name, text):
+    listing = read_names(_write(tmp_path, text, name=name))
+
+    assert listing.names == () and listing.problem
+    for hidden in ("ZetaKey", "zetakey", "Zeta/Key", FAKE_VALUE, FAKE_VALUE_TWO, "yyyy"):
+        assert hidden not in listing.problem
+
+
+def test_listing_and_checking_a_name_equals_value_file_never_write_it(tmp_path):
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE}\n", name="my-keys.env")
+    _pin(path)
+    before = _state(path)
+
+    read_names(path)
+    read_value(path, "OpenAI")
+    read_value(path, "Gone")
 
     assert _state(path) == before
 
@@ -367,7 +595,7 @@ def test_the_choose_dialog_opens_on_the_home_folder_and_a_cancel_changes_nothing
     assert section.findChild(QLabel, "keys-file-path").text() == NO_FILE_TEXT
 
 
-def test_the_choose_dialog_offers_json_files_only(qtbot, settings_path, monkeypatch):
+def test_the_choose_dialog_offers_json_and_name_equals_value_files_only(qtbot, settings_path, monkeypatch):
     asked: dict[str, object] = {}
 
     class FakeDialog:
@@ -381,7 +609,7 @@ def test_the_choose_dialog_offers_json_files_only(qtbot, settings_path, monkeypa
 
     _choose(section)
 
-    assert asked["names"] == "JSON files (*.json)", "the filter lists JSON files only"
+    assert asked["names"] == "Keys files (*.json *.env *.txt)", "the filter lists the two keys file formats only"
     assert "All files" not in asked["names"]
 
 
@@ -543,3 +771,41 @@ def test_the_file_is_never_written_by_choosing_checking_removing_or_stopping(qtb
     qtbot.waitUntil(lambda: section.findChild(QWidget, "keys-entry-anthropic") is None, timeout=5000)
 
     assert _state(path) == before
+
+
+def test_choosing_a_name_equals_value_file_lists_its_names_from_the_file(qtbot, settings_path, tmp_path):
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE}\nAnthropic={FAKE_VALUE_TWO}\n", name="my-keys.env")
+    backend = MemoryKeyring()
+    section = _section(qtbot, settings_path, backend, choose=_chooser(path))
+
+    _choose(section)
+
+    assert section.findChild(QLabel, "keys-entry-openai-status").text() == FROM_FILE_NOTE
+    assert section.findChild(QLabel, "keys-entry-anthropic-status").text() == FROM_FILE_NOTE
+    assert section.findChild(QLabel, "keys-file-status").text() == FILE_LISTED_MANY_TEXT.format(count=2)
+    assert SettingsStore(settings_path).load().settings.keys_file_path == path
+    assert backend.snapshot() == {}, "nothing is copied to the keychain"
+    assert FAKE_VALUE not in _all_text(section)
+    assert FAKE_VALUE not in settings_path.read_text(encoding="utf-8")
+
+
+def test_a_check_on_a_name_from_a_name_equals_value_file_reads_the_file(qtbot, settings_path, tmp_path):
+    path = _write(tmp_path, f"OpenAI={FAKE_VALUE}\n", name="my-keys.env")
+    transport = FakeTransport(200)
+    section = _section(qtbot, settings_path, MemoryKeyring(), transport=transport, choose=_chooser(path))
+    _choose(section)
+    result = section.findChild(QLabel, "keys-entry-openai-check-result")
+
+    section.findChild(QPushButton, "keys-entry-openai-check").click()
+    qtbot.waitUntil(lambda: result.text() == WORKS_TEXT, timeout=5000)
+
+    assert _header(transport.calls[0][0], "Authorization") == "Bearer " + FAKE_VALUE
+    assert FAKE_VALUE not in _all_text(section)
+
+
+def test_the_keys_block_describes_both_file_formats(qtbot, settings_path):
+    section = _section(qtbot, settings_path, MemoryKeyring())
+
+    intro = section.findChild(QLabel, "keys-file-intro").text()
+
+    assert "JSON object" in intro and "NAME=VALUE" in intro
