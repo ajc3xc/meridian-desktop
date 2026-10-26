@@ -1,7 +1,7 @@
 """Home tab: one status card for each part of Meridian, each checked on its own. Qt code, so it sits in ui/.
 
 The cards are the local Meridian server, the tunnel, the services (the LaTeX engine and the slot ports), Zotero, the
-AI clients and their tools, and the updates. Each card runs its check when the window first shows, again every five
+AI clients and their tools, the updates, and the Overleaf (LaTeX) card. Each card runs its check when the window first shows, again every five
 minutes while Home is showing, and when Check now is pressed. No button starts the first check. Each later show reads
 the quick cards (local, tunnel, services, Zotero) again, after SHOW_DEBOUNCE_MS. A runner action or a start check
 (RunnerActions.runnerStateChanged), from Home or Settings, reads the Local, Tunnel and Tools cards again, and a client
@@ -11,6 +11,11 @@ show. A check asked while a card's read runs waits for that read and then runs.
 The checks read only, with two exceptions the owner confirms first. The tunnel's and the local server's Start, Stop and
 Restart use the runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero
 panel uses. The Settings buttons only switch to the Settings tab.
+
+The Overleaf (LaTeX) card reads only the LaTeX engine's port: when Home is shown, and on Check now. It asks the engine
+about the Overleaf session only on a press of its Check button, once per press, and never on the timer or on show. Log in
+asks the engine to open a login window. Start engine asks first (No is the default), then starts the engine's starter.
+Nothing in this card stops a process.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -44,7 +49,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
 )
 
-from meridian_desktop import local_client, runner_client, zotero_client
+from meridian_desktop import local_client, overleaf_client, overleaf_engine, runner_client, zotero_client
 from meridian_desktop.client_setup_runner import COMMAND_TIMEOUT_SECONDS
 from meridian_desktop.home_status import (
     ACTION_CHECK_TOOLS,
@@ -52,14 +57,31 @@ from meridian_desktop.home_status import (
     ACTION_RELEASE_PAGE,
     ACTION_SETTINGS,
     CHECKING_HEADLINE,
+    LOGIN_FAILED_TEXT,
+    OVERLEAF_ENGINE_DOWN,
+    OVERLEAF_ENGINE_FAILED,
+    OVERLEAF_ENGINE_RUNNING,
+    OVERLEAF_ENGINE_UNCHECKED,
+    OVERLEAF_TITLE,
+    SESSION_CHECK_FAILED_TEMPLATE,
+    START_CANCELLED_TEXT,
+    START_FAILED_TEMPLATE,
+    START_QUESTION,
+    START_TITLE,
+    START_WORKING_TEXT,
+    TIME_FORMAT,
     CardView,
     LocalFacts,
+    OverleafFacts,
     RowView,
     ServiceFacts,
     checked_text,
     checking_view,
     failed_view,
     local_view,
+    overleaf_login_text,
+    overleaf_start_text,
+    overleaf_view,
     services_view,
     stalled_view,
     tools_view,
@@ -67,13 +89,14 @@ from meridian_desktop.home_status import (
     updates_view,
     zotero_view,
 )
-from meridian_desktop.latex_client import EngineStatus
+from meridian_desktop.latex_client import EngineStatus, address_text, port_text
 from meridian_desktop.runner_client import RunnerResult
 from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
+from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
 from meridian_desktop.ui.scope_controls import ScopeControls, local_gate, tunnel_gate
@@ -116,6 +139,12 @@ LAUNCHING_TEXT = "Launching Zotero..."
 LAUNCH_FAILED_TEXT = "Zotero did not launch ({}). Press Check now to see its state."
 API_READY_TEXT = "The local API answers now."
 API_NOT_READY_TEXT = "The local API is not answering yet. Zotero can take a little while to open. Press Check now in a moment."
+# Start engine waits this long for the engine's port after the starter runs, and looks again this often.
+START_WAIT_SECONDS = 8.0
+START_POLL_SECONDS = 0.25
+OVERLEAF_CHECK_TOOLTIP = "Sends your saved session to Overleaf once, to see if you are signed in."
+OVERLEAF_LOGIN_TOOLTIP = "Opens a login window in Chrome. Sign in there, then press Check."
+OVERLEAF_START_TOOLTIP = "Starts the LaTeX engine in the background. It asks first."
 
 # Card colours: a left border per tone. The tone is a property, so the colour follows the card's state. A card that has
 # focus (for Ctrl+C) shows it on its other three sides.
@@ -192,6 +221,59 @@ def _launch_zotero(client: Any, exe: str) -> tuple[str, bool]:
     line = client.start_zotero(exe)
     check = client.probe_api()
     return line, check.state == zotero_client.API_ON
+
+
+@dataclass(frozen=True)
+class OverleafProbe:
+    """What the Overleaf card learns from the engine's port: its address, whether it accepts a connection, and where its
+    starter is (None when that is not known). No Overleaf request is made for this."""
+
+    url: str
+    listening: bool
+    folder: Path | None
+
+
+def _overleaf_probe(store: SettingsStore, deps: OverleafDeps) -> OverleafProbe:
+    """The engine's port and starter folder. Runs on the thread pool. It never sends a request to Overleaf."""
+    url = store.load().settings.engine_url
+    return OverleafProbe(url=url, listening=bool(deps.listening(url)), folder=deps.folder())
+
+
+def _overleaf_session_read(store: SettingsStore, deps: OverleafDeps) -> Any:
+    """Ask the engine once about the saved Overleaf session. Runs on the thread pool, and only on a Check press."""
+    return deps.session(store.load().settings.engine_url)
+
+
+def _overleaf_login_read(store: SettingsStore, deps: OverleafDeps) -> Any:
+    """Ask the engine to open its login window. Runs on the thread pool, and only on a Log in press."""
+    return deps.login(store.load().settings.engine_url)
+
+
+def _overleaf_start_read(store: SettingsStore, deps: OverleafDeps, folder: Path) -> tuple[bool, str]:
+    """Start the engine's starter, then wait up to deps.wait_seconds for its port. Returns (running, reason). The reason is
+    fixed text, set only when the starter did not run. Runs on the thread pool, and only after the owner says yes."""
+    url = store.load().settings.engine_url
+    started = deps.start(folder)
+    if not started.started:
+        return False, started.reason
+    deadline = time.monotonic() + deps.wait_seconds
+    while True:
+        if deps.listening(url):
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, ""
+        time.sleep(START_POLL_SECONDS)
+
+
+def _default_overleaf_deps() -> OverleafDeps:
+    """The real LaTeX engine calls. Looked up when called, so a test can replace this function."""
+    return OverleafDeps(
+        listening=lambda url: overleaf_engine.engine_listening(url),
+        folder=lambda: overleaf_engine.engine_folder(),
+        start=lambda folder: overleaf_engine.start_engine(folder),
+        session=lambda url: overleaf_client.session_status(url),
+        login=lambda url: overleaf_client.start_login(url),
+    )
 
 
 # ----------------------------------------------------------------- one card
@@ -730,13 +812,35 @@ class _Card(QFrame):
 # ----------------------------------------------------------------- the tab
 
 @dataclass(frozen=True)
+class OverleafDeps:
+    """The LaTeX engine calls the Overleaf card makes. The window passes the real ones, and tests pass fakes.
+
+    ``listening(url)`` is whether the engine's port accepts a connection (overleaf_engine.engine_listening). ``folder()``
+    is where the engine's starter is, or None (overleaf_engine.engine_folder). ``start(folder)`` runs the starter
+    (overleaf_engine.start_engine). ``session(url)`` asks the engine once about the Overleaf session, and ``login(url)``
+    opens its login window (overleaf_client.session_status and start_login). ``confirm`` asks the owner yes or no before
+    Start engine (ask_yes_no, where No is the default and Escape is No). ``wait_seconds`` is how long Start engine waits
+    for the port.
+    """
+
+    listening: Callable[[str], bool]
+    folder: Callable[[], Path | None]
+    start: Callable[[Path], Any]
+    session: Callable[[str], Any]
+    login: Callable[[str], Any]
+    confirm: Callable[[QWidget, str, str], bool] = ask_yes_no
+    wait_seconds: float = START_WAIT_SECONDS
+
+
+@dataclass(frozen=True)
 class HomeDeps:
     """Everything the cards read or do. The window passes the real ones. Tests pass fakes and no socket is opened.
 
     ``probe`` is the local server's health probe (DataSources.probe). ``engine`` and ``ports`` are the LaTeX engine
     and slot port reads. ``tunnel`` is the runner's status call. ``actions`` holds the tunnel controls and the Zotero
     dialog's settings. ``zotero`` is the Zotero client module, or a fake with the same three calls. ``tools`` is the
-    one tools read. ``updates`` is the status bar's update notice, which holds the one startup check.
+    one tools read. ``updates`` is the status bar's update notice, which holds the one startup check. ``overleaf`` holds
+    the Overleaf card's LaTeX engine calls (None: the real ones).
     """
 
     store: SettingsStore
@@ -749,6 +853,7 @@ class HomeDeps:
     tools: Callable[[], ToolsStatus] | None = None
     updates: UpdateNoticeBar | None = None
     current_version: str = ""
+    overleaf: OverleafDeps | None = None
 
 
 class HomeTab(QWidget):
@@ -778,6 +883,18 @@ class HomeTab(QWidget):
         self._show_timer.timeout.connect(self._recheck_on_show)
         # Cards a runner action or a client setup change touched while Home was hidden. They read again on the next show.
         self._stale: set[_Card] = set()
+        # The Overleaf (LaTeX) card. Its jobs deliver to the shared object under this owner, and one job of each kind runs at
+        # a time (the kind is the job's generation). Nothing is read from the engine until the owner presses a button.
+        self._overleaf_deps = deps.overleaf if deps.overleaf is not None else _default_overleaf_deps()
+        self._overleaf_owner = object()
+        self._overleaf_engine = OVERLEAF_ENGINE_UNCHECKED
+        self._overleaf_url = ""
+        self._overleaf_folder: Path | None = None
+        self._overleaf_session: overleaf_client.SessionStatus | None = None
+        self._overleaf_checked = ""
+        self._overleaf_busy: set[str] = set()
+        self._overleaf_done: dict[str, Callable[[Any, str], None]] = {}
+        shared_delivery().delivered.connect(self._on_overleaf_delivered)
 
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -790,7 +907,7 @@ class HomeTab(QWidget):
         header.addStretch(1)
         self._check_now = QPushButton(CHECK_NOW_TEXT, self)
         self._check_now.setObjectName("home-check-now")
-        self._check_now.clicked.connect(lambda _checked=False: self.check_all())
+        self._check_now.clicked.connect(lambda _checked=False: self._check_now_pressed())
         header.addWidget(self._check_now)
         layout.addLayout(header)
         layout.addWidget(_label(self, "home-intro", INTRO_TEXT))
@@ -867,6 +984,7 @@ class HomeTab(QWidget):
             on_action=self._on_action,
             parent=container,
         )
+        self._overleaf = self._build_overleaf_card(container)
         for card, row, column in (
             (self._local, 0, 0),
             (self._tunnel, 0, 1),
@@ -874,12 +992,48 @@ class HomeTab(QWidget):
             (self._zotero, 1, 1),
             (self._updates, 2, 0),
             (self._tools, 2, 1),
+            (self._overleaf, 3, 0),
         ):
             grid.addWidget(card, row, column)
-        grid.setRowStretch(3, 1)
+        grid.setRowStretch(4, 1)
         if deps.updates is not None:
             deps.updates.resultChanged.connect(self._refresh_updates)
         self._refresh_updates()
+        self._refresh_overleaf()
+
+    def _build_overleaf_card(self, container: QWidget) -> _Card:
+        """The Overleaf (LaTeX) card: its status lines, then Check, Log in and Start engine in one row under them.
+
+        All three buttons are made here, and Start engine is hidden until it is offered, so the widget count does not depend
+        on the engine's state or on whether its folder is known. Nothing is read here.
+        """
+        card = _Card("overleaf", OVERLEAF_TITLE, work=None, render=None, on_action=self._on_action, parent=container)
+        row = QWidget(card)
+        row.setObjectName("home-overleaf-buttons")
+        flow = _ButtonFlow(ROW_GAP)
+        row.setLayout(flow)
+        self._overleaf_check_button = self._overleaf_button(
+            row, "home-overleaf-check", "Check", OVERLEAF_CHECK_TOOLTIP, self._on_overleaf_check
+        )
+        self._overleaf_login_button = self._overleaf_button(
+            row, "home-overleaf-login", "Log in", OVERLEAF_LOGIN_TOOLTIP, self._on_overleaf_login
+        )
+        self._overleaf_start_button = self._overleaf_button(
+            row, "home-overleaf-start-engine", "Start engine", OVERLEAF_START_TOOLTIP, self._on_overleaf_start
+        )
+        for button in (self._overleaf_check_button, self._overleaf_login_button, self._overleaf_start_button):
+            flow.addWidget(button)
+        self._overleaf_start_button.setVisible(False)
+        card.add_body(row)
+        return card
+
+    @staticmethod
+    def _overleaf_button(parent: QWidget, name: str, text: str, tooltip: str, on_click: Callable[[], None]) -> QPushButton:
+        button = QPushButton(text, parent)
+        button.setObjectName(name)
+        button.setToolTip(tooltip)
+        button.clicked.connect(lambda _checked=False: on_click())
+        return button
 
     def _controls_row(self) -> None:
         """The tunnel's and the local server's Start, Stop and Restart (ScopeControls, which asks first), and an Open
@@ -1042,6 +1196,139 @@ class HomeTab(QWidget):
             self._zotero.set_note(f"{line}\n{API_READY_TEXT if ready else API_NOT_READY_TEXT}")
         self._zotero.check()
 
+    def _check_now_pressed(self) -> None:
+        """Check now runs every card's check, and looks at the LaTeX engine's port again. It sends no Overleaf request."""
+        self.check_all()
+        self._check_overleaf_engine()
+
+    # ------------------------------------------------------------ the Overleaf (LaTeX) card
+
+    def _run_overleaf(self, kind: str, work: Callable[[], Any], done: Callable[[Any, str], None]) -> bool:
+        """Run one Overleaf job on the thread pool. One job of each kind runs at a time; a second one is not started.
+
+        ``done`` receives (value, failure) on the GUI thread, where failure is a class name or "".
+        """
+        if kind in self._overleaf_busy:
+            return False
+        self._overleaf_busy.add(kind)
+        self._overleaf_done[kind] = done
+        submit(self._overleaf_owner, kind, work)
+        self._refresh_overleaf()
+        return True
+
+    @Slot(object)
+    def _on_overleaf_delivered(self, item: object) -> None:
+        # Only this card's own jobs are kept. The kind names the job, so each answer reaches its own handler.
+        if not isinstance(item, Delivered) or item.owner is not self._overleaf_owner:
+            return
+        kind, (value, failure) = item.value
+        self._overleaf_busy.discard(kind)
+        done = self._overleaf_done.pop(kind, None)
+        if done is not None:
+            done(value, failure or "")
+        self._refresh_overleaf()
+
+    def _refresh_overleaf(self) -> None:
+        """Draw the card's status from what it holds, and show or enable its three buttons to match."""
+        busy = self._overleaf_busy
+        facts = OverleafFacts(
+            engine=self._overleaf_engine,
+            session=self._overleaf_session,
+            checked=self._overleaf_checked,
+            checking="session" in busy,
+            port=port_text(self._overleaf_url),
+        )
+        self._overleaf.show_view(overleaf_view(facts))
+        self._overleaf_check_button.setEnabled("session" not in busy)
+        self._overleaf_login_button.setEnabled("login" not in busy)
+        self._overleaf_start_button.setEnabled("start" not in busy)
+        offered = self._overleaf_engine == OVERLEAF_ENGINE_DOWN and self._overleaf_folder is not None
+        self._overleaf_start_button.setVisible(offered)
+
+    def _check_overleaf_engine(self) -> None:
+        """Look at the engine's port, and whether its starter folder is known. No request goes to the engine or to Overleaf."""
+        self._run_overleaf(
+            "engine",
+            partial(_overleaf_probe, self._deps.store, self._overleaf_deps),
+            self._overleaf_engine_done,
+        )
+
+    def _overleaf_engine_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, OverleafProbe):
+            self._overleaf_engine = OVERLEAF_ENGINE_FAILED
+            self._overleaf_folder = None
+            return
+        self._overleaf_url = value.url
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if value.listening else OVERLEAF_ENGINE_DOWN
+        self._overleaf_folder = value.folder
+
+    def _on_overleaf_check(self) -> None:
+        """Check: asks the engine once about the saved session. This is the card's only Overleaf request, one per press."""
+        self._run_overleaf(
+            "session",
+            partial(_overleaf_session_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_session_done,
+        )
+
+    def _overleaf_session_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, overleaf_client.SessionStatus):
+            self._overleaf_session = overleaf_client.SessionStatus(
+                overleaf_client.STATE_ERROR,
+                error=SESSION_CHECK_FAILED_TEMPLATE.format(failure or "unknown error"),
+            )
+        else:
+            self._overleaf_session = value
+        self._overleaf_checked = datetime.now().strftime(TIME_FORMAT)
+        if self._overleaf_session.state == overleaf_client.STATE_ENGINE_NOT_RUNNING:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+        elif failure == "":
+            # The engine answered, so it is running. A failed job says nothing about the engine, so the state stays.
+            self._overleaf_engine = OVERLEAF_ENGINE_RUNNING
+
+    def _on_overleaf_login(self) -> None:
+        """Log in: asks the engine to open its login window. The owner signs in there, then presses Check."""
+        self._run_overleaf(
+            "login",
+            partial(_overleaf_login_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_login_done,
+        )
+
+    def _overleaf_login_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, overleaf_client.LoginStatus):
+            self._overleaf.set_note(LOGIN_FAILED_TEXT)
+            return
+        if value.reason == overleaf_client.REASON_ENGINE_NOT_RUNNING:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+        elif value.started or value.reason in overleaf_client.LOGIN_REASONS:
+            self._overleaf_engine = OVERLEAF_ENGINE_RUNNING
+        self._overleaf.set_note(overleaf_login_text(value))
+
+    def _on_overleaf_start(self) -> None:
+        """Start engine: asks first, and No is the default. Only a yes runs the engine's starter, which then runs in the
+        background, and the card waits a few seconds for the engine's port."""
+        folder = self._overleaf_folder
+        if folder is None:
+            return
+        question = START_QUESTION.format(address_text(self._overleaf_url) or "the engine address")
+        if not self._overleaf_deps.confirm(self, START_TITLE, question):
+            self._overleaf.set_note(START_CANCELLED_TEXT)
+            return
+        self._overleaf.set_note(START_WORKING_TEXT)
+        self._run_overleaf(
+            "start",
+            partial(_overleaf_start_read, self._deps.store, self._overleaf_deps, folder),
+            self._overleaf_start_done,
+        )
+
+    def _overleaf_start_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, tuple) or len(value) != 2:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+            self._overleaf.set_note(START_FAILED_TEMPLATE.format(failure or "no result"))
+            return
+        running, reason = value
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
+        self._overleaf.set_note(overleaf_start_text(bool(running), str(reason), self._overleaf_deps.wait_seconds))
+
     # ------------------------------------------------------------ events
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
@@ -1054,6 +1341,8 @@ class HomeTab(QWidget):
             self.check_all()
         else:
             self._show_timer.start()
+        # The engine's port is looked at each time Home is shown. The Overleaf session is not read here.
+        self._check_overleaf_engine()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt naming
         super().hideEvent(event)
@@ -1066,7 +1355,9 @@ __all__ = [
     "CHECK_INTERVAL_SECONDS",
     "CHECK_NOW_TEXT",
     "SHOW_DEBOUNCE_MS",
+    "START_WAIT_SECONDS",
     "STALL_SECONDS",
     "HomeDeps",
     "HomeTab",
+    "OverleafDeps",
 ]

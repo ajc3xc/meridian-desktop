@@ -350,10 +350,13 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # given the bridge and the Local URL reader (run/desk-bridge-updater). It is one more QPushButton, and one more
 # QAbstractButton, on the Settings page and in the main window, so each count goes up by one more. The Settings page
 # now holds 37 QPushButtons and 42 buttons in all, and the main window holds 59 QPushButtons and 78 buttons in all.
+# The Overleaf (LaTeX) card on Home (run/desk-overleaf-login) adds four push buttons to the main window, and so four
+# QAbstractButtons: Check, Log in and Start engine, plus the card's own action button, which the card keeps hidden as every
+# card does. The Settings page does not change. The main window now holds 63 QPushButtons and 82 buttons in all.
 SETTINGS_PUSH_BUTTONS = 37
 SETTINGS_BUTTONS = 42
-MAIN_WINDOW_PUSH_BUTTONS = 59
-MAIN_WINDOW_BUTTONS = 78
+MAIN_WINDOW_PUSH_BUTTONS = 63
+MAIN_WINDOW_BUTTONS = 82
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):

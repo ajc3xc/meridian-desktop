@@ -148,6 +148,30 @@ def no_loopback_probe_waits(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_overleaf_engine(monkeypatch):
+    """Home's Overleaf (LaTeX) card would ask the LaTeX engine on 127.0.0.1:8471, which is running on this computer.
+    No test may reach it. The card's default calls are replaced here by stand-ins that open no socket and start nothing:
+    the port reads as closed, the starter folder is unknown, and any session, login or start call fails the test. A test
+    that wants the card's behaviour passes its own OverleafDeps (HomeDeps.overleaf).
+    """
+    from meridian_desktop.ui import home_tab
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the LaTeX engine was called from a test; pass a fake OverleafDeps instead")
+
+    def stand_in_deps():
+        return home_tab.OverleafDeps(
+            listening=lambda url: False,
+            folder=lambda: None,
+            start=refuse,
+            session=refuse,
+            login=refuse,
+        )
+
+    monkeypatch.setattr(home_tab, "_default_overleaf_deps", stand_in_deps)
+
+
+@pytest.fixture(autouse=True)
 def no_modal_dialog(monkeypatch):
     """A modal dialog never returns offscreen, so a test that opens one by accident would hang the whole run.
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from meridian_desktop import local_client, tunnel_status, updater
+from meridian_desktop import local_client, overleaf_client, tunnel_status, updater
 from meridian_desktop.latex_client import (
     BACKUP_NOTE,
     ENGINE_CONNECTED,
@@ -418,7 +418,144 @@ def updates_view(current: str, result: object | None, *, enabled: bool, checking
     return CardView(headline=headline, detail=NOT_CHECKED_HEADLINE, tone=TONE_IDLE)
 
 
+# ----------------------------------------------------------------- overleaf (LaTeX)
+
+# The card reads the engine only on an explicit press, except for one local port check when Home is shown. Its states
+# are kept by HomeTab and shown here: unchecked (the port has not been looked at yet), running, down, or failed (the
+# check itself raised).
+OVERLEAF_TITLE = "Overleaf (LaTeX)"
+OVERLEAF_ENGINE_UNCHECKED = "unchecked"
+OVERLEAF_ENGINE_RUNNING = "running"
+OVERLEAF_ENGINE_DOWN = "down"
+OVERLEAF_ENGINE_FAILED = "failed"
+
+ENGINE_NOT_RUNNING_HEADLINE = "Engine not running"
+ENGINE_RUNNING_UNCHECKED_HEADLINE = "Engine running, session not checked yet"
+SIGNED_IN_HEADLINE = "Signed in"
+SESSION_EXPIRED_HEADLINE = "Session expired: click Log in"
+NO_SESSION_HEADLINE = "No saved session: click Log in"
+UNREACHABLE_OVERLEAF_HEADLINE = "Could not reach Overleaf: try again later"
+NO_CHROME_HEADLINE = "Chrome not found: install Chrome to log in"
+ENGINE_DOWN_DETAIL = (
+    "Nothing listens on port {}. LaTeX normally runs in Overleaf in your browser. The engine is only a backup, "
+    "and it is off until it starts."
+)
+ENGINE_FAILED_DETAIL = "The engine check failed unexpectedly. Press Check now to try again."
+OVERLEAF_UNCHECKED_DETAIL = (
+    "Check sends your saved session to Overleaf once, to see if you are signed in. Nothing is sent before you press Check."
+)
+SIGNED_IN_DETAIL = "Your saved Overleaf session works."
+SESSION_BAD_ANSWER_DETAIL = "The LaTeX engine sent an answer the desktop could not read. Press Check to try again."
+SESSION_CHECK_FAILED_TEMPLATE = "The session check failed unexpectedly ({}). Press Check to try again."
+
+LOGIN_OPENED_TEXT = "Login window opened: sign in there, then click Check."
+LOGIN_ALREADY_OPEN_TEXT = "The login window is already open."
+LOGIN_NO_CHROME_TEXT = "Chrome not found: install Chrome to log in."
+LOGIN_ENGINE_DOWN_TEXT = "Start the engine first."
+LOGIN_TIMEOUT_TEXT = "The LaTeX engine did not answer in time. Try again in a moment."
+LOGIN_FAILED_TEXT = "The login window could not be opened. Try again later."
+
+START_TITLE = "Start LaTeX engine"
+START_QUESTION = "Start the LaTeX engine on {} in the background?"
+START_CANCELLED_TEXT = "Start cancelled. Nothing was started."
+START_WORKING_TEXT = "Starting the LaTeX engine in the background..."
+START_RUNNING_TEXT = "The LaTeX engine is running. Press Check to see if you are signed in."
+START_TIMEOUT_TEMPLATE = "The LaTeX engine did not answer within {} seconds. Press Check now in a moment."
+START_FAILED_TEMPLATE = "The LaTeX engine could not be started ({})."
+
+
+@dataclass(frozen=True)
+class OverleafFacts:
+    """Everything the Overleaf card shows, as HomeTab holds it. ``session`` is the last Check answer, or None before one.
+    ``checked`` is the local time of that answer (HH:MM:SS), ``checking`` is True while a session check runs, and
+    ``port`` is the engine's port text."""
+
+    engine: str = OVERLEAF_ENGINE_UNCHECKED
+    session: overleaf_client.SessionStatus | None = None
+    checked: str = ""
+    checking: bool = False
+    port: str = ""
+
+
+def _engine_down_view(port: str) -> CardView:
+    return CardView(headline=ENGINE_NOT_RUNNING_HEADLINE, detail=ENGINE_DOWN_DETAIL.format(port), tone=TONE_IDLE)
+
+
+def _session_view(session: overleaf_client.SessionStatus, checked: str, port: str) -> CardView:
+    state = session.state
+    if state == overleaf_client.STATE_LOGGED_IN:
+        headline = f"{SIGNED_IN_HEADLINE} (checked {checked})" if checked else SIGNED_IN_HEADLINE
+        return CardView(headline=headline, detail=SIGNED_IN_DETAIL, tone=TONE_OK)
+    if state == overleaf_client.STATE_ENGINE_NOT_RUNNING:
+        return _engine_down_view(port)
+    if state == overleaf_client.STATE_UNKNOWN:
+        return CardView(headline=UNREACHABLE_OVERLEAF_HEADLINE, tone=TONE_ATTENTION)
+    if state in (overleaf_client.STATE_EXPIRED, overleaf_client.STATE_MISSING):
+        # A session that cannot be used because Chrome is missing is named as that, since installing Chrome is the fix.
+        if session.chrome_found is False:
+            return CardView(headline=NO_CHROME_HEADLINE, tone=TONE_ATTENTION)
+        headline = SESSION_EXPIRED_HEADLINE if state == overleaf_client.STATE_EXPIRED else NO_SESSION_HEADLINE
+        return CardView(headline=headline, tone=TONE_ATTENTION)
+    return CardView(
+        headline=COULD_NOT_CHECK_HEADLINE,
+        detail=session.error or SESSION_BAD_ANSWER_DETAIL,
+        tone=TONE_ATTENTION,
+    )
+
+
+def overleaf_view(facts: OverleafFacts) -> CardView:
+    """The Overleaf card's headline, detail and tone. Its buttons and their notes are HomeTab's."""
+    if facts.checking or facts.engine == OVERLEAF_ENGINE_UNCHECKED:
+        return CardView(headline=CHECKING_HEADLINE, tone=TONE_CHECKING)
+    if facts.engine == OVERLEAF_ENGINE_FAILED:
+        return CardView(headline=COULD_NOT_CHECK_HEADLINE, detail=ENGINE_FAILED_DETAIL, tone=TONE_ATTENTION)
+    if facts.engine == OVERLEAF_ENGINE_DOWN:
+        return _engine_down_view(facts.port)
+    if facts.session is None:
+        return CardView(
+            headline=ENGINE_RUNNING_UNCHECKED_HEADLINE,
+            detail=OVERLEAF_UNCHECKED_DETAIL,
+            tone=TONE_IDLE,
+        )
+    return _session_view(facts.session, facts.checked, facts.port)
+
+
+def overleaf_login_text(login: overleaf_client.LoginStatus) -> str:
+    """The one line the card shows after Log in, from the engine's answer."""
+    if login.started:
+        return LOGIN_OPENED_TEXT
+    reason = login.reason
+    if reason == overleaf_client.REASON_ALREADY_OPEN:
+        return LOGIN_ALREADY_OPEN_TEXT
+    if reason == overleaf_client.REASON_CHROME_MISSING:
+        return LOGIN_NO_CHROME_TEXT
+    if reason == overleaf_client.REASON_ENGINE_NOT_RUNNING:
+        return LOGIN_ENGINE_DOWN_TEXT
+    if reason == overleaf_client.REASON_TIMEOUT:
+        return LOGIN_TIMEOUT_TEXT
+    return LOGIN_FAILED_TEXT
+
+
+def overleaf_start_text(running: bool, reason: str, wait_seconds: float) -> str:
+    """The one line the card shows after Start engine. ``reason`` is the fixed text of a start that did not happen."""
+    if reason:
+        return reason
+    if running:
+        return START_RUNNING_TEXT
+    return START_TIMEOUT_TEMPLATE.format(int(wait_seconds))
+
+
 __all__ = [
+    "ENGINE_NOT_RUNNING_HEADLINE",
+    "OVERLEAF_ENGINE_DOWN",
+    "OVERLEAF_ENGINE_FAILED",
+    "OVERLEAF_ENGINE_RUNNING",
+    "OVERLEAF_ENGINE_UNCHECKED",
+    "OVERLEAF_TITLE",
+    "OverleafFacts",
+    "overleaf_login_text",
+    "overleaf_start_text",
+    "overleaf_view",
     "ACTION_CHECK_TOOLS",
     "ACTION_LAUNCH_ZOTERO",
     "ACTION_RELEASE_PAGE",

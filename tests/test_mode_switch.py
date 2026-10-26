@@ -60,7 +60,9 @@ START_WORDS = re.compile(r"\b(start|stop|restart)\b", re.IGNORECASE)
 RUNNER_CONTROL_NAME = re.compile(r"^(home-local|local|tunnel|zotero)-(start|stop|restart)$")
 # A button whose text says stop but which runs no process: Stop using this file, on the Keys block, only stops listing a
 # keys file's names. It is named by object name, so the text sweep still catches every other start-like button.
-NOT_A_RUNNER_CONTROL = frozenset({"keys-file-stop"})
+# Start engine, on the Overleaf (LaTeX) card, starts the LaTeX engine's own starter, not a Meridian scope. It asks first
+# with its own yes-or-no question (ask_yes_no, No by default), and it is not a scope control, so it is named here.
+NOT_A_RUNNER_CONTROL = frozenset({"keys-file-stop", "home-overleaf-start-engine"})
 
 
 # ------------------------------------------------------------------ fakes
