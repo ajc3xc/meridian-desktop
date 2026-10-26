@@ -35,6 +35,7 @@ from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text,
 from meridian_desktop.ui.zotero_panel import BRIDGE_NOT_CHECKED_TEXT, UPDATE_BUTTON_TEXT, ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 from meridian_desktop.zotero_bridge_client import STATE_UPDATE_READY, BridgeStatus
+from test_connection_status import FakeHostedTransport
 from test_zotero_panel import FakeZotero
 
 @pytest.fixture(autouse=True)
@@ -117,6 +118,7 @@ def _window(
     secrets=None,
     tools=None,
     transport=None,
+    hosted_transport=None,
     shown=False,
     update_root=None,
     zotero=None,
@@ -131,6 +133,8 @@ def _window(
         update_root=update_root,
         zotero=zotero,
         zotero_bridge=zotero_bridge,
+        # A hosted-mode window checks through a fake host unless a test passes its own, so no test here sends a request.
+        hosted_transport=hosted_transport if hosted_transport is not None else FakeHostedTransport(),
     )
     qtbot.addWidget(window)
     if shown:
@@ -320,7 +324,14 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
         get_token=lambda: FAKE_TOKEN,
         list_hosted=lambda url, token: [dict(PROJECT_ROW)],
     )
-    window = _window(qtbot, settings_path, sources=hosted_sources, secrets=secrets, shown=True)
+    window = _window(
+        qtbot,
+        settings_path,
+        sources=hosted_sources,
+        secrets=secrets,
+        shown=True,
+        hosted_transport=FakeHostedTransport(),
+    )
     _select(window, "Sessions")
     page = _page(window, "Sessions")
     table = page.findChild(QTableWidget, "sessions-table")
@@ -334,6 +345,30 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
         qtbot.waitUntil(lambda: page._in_flight is None, timeout=5000)  # noqa: SLF001
     assert (len(local_calls), len(hosted_calls)) == reads  # three hosted-mode ticks read nothing
     assert table.rowCount() == 1
+
+
+def test_a_hosted_window_with_no_transport_given_sends_no_real_request(qtbot, settings_path, hosted_transport_guard):
+    # No hosted_transport is passed, so the window's check takes the module default: the real urllib transport. In a
+    # test that default is the hosted transport guard (conftest), which records each call and refuses it before any
+    # request is sent. So the window's one check is refused, and nothing leaves the computer.
+    SettingsStore(settings_path).save(Settings(mode="hosted", local_url=LOCAL, hosted_url=HOSTED))
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    secrets.set_secret(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
+    window = MainWindow(
+        SettingsStore(settings_path),
+        secret_store=secrets,
+        data_sources=_sources(),
+        tools_status=_no_tools,
+    )
+    qtbot.addWidget(window)
+    qtbot.waitUntil(
+        lambda: window.connection_status_label.text().startswith("Hosted at usemeridian.us: not reachable."),
+        timeout=5000,
+    )
+    # The check stops at /health, which is sent with no token. The guard refused that call, so it is the only record.
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/health"]
+    # The refused call is what this test checks. Nothing was sent, so the record is cleared and the teardown passes.
+    hosted_transport_guard.calls.clear()
 
 
 # ----------------------------------------------------------- Tools

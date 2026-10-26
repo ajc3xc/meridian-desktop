@@ -359,8 +359,8 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # QPushButtons and 85 buttons in all.
 SETTINGS_PUSH_BUTTONS = 37
 SETTINGS_BUTTONS = 42
-MAIN_WINDOW_PUSH_BUTTONS = 64
-MAIN_WINDOW_BUTTONS = 85
+MAIN_WINDOW_PUSH_BUTTONS = 65  # one more: the mode bar's Test connection button
+MAIN_WINDOW_BUTTONS = 86
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):

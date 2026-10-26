@@ -4,6 +4,9 @@
 returns the parsed JSON list. The caller reads the token from the keychain and passes it in. This
 module never stores the token and never writes it to a file.
 
+``health_status`` sends one GET to {hosted URL}/health with no token and returns the HTTP status. It is the
+reachability step of the connection check (connection_status.py), and it never sends a credential.
+
 Refused before any request is made:
 - a base URL that is not https, unless its host is 127.0.0.1, localhost or ::1 (http is allowed there);
 - a base URL that holds a user name, a password, a query or a fragment;
@@ -36,6 +39,7 @@ from meridian_desktop import __version__
 from meridian_desktop.local_client import LOOPBACK_HOSTS
 
 HOSTED_TIMEOUT = 10.0
+HEALTH_PATH = "/health"
 PROJECTS_PATH = "/projects"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
@@ -288,7 +292,29 @@ def list_projects(
     return _rows(reply)
 
 
+def health_status(
+    base_url: str,
+    *,
+    transport: Transport | None = None,
+    timeout: float = HOSTED_TIMEOUT,
+) -> int:
+    """GET {base_url}/health with no Authorization header, and return the HTTP status of the reply.
+
+    The URL is checked first, so a refused URL sends no request. The body is not read past the usual cap, and
+    nothing in it is returned. A redirect is not followed. A timeout raises HostedTimeout, and a lost or refused
+    connection raises HostedUnreachable, as list_projects does. Any status that came back means the host answered.
+    """
+    base = validate_base_url(base_url)
+    request = urllib.request.Request(
+        base + HEALTH_PATH,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+    )
+    return _send(transport if transport is not None else _urllib_transport, request, timeout).status
+
+
 __all__ = [
+    "HEALTH_PATH",
     "HOSTED_TIMEOUT",
     "MAX_RESPONSE_BYTES",
     "PROJECTS_PATH",
@@ -302,6 +328,7 @@ __all__ = [
     "NotSignedIn",
     "Reply",
     "Transport",
+    "health_status",
     "list_projects",
     "usable_token",
     "validate_base_url",

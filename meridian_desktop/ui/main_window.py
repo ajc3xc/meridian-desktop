@@ -40,6 +40,16 @@ state (from one read-only status call, made when the mode is switched to Tunnel 
 Tunnel mode), the tools that need the tunnel, and how to start it by hand. The top bar has no
 control that starts, stops or restarts anything.
 
+Under the mode's description, the mode bar shows one connection line for the chosen mode, with the
+time it was checked, and a Test connection button beside it (connection_status.py holds the texts).
+Local shows the answer of the local server's /health. Hosted, with a token saved, reads the hosted
+host's /health with no token and then /projects with the token; with no token it sends nothing.
+Tunnel shows the tunnel status read the top bar makes, so the tunnel is read once. The line is
+checked once when the window opens, once each time the mode changes, and when Test connection is
+pressed, each on the thread pool. It starts, stops and restarts nothing. A window built with
+skip_connection_check (ui/app.py does so for a --smoke run) makes no check at all, so a smoke run
+sends nothing to the hosted host.
+
 The window opens inside the usable area of its screen (the screen less the taskbar), centred, with its title bar on
 screen: 1280 x 780 where that fits, and at most 90 percent of the usable width and height where it does not. When the
 window moves to another screen, or its screen's usable area changes, a window larger than the usable area shrinks to
@@ -59,6 +69,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QTabWidget,
@@ -66,7 +77,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import token_store, updater, zotero_bridge_client, zotero_client
+from meridian_desktop import connection_status, hosted_client, token_store, updater, zotero_bridge_client, zotero_client
+from meridian_desktop.connection_status import ConnectionResult
 from meridian_desktop.data_source import DataSources, ProjectsProvider
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH
@@ -74,6 +86,7 @@ from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
+from meridian_desktop.ui.connection_check import ConnectionCheckJob, ConnectionDone
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
@@ -244,6 +257,31 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
     return read
 
 
+def _connection_reader(
+    store: SettingsStore,
+    secrets: SecretStore,
+    local_probe: Callable[[str], str],
+    hosted_transport: hosted_client.Transport | None,
+    mode: str,
+) -> Callable[[], ConnectionResult]:
+    """The read one connection check makes for ``mode``. It runs on the worker thread and holds no window.
+
+    Local asks ``local_probe``, the probe the Projects tab uses, at the Local URL saved now. Hosted reads the hosted URL
+    saved now and the saved token. The token is read here, on the worker, and goes only to the hosted client. Tunnel is
+    not read here: its check is the top bar's tunnel status read.
+    """
+
+    def read() -> ConnectionResult:
+        settings = store.load().settings
+        if mode == connection_status.HOSTED:
+            return connection_status.probe_hosted(
+                settings.hosted_url, token_store.get_token(store=secrets), transport=hosted_transport
+            )
+        return connection_status.probe_local(settings.local_url, local_probe)
+
+    return read
+
+
 def _saved_projects(store: SettingsStore, sources: DataSources) -> ProjectsProvider:
     """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
 
@@ -310,10 +348,21 @@ class MainWindow(QMainWindow):
         update_root: Path | None = None,
         record_apps_entry: updater.AppsEntryWriter | None = None,
         zotero_bridge: Any | None = None,
+        hosted_transport: hosted_client.Transport | None = None,
+        skip_connection_check: bool = False,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
+        # The hosted connection check's transport (the /health and /projects reads of the mode bar). Tests pass a
+        # fake, so they send nothing. None means the real urllib transport, which is what the app uses.
+        self._hosted_transport = hosted_transport
+        # A window built for a --smoke run starts no connection check (see _start_connection_check). A normal launch
+        # leaves this off, so its check runs as before.
+        self._skip_connection_check = skip_connection_check
+        # Each connection check takes the next number. A result with an older number is dropped
+        # (see _on_connection_done).
+        self._connection_generation = 0
         # The Zotero bridge calls (status and update, both on the local server at the Local URL). Tests pass a fake.
         # The app uses the zotero_bridge_client module.
         self._zotero_bridge = zotero_bridge if zotero_bridge is not None else zotero_bridge_client
@@ -332,6 +381,8 @@ class MainWindow(QMainWindow):
         self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
         # Each tunnel check takes the next number. A result with an older number is dropped.
         self._tunnel_generation = 0
+        # Checks on the pool that have not delivered yet. Test connection is off while any is running.
+        self._checks_in_flight = 0
         # A plain token that identifies this window's checks. A result carries it, so the window keeps only its own.
         self._owner = object()
         shared_delivery().delivered.connect(self._on_delivered)
@@ -412,6 +463,9 @@ class MainWindow(QMainWindow):
         self._update_notice.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
+        # The connection line for the saved mode, checked once as the window opens. Tunnel mode's line is the check
+        # above.
+        self._start_connection_check()
         # The core search at start, and any later search or chosen core folder, changes what the tunnel check can reach.
         # A Tunnel mode window checks again once a search has finished.
         self._runner_actions.coreChanged.connect(self._on_core_changed)
@@ -619,6 +673,19 @@ class MainWindow(QMainWindow):
         self.tunnel_detail = self._mode_text.line("tunnel-mode-detail", "")
         column.addLayout(bar)
         column.addWidget(self._mode_text.label)
+        # The connection line for the chosen mode sits under the description, with its Test connection button beside it.
+        # It is one selectable line, so a drag over it and Ctrl+C copy it. Its text comes from connection_status.py.
+        connection = QHBoxLayout()
+        self.connection_status_label = make_selectable(QLabel(parent))
+        self.connection_status_label.setObjectName("connection-status")
+        self.connection_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.connection_status_label.setWordWrap(True)
+        connection.addWidget(self.connection_status_label, 1)
+        self.test_connection_button = QPushButton("Test connection", parent)
+        self.test_connection_button.setObjectName("mode-test-connection")
+        self.test_connection_button.clicked.connect(self._on_test_connection)
+        connection.addWidget(self.test_connection_button)
+        column.addLayout(connection)
         return column
 
     # ----------------------------------------------------------- tabs
@@ -667,6 +734,8 @@ class MainWindow(QMainWindow):
         # The Projects tab reads from the source the new mode names.
         self._projects.refresh()
         self._apply_mode_view(mode)
+        # The connection line for the new mode, checked once.
+        self._start_connection_check()
 
     def _apply_mode_view(self, mode: str) -> None:
         """Show the description of ``mode``, and the tunnel lines only in Tunnel mode.
@@ -698,6 +767,8 @@ class MainWindow(QMainWindow):
         delivery = shared_delivery()
         self.tunnel_status_label.setText(BAR_CHECKING_TEXT)
         self.tunnel_detail.setText(DEPENDENCY_TEXT)
+        self._show_connection(connection_status.CHECKING_TEXT)
+        self._check_started()
         QThreadPool.globalInstance().start(
             TunnelCheckJob(
                 lambda: read_tunnel_status(runner.status),
@@ -710,12 +781,86 @@ class MainWindow(QMainWindow):
         """Runs on the GUI thread. A result for another window, an older check, or one from before a mode change is dropped."""
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
+        # Every check on the pool delivers once, so the count is back to zero even when its result is dropped below.
+        self._check_delivered()
+        if isinstance(item.value, ConnectionDone):
+            self._on_connection_done(item.value)
+            return
         generation, (status, failure) = item.value
         if generation != self._tunnel_generation or self._saved_mode != TUNNEL_MODE:
             return  # an older check, or the mode changed after this check started
         line, detail = bar_texts(status, failure)
         self.tunnel_status_label.setText(line)
         self.tunnel_detail.setText(detail)
+        # The tunnel's connection line is this same read, so the tunnel is read once per check.
+        if status is None:
+            self._show_connection(connection_status.CHECK_FAILED_TEXT)
+        else:
+            self._show_connection(connection_status.status_text(connection_status.tunnel_result(status)))
+
+    # ----------------------------------------------------------- connection line
+
+    def _show_connection(self, text: str) -> None:
+        """Show the mode bar's connection line. The same text again is left alone, so a selection in it stays."""
+        set_label_text(self.connection_status_label, text)
+
+    def _check_started(self) -> None:
+        """One check is now on the pool. Test connection is off until every check on the pool has delivered."""
+        self._checks_in_flight += 1
+        self.test_connection_button.setEnabled(False)
+
+    def _check_delivered(self) -> None:
+        """One check on the pool has delivered, whether or not its result is shown. Test connection is on at zero.
+
+        A check that a mode change makes stale still delivers, so the count reaches zero and the button comes back on.
+        """
+        self._checks_in_flight = max(0, self._checks_in_flight - 1)
+        self.test_connection_button.setEnabled(self._checks_in_flight == 0)
+
+    def _start_connection_check(self) -> None:
+        """One read-only check of the chosen mode's connection, on the thread pool. The UI thread never waits on it.
+
+        Local and Hosted are checked here. Tunnel has no check of its own: its line is the top bar's tunnel status read
+        (_start_tunnel_check), so each check reads the tunnel once. The job holds the stores, the probe and the owner
+        token, never the window. Its result comes back to _on_delivered on the GUI thread.
+
+        A window built with skip_connection_check starts no check here, from any caller, so it sends no request.
+        """
+        if self._saved_mode == TUNNEL_MODE or self._skip_connection_check:
+            return
+        self._connection_generation += 1
+        generation = self._connection_generation
+        mode = self._saved_mode
+        owner = self._owner
+        delivery = shared_delivery()
+        self._show_connection(connection_status.CHECKING_TEXT)
+        read = _connection_reader(self._store, self._secrets, self._sources.probe, self._hosted_transport, mode)
+
+        def deliver(result: ConnectionResult | None) -> None:
+            delivery.delivered.emit(Delivered(owner, ConnectionDone(generation, mode, result)))
+
+        self._check_started()
+        QThreadPool.globalInstance().start(ConnectionCheckJob(read, deliver))
+
+    @Slot()
+    def _on_test_connection(self) -> None:
+        """Test connection: one check of the chosen mode, now. Tunnel mode makes the read its top bar makes.
+
+        A window built with skip_connection_check makes no check from here in any mode, so a smoke run starts none.
+        """
+        if self._saved_mode == TUNNEL_MODE:
+            if not self._skip_connection_check:
+                self._start_tunnel_check()
+        else:
+            self._start_connection_check()
+
+    def _on_connection_done(self, done: ConnectionDone) -> None:
+        """Show a finished connection check. A result from an older check, or from another mode, is dropped."""
+        if done.generation != self._connection_generation or done.mode != self._saved_mode:
+            return
+        self._show_connection(
+            connection_status.CHECK_FAILED_TEXT if done.result is None else connection_status.status_text(done.result)
+        )
 
     def show_launch_notes(self, text: str) -> None:
         """Show what the launch-time starts did, on the status bar. Called on the GUI thread by ui/runner_actions.LaunchStarts."""

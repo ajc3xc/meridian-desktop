@@ -667,6 +667,11 @@ def test_the_new_labels_are_plain_selectable_text(qtbot, settings_path):
 LAUNCH_TOKEN = "sk_meridian_FAKE-mode-bar-0009"
 
 
+def _offline_hosted(request, timeout):
+    """A hosted transport with no network. The mode bar's connection check reads it as not reachable, sends nothing."""
+    raise OSError("offline in tests")
+
+
 def _launch_window(qtbot, settings_path, *, with_token):
     """A window started the way app.main starts it: the launch mode is resolved first, from a keychain with one token or none."""
     secrets = KeyringSecretStore(backend=MemoryKeyring())
@@ -679,6 +684,7 @@ def _launch_window(qtbot, settings_path, *, with_token):
         secret_store=secrets,
         data_sources=_window_sources(None),
         tunnel_runner=None,
+        hosted_transport=_offline_hosted,
     )
     qtbot.addWidget(window)
     return window

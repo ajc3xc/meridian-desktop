@@ -96,7 +96,8 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
 
     # The update check runs at a real start and every six hours after, through the urllib transport. A --smoke run
     # passes no transport and no install folder, so it makes no request and stages nothing. The window still honours
-    # the check_updates setting.
+    # the check_updates setting. The mode bar's connection check is skipped too (skip_connection_check), so a smoke run
+    # sends nothing to the hosted host even with a token saved.
     # One set of runner controls is shared by every tab that starts or stops a runner, so one core search serves them all.
     actions = RunnerActions(store)
     window = MainWindow(
@@ -105,6 +106,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         update_root=None if smoke else install.install_dir(os.environ),
         record_apps_entry=None if smoke else install.apps_entry_recorder(os.environ),
         runner_actions=actions,
+        skip_connection_check=smoke,
     )
     tray = MeridianTray(window, app)
     window.show()
