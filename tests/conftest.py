@@ -166,6 +166,8 @@ def no_overleaf_engine(monkeypatch):
             start=refuse,
             session=refuse,
             login=refuse,
+            # Every question the card asks is answered No, the default, so nothing is saved unless a test answers Yes itself.
+            confirm=lambda parent, title, text: False,
         )
 
     monkeypatch.setattr(home_tab, "_default_overleaf_deps", stand_in_deps)

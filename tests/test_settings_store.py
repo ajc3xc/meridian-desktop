@@ -463,6 +463,37 @@ def test_an_engine_folder_that_is_not_text_warns_and_is_empty(settings_path):
     assert result.warning is not None and "engine_folder" in result.warning
 
 
+def test_the_confirmed_engine_folder_defaults_to_not_confirmed_without_a_warning(settings_path):
+    assert Settings().confirmed_engine_folder == ""
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.confirmed_engine_folder == ""
+
+
+def test_confirmed_engine_folder_round_trips_and_is_written_only_when_confirmed(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    chosen = str(tmp_path / "engine")
+    store.save(Settings(engine_folder=chosen, confirmed_engine_folder=chosen))
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["engine_folder"] == chosen
+    assert saved["confirmed_engine_folder"] == chosen
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == chosen
+    assert result.settings.confirmed_engine_folder == chosen
+    # A folder that was chosen but never confirmed has no confirmed key, so a file written before this key is unchanged.
+    store.save(Settings(engine_folder=chosen))
+    assert "confirmed_engine_folder" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.confirmed_engine_folder == ""
+
+
+def test_a_confirmed_engine_folder_that_is_not_text_warns_and_is_empty(settings_path):
+    _write(settings_path, json.dumps({"confirmed_engine_folder": 5}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.confirmed_engine_folder == ""
+    assert result.warning is not None and "confirmed_engine_folder" in result.warning
+
+
 # ----------------------------------------------------------- the runner control switches (contract rule 10, amendments A to C)
 
 CONTROL_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")

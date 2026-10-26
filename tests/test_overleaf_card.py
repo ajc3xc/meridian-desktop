@@ -9,6 +9,8 @@ import json
 import re
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QTimer
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import QCheckBox, QFrame, QLabel, QMessageBox, QPushButto
 
 from meridian_desktop import local_client, overleaf_client, overleaf_engine
 from meridian_desktop.home_status import (
+    AUTO_START_CONFIRM_TITLE,
     LOGIN_ALREADY_OPEN_TEXT,
     LOGIN_ENGINE_DOWN_TEXT,
     LOGIN_NO_CHROME_TEXT,
@@ -23,7 +26,11 @@ from meridian_desktop.home_status import (
     START_CANCELLED_TEXT,
     START_RUNNING_TEXT,
     START_TITLE,
+    auto_start_question,
+    engine_folder_question,
+    engine_start_question,
 )
+from meridian_desktop.runner_controls import LOG_NAME as CONTROL_LOG_NAME
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import home_tab
 from meridian_desktop.ui.home_tab import CHECK_INTERVAL_MS, HomeDeps, HomeTab, OverleafDeps
@@ -34,8 +41,17 @@ LOOPBACK = "http://127.0.0.1:8471"
 SENTINEL = "SENTINEL-cookie-7f3a9c"
 CHECKING = "Checking..."
 TITLE = "Overleaf (LaTeX)"
-QUESTION = "Start the LaTeX engine on 127.0.0.1:8471 in the background?"
+START_DIALOG_HEAD = "Start the LaTeX engine on 127.0.0.1:8471 in the background?"
+# The command every start dialog names. It is written out here, so a change to the words shows in a test.
+COMMAND = "wscript.exe //B //nologo start_server_hidden.vbs"
 HEADLINE_TIME = re.compile(r"^Signed in \(checked \d{2}:\d{2}:\d{2}\)$")
+
+
+def _assert_names_the_command(text, folder):
+    """A start dialog names the exact command, the working folder and the starter path that a start from ``folder`` runs."""
+    assert f"Command: {COMMAND}" in text
+    assert f"Working folder: {Path(folder)}" in text
+    assert f"Starter: {Path(folder) / overleaf_engine.STARTER_NAME}" in text
 
 
 # ----------------------------------------------------------------- fakes
@@ -422,6 +438,8 @@ def test_start_engine_runs_the_starter_detached_from_its_folder_and_returns_at_o
     command, kwargs = launches[0]
     assert command[0].lower().endswith("wscript.exe")
     assert command[1:] == ["//B", "//nologo", "start_server_hidden.vbs"]
+    # The command the dialogs name is the command the starter is launched with, word for word.
+    assert " ".join(["wscript.exe", *command[1:]]) == overleaf_engine.COMMAND_TEXT
     assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["creationflags"] == overleaf_engine._DETACHED
     assert kwargs["stdin"] == subprocess.DEVNULL
@@ -633,7 +651,9 @@ def test_start_engine_asks_first_and_a_no_starts_nothing(qtbot, tmp_path):
     _wait_engine(qtbot, tab)
     _button(tab, "home-overleaf-start-engine").click()
     qtbot.waitUntil(lambda: _note(tab) == START_CANCELLED_TEXT, timeout=5000)
-    assert asked == [(START_TITLE, QUESTION)]
+    assert [title for title, _ in asked] == [START_TITLE]
+    assert asked[0][1].startswith(START_DIALOG_HEAD)
+    _assert_names_the_command(asked[0][1], tmp_path)
     assert engine.starts == []
 
 
@@ -653,7 +673,10 @@ def test_the_question_defaults_to_no_and_escape_is_no(qtbot, tmp_path, monkeypat
     _wait_engine(qtbot, tab)
     _button(tab, "home-overleaf-start-engine").click()
     qtbot.waitUntil(lambda: _note(tab) == START_CANCELLED_TEXT, timeout=5000)
-    assert seen == {"default": "No", "escape": "No", "text": QUESTION}
+    assert seen["default"] == "No"
+    assert seen["escape"] == "No"
+    assert seen["text"].startswith(START_DIALOG_HEAD)
+    _assert_names_the_command(seen["text"], tmp_path)
     assert engine.starts == []
 
 
@@ -786,6 +809,16 @@ START_BOX = "Start the engine when Meridian opens"
 CHECK_BOX = "Check the Overleaf session when Meridian opens"
 CHOOSE = "Choose engine folder"
 SIGNED_IN = overleaf_client.SessionStatus("logged_in", chrome_found=True)
+# Amendment G's new words: the folder must be confirmed, the confirmations, and the cancelled switch.
+ENGINE_FOLDER_NOT_CONFIRMED = "Engine folder not confirmed: confirm it in this card before the engine starts at launch"
+FOLDER_CONFIRM_TITLE = "Confirm the LaTeX engine folder"
+FOLDER_CONFIRM_CANCELLED = "Engine folder not saved: it was not confirmed. Nothing was saved."
+AUTO_START_NOT_TURNED_ON = "Start at launch stays off. Nothing was saved."
+# The control log line for an engine start: the local time, then the program and the outcome, and the failure class name only
+# when there is one. There is never a pid, because start_engine reports none.
+ENGINE_PROGRAM = 'program="wscript.exe start_server_hidden.vbs"'
+ENGINE_STARTED_REST = f'{ENGINE_PROGRAM} outcome="started"'
+ENGINE_NOT_STARTED_REST = f'{ENGINE_PROGRAM} outcome="not started"'
 
 
 def _save_settings(tmp_path, **changes):
@@ -797,9 +830,10 @@ def _saved(tmp_path):
     return SettingsStore(tmp_path / "settings.json").load().settings
 
 
-def _launch_deps(tmp_path, engine, *, choose=None, wait=0.5):
-    """Home's dependencies with the real folder rule: the engine folder is the one saved in settings, if it holds the starter."""
-    deps = _deps(tmp_path, engine, choose=choose, wait=wait)
+def _launch_deps(tmp_path, engine, *, choose=None, wait=0.5, confirm=None):
+    """Home's dependencies with the real folder rule: the engine folder is the one saved in settings, if it holds the starter.
+    ``confirm`` answers the card's questions. Without one, the real question is shown, and its default is No."""
+    deps = _deps(tmp_path, engine, choose=choose, wait=wait, confirm=confirm)
     return dataclasses.replace(deps, overleaf=dataclasses.replace(deps.overleaf, folder=overleaf_engine.engine_folder))
 
 
@@ -818,6 +852,18 @@ def _checkbox(tab, name):
     box = _card(tab).findChild(QCheckBox, name)
     assert box is not None, name
     return box
+
+
+def _control_lines(tmp_path):
+    """The control log's lines, in the test's own temp folder beside its settings file. Empty when none was written."""
+    path = tmp_path / CONTROL_LOG_NAME
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _stamp_and_rest(line):
+    """Split one control line into its time and the rest of the line."""
+    stamp, rest = line.split(" ", 1)
+    return stamp, rest
 
 
 def test_showing_home_alone_runs_no_launch_check(qtbot, tmp_path):
@@ -861,9 +907,9 @@ def test_a_running_engine_is_not_started_again_at_launch(qtbot, tmp_path):
     assert engine.session_calls == [LOOPBACK]
 
 
-def test_a_down_engine_with_a_folder_is_started_once_and_then_checked(qtbot, tmp_path):
+def test_a_down_engine_with_a_confirmed_folder_is_started_once_and_then_checked(qtbot, tmp_path):
     folder = _folder_with_starter(tmp_path)
-    _save_settings(tmp_path, engine_folder=str(folder))
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
     engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
     tab = _shown(qtbot, _launch_deps(tmp_path, engine))
     _launch(qtbot, tab)
@@ -875,7 +921,7 @@ def test_a_down_engine_with_a_folder_is_started_once_and_then_checked(qtbot, tmp
 
 def test_a_starter_that_never_brings_the_port_up_is_reported_as_not_started(qtbot, tmp_path):
     folder = _folder_with_starter(tmp_path)
-    _save_settings(tmp_path, engine_folder=str(folder))
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
     engine = FakeEngine(up=False, start_brings_up=False, session=SIGNED_IN)
     tab = _shown(qtbot, _launch_deps(tmp_path, engine, wait=0.3))
     _launch(qtbot, tab)
@@ -887,7 +933,7 @@ def test_a_starter_that_never_brings_the_port_up_is_reported_as_not_started(qtbo
 
 def test_a_launch_start_that_raises_says_the_class_name_and_never_the_message(qtbot, tmp_path):
     folder = _folder_with_starter(tmp_path)
-    _save_settings(tmp_path, engine_folder=str(folder))
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
     engine = FakeEngine(up=False, start_error=PermissionError(SENTINEL), session=SIGNED_IN)
     tab = _shown(qtbot, _launch_deps(tmp_path, engine))
     _launch(qtbot, tab)
@@ -899,7 +945,7 @@ def test_a_launch_start_that_raises_says_the_class_name_and_never_the_message(qt
 
 def test_the_card_says_starting_while_the_starter_runs_and_holds_the_start_button(qtbot, tmp_path):
     folder = _folder_with_starter(tmp_path)
-    _save_settings(tmp_path, engine_folder=str(folder))
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
     gate = threading.Event()
     engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN, start_gate=gate)
     tab = _shown(qtbot, _launch_deps(tmp_path, engine))
@@ -990,16 +1036,80 @@ def test_choosing_a_folder_without_the_starter_saves_nothing_and_says_so(qtbot, 
 
 
 def test_choosing_a_folder_with_the_starter_saves_it_and_starts_nothing(qtbot, tmp_path):
+    # Amendment G: the folder is saved only after the owner says yes to the confirmation. A yes saves it as both keys.
     folder = _folder_with_starter(tmp_path)
     engine = FakeEngine(up=False, start_brings_up=True)
-    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder)))
+    asked = []
+
+    def confirm(parent, title, text):
+        asked.append((title, text))
+        return True
+
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder), confirm=confirm))
     _wait_engine(qtbot, tab)
     _button(tab, "home-overleaf-choose-folder").click()
     qtbot.waitUntil(lambda: _note(tab) == FOLDER_SAVED, timeout=5000)
     assert _saved(tmp_path).engine_folder == str(folder)
+    assert _saved(tmp_path).confirmed_engine_folder == str(folder)
+    assert len(asked) == 1
+    assert asked[0][0] == FOLDER_CONFIRM_TITLE
     assert engine.starts == []
     assert engine.session_calls == []
     assert not _button(tab, "home-overleaf-start-engine").isHidden()
+
+
+def test_choosing_a_folder_and_saying_no_saves_nothing_and_says_so(qtbot, tmp_path):
+    saved = _folder_with_starter(tmp_path, name="saved")
+    chosen = _folder_with_starter(tmp_path, name="chosen")
+    _save_settings(tmp_path, engine_folder=str(saved), confirmed_engine_folder=str(saved))
+    engine = FakeEngine(up=False, start_brings_up=True)
+    tab = _shown(
+        qtbot,
+        _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(chosen), confirm=lambda parent, title, text: False),
+    )
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.waitUntil(lambda: _note(tab) == FOLDER_CONFIRM_CANCELLED, timeout=5000)
+    # The folder that was saved and confirmed before is still the one, and nothing about the new choice is kept.
+    assert _saved(tmp_path).engine_folder == str(saved)
+    assert _saved(tmp_path).confirmed_engine_folder == str(saved)
+    assert engine.starts == []
+
+
+def test_choosing_a_folder_and_saying_no_writes_no_settings_file(qtbot, tmp_path):
+    chosen = _folder_with_starter(tmp_path)
+    tab = _shown(
+        qtbot,
+        _launch_deps(tmp_path, FakeEngine(up=False), choose=lambda parent, start_dir: str(chosen), confirm=lambda *a: False),
+    )
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.waitUntil(lambda: _note(tab) == FOLDER_CONFIRM_CANCELLED, timeout=5000)
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_the_folder_question_names_the_starter_path_and_defaults_to_no(qtbot, tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_exec(box, *args, **kwargs):
+        seen["default"] = box.defaultButton().text()
+        seen["escape"] = box.escapeButton().text()
+        seen["title"] = box.windowTitle()
+        seen["text"] = box.text()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    chosen = _folder_with_starter(tmp_path)
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False), choose=lambda parent, start_dir: str(chosen)))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-choose-folder").click()
+    qtbot.waitUntil(lambda: _note(tab) == FOLDER_CONFIRM_CANCELLED, timeout=5000)
+    assert seen["default"] == "No"
+    assert seen["escape"] == "No"
+    assert seen["title"] == FOLDER_CONFIRM_TITLE
+    assert str(chosen / overleaf_engine.STARTER_NAME) in seen["text"]
+    assert "wscript.exe //B //nologo" in seen["text"]
+    assert not (tmp_path / "settings.json").exists()
 
 
 def test_cancelling_the_folder_choice_changes_nothing(qtbot, tmp_path):
@@ -1045,10 +1155,344 @@ def test_no_cookie_token_or_path_text_shows_through_the_launch_or_the_folder_cho
     folder = _folder_with_starter(tmp_path, name=SENTINEL)
     _save_settings(tmp_path, engine_folder=str(folder))
     engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
-    tab = _shown(qtbot, _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder)))
+    tab = _shown(
+        qtbot,
+        _launch_deps(tmp_path, engine, choose=lambda parent, start_dir: str(folder), confirm=lambda parent, title, text: True),
+    )
     _launch(qtbot, tab)
     _button(tab, "home-overleaf-choose-folder").click()
     texts = _card_texts(tab)
     assert SENTINEL not in texts
     assert str(folder) not in texts
     assert str(tmp_path) not in texts
+
+
+# ----------------------------------------------------------------- Amendment G: the launch start needs a confirmed folder
+
+def test_a_saved_folder_that_is_not_confirmed_is_not_started_at_launch_and_the_card_says_why(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _note(tab) == ENGINE_FOLDER_NOT_CONFIRMED
+    assert engine.starts == []
+    assert engine.session_calls == []
+    assert _headline(tab) == "Engine not running"
+    # Nothing started, so nothing is logged, and the folder path is not on the card.
+    assert _control_lines(tmp_path) == []
+    assert str(folder) not in _card_texts(tab)
+
+
+def test_a_folder_confirmed_for_another_path_is_not_used_at_launch(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path, name="saved")
+    other = _folder_with_starter(tmp_path, name="other")
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(other))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _note(tab) == ENGINE_FOLDER_NOT_CONFIRMED
+    assert engine.starts == []
+
+
+def test_a_confirmed_folder_that_lost_its_starter_asks_for_a_folder_as_before(qtbot, tmp_path):
+    folder = tmp_path / "gone"
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _note(tab) == ENGINE_FOLDER_NOT_SET
+    assert engine.starts == []
+
+
+def test_each_launch_start_writes_one_control_line_and_the_session_check_writes_none(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert engine.starts == [folder]
+    assert engine.session_calls == [LOOPBACK]
+    lines = _control_lines(tmp_path)
+    assert len(lines) == 1
+    assert _stamp_and_rest(lines[0])[1] == ENGINE_STARTED_REST
+
+
+# ----------------------------------------------------------------- Amendment G: the launch-time switch asks first
+
+def test_turning_the_launch_start_on_and_cancelling_leaves_it_off(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_auto_start=False, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    asked = []
+
+    def confirm(parent, title, text):
+        asked.append((title, text))
+        return False
+
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False), confirm=confirm))
+    _wait_engine(qtbot, tab)
+    assert _checkbox(tab, "home-overleaf-auto-start").isChecked() is False
+    _checkbox(tab, "home-overleaf-auto-start").click()
+    qtbot.waitUntil(lambda: _note(tab) == AUTO_START_NOT_TURNED_ON, timeout=5000)
+    assert _checkbox(tab, "home-overleaf-auto-start").isChecked() is False
+    assert _saved(tmp_path).engine_auto_start is False
+    assert len(asked) == 1
+    assert asked[0][0] == AUTO_START_CONFIRM_TITLE
+    assert "Meridian will start the LaTeX engine when it opens" in asked[0][1]
+    assert str(folder) in asked[0][1]
+    _assert_names_the_command(asked[0][1], folder)
+
+
+def test_turning_the_launch_start_on_with_a_yes_saves_it_and_names_the_folder(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_auto_start=False, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    asked = []
+
+    def confirm(parent, title, text):
+        asked.append(text)
+        return True
+
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False), confirm=confirm))
+    _wait_engine(qtbot, tab)
+    _checkbox(tab, "home-overleaf-auto-start").click()
+    assert _saved(tmp_path).engine_auto_start is True
+    assert _checkbox(tab, "home-overleaf-auto-start").isChecked() is True
+    assert len(asked) == 1
+    assert str(folder) in asked[0]
+    assert "not confirmed" not in asked[0]
+    _assert_names_the_command(asked[0], folder)
+
+
+def test_turning_the_launch_start_off_needs_no_dialog_and_saves_at_once(qtbot, tmp_path):
+    asked = []
+
+    def confirm(parent, title, text):
+        asked.append(title)
+        return True
+
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False), confirm=confirm))
+    _wait_engine(qtbot, tab)
+    _checkbox(tab, "home-overleaf-auto-start").click()
+    assert asked == []
+    assert _saved(tmp_path).engine_auto_start is False
+    assert _checkbox(tab, "home-overleaf-auto-start").isChecked() is False
+
+
+def test_the_launch_start_question_defaults_to_no_and_says_when_no_folder_is_chosen(qtbot, tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_exec(box, *args, **kwargs):
+        seen["default"] = box.defaultButton().text()
+        seen["escape"] = box.escapeButton().text()
+        seen["text"] = box.text()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    _save_settings(tmp_path, engine_auto_start=False)
+    tab = _shown(qtbot, _launch_deps(tmp_path, FakeEngine(up=False)))
+    _wait_engine(qtbot, tab)
+    _checkbox(tab, "home-overleaf-auto-start").click()
+    qtbot.waitUntil(lambda: _note(tab) == AUTO_START_NOT_TURNED_ON, timeout=5000)
+    assert seen["default"] == "No"
+    assert seen["escape"] == "No"
+    assert "No engine folder is chosen yet" in seen["text"]
+    assert f"Command: {COMMAND}" in seen["text"]
+    assert _saved(tmp_path).engine_auto_start is False
+
+
+# ----------------------------------------------------------------- Amendment G: the control log, one line per start
+
+def test_each_manual_start_writes_one_control_line_with_the_time_program_and_outcome(qtbot, tmp_path):
+    engine = FakeEngine(up=False, folder=tmp_path, start_brings_up=True)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=lambda parent, title, text: True))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-start-engine").click()
+    qtbot.waitUntil(lambda: _note(tab) == START_RUNNING_TEXT, timeout=5000)
+    lines = _control_lines(tmp_path)
+    assert len(lines) == 1
+    stamp, rest = _stamp_and_rest(lines[0])
+    assert datetime.fromisoformat(stamp).utcoffset() is not None
+    assert rest == ENGINE_STARTED_REST
+
+
+def test_each_start_writes_its_own_line_so_two_starts_write_two(qtbot, tmp_path):
+    engine = FakeEngine(up=False, folder=tmp_path, start_brings_up=True)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=lambda parent, title, text: True))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-start-engine").click()
+    qtbot.waitUntil(lambda: _note(tab) == START_RUNNING_TEXT, timeout=5000)
+    _settle(qtbot, tab)
+    # A second start, asked and answered yes again, is a second start from the card, so it is a second line.
+    tab._on_overleaf_start()  # noqa: SLF001 - the card's own start handler, as its button calls it
+    qtbot.waitUntil(lambda: len(_control_lines(tmp_path)) == 2, timeout=5000)
+    _settle(qtbot, tab)
+    assert engine.starts == [tmp_path, tmp_path]
+    assert [_stamp_and_rest(line)[1] for line in _control_lines(tmp_path)] == [ENGINE_STARTED_REST, ENGINE_STARTED_REST]
+
+
+def test_a_start_that_does_not_bring_the_port_up_is_logged_as_not_started(qtbot, tmp_path):
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=False, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine, wait=0.3))
+    _launch(qtbot, tab)
+    lines = _control_lines(tmp_path)
+    assert len(lines) == 1
+    assert _stamp_and_rest(lines[0])[1] == ENGINE_NOT_STARTED_REST
+
+
+def test_a_failed_start_writes_its_class_name_and_never_its_message(qtbot, tmp_path):
+    failed = overleaf_engine.EngineStart(
+        False,
+        overleaf_engine.START_FAILED_TEXT.format("PermissionError"),
+        failure="PermissionError",
+    )
+    engine = FakeEngine(up=False, folder=tmp_path, start=failed)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=lambda parent, title, text: True))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-start-engine").click()
+    qtbot.waitUntil(lambda: _note(tab) == overleaf_engine.START_FAILED_TEXT.format("PermissionError"), timeout=5000)
+    lines = _control_lines(tmp_path)
+    assert len(lines) == 1
+    assert _stamp_and_rest(lines[0])[1] == f"{ENGINE_NOT_STARTED_REST} failure=PermissionError"
+
+
+def test_a_starter_that_cannot_launch_carries_its_class_name_and_no_message(tmp_path):
+    (tmp_path / overleaf_engine.STARTER_NAME).write_text("", encoding="utf-8")
+
+    def launcher(command, **kwargs):
+        raise PermissionError(SENTINEL)
+
+    result = overleaf_engine.start_engine(tmp_path, platform="win32", launcher=launcher)
+    assert result == overleaf_engine.EngineStart(False, overleaf_engine.START_FAILED_TEXT.format("PermissionError"))
+    assert result.failure == "PermissionError"
+    assert SENTINEL not in result.failure
+    # A start that never reached the launcher has no class name to log.
+    assert overleaf_engine.start_engine(tmp_path, platform="linux").failure == ""
+
+
+def _starter_check_that_raises(monkeypatch):
+    """Make the check for the starter raise PermissionError, as a folder that is readable at the probe but denied at start does.
+    Every other is_file call is the real one."""
+    real_is_file = Path.is_file
+
+    def denied(self):
+        if self.name == overleaf_engine.STARTER_NAME:
+            raise PermissionError(13, SENTINEL)
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+
+
+def test_a_starter_check_that_raises_is_a_failed_start_and_never_escapes(tmp_path, monkeypatch):
+    _starter_check_that_raises(monkeypatch)
+    launches = []
+    result = overleaf_engine.start_engine(tmp_path, platform="win32", launcher=lambda *a, **k: launches.append(a))
+    assert result == overleaf_engine.EngineStart(False, overleaf_engine.START_FAILED_TEXT.format("PermissionError"))
+    assert result.failure == "PermissionError"
+    assert SENTINEL not in result.reason
+    assert launches == []
+
+
+def test_a_starter_check_that_raises_is_logged_as_not_started_with_its_class_name(tmp_path, monkeypatch):
+    _starter_check_that_raises(monkeypatch)
+    launches = []
+
+    def start(folder):
+        return overleaf_engine.start_engine(folder, platform="win32", launcher=lambda *a, **k: launches.append(a))
+
+    deps = OverleafDeps(
+        listening=lambda url: False,
+        folder=lambda settings: tmp_path,
+        start=start,
+        session=lambda url: None,
+        login=lambda url: None,
+        wait_seconds=0.1,
+    )
+    running, reason = home_tab._overleaf_start_read(SettingsStore(tmp_path / "settings.json"), deps, tmp_path)
+    assert running is False
+    assert reason == overleaf_engine.START_FAILED_TEXT.format("PermissionError")
+    assert launches == []
+    lines = _control_lines(tmp_path)
+    assert len(lines) == 1
+    assert _stamp_and_rest(lines[0])[1] == f"{ENGINE_NOT_STARTED_REST} failure=PermissionError"
+    assert SENTINEL not in lines[0]
+
+
+def test_the_control_line_has_the_time_program_and_outcome_and_a_failure_only_when_there_is_one():
+    stamp = "2026-10-26T10:15:00-04:00"
+    assert overleaf_engine.engine_log_line(stamp, True) == f"{stamp} {ENGINE_STARTED_REST}"
+    assert overleaf_engine.engine_log_line(stamp, False) == f"{stamp} {ENGINE_NOT_STARTED_REST}"
+    assert overleaf_engine.engine_log_line(stamp, False, "PermissionError") == (
+        f"{stamp} {ENGINE_NOT_STARTED_REST} failure=PermissionError"
+    )
+
+
+def test_log_engine_start_appends_to_the_control_log_beside_the_settings_file(tmp_path):
+    settings = tmp_path / "settings.json"
+    local = datetime(2026, 10, 26, 10, 15, tzinfo=timezone(timedelta(hours=-4)))
+    overleaf_engine.log_engine_start(settings, overleaf_engine.EngineStart(True), True, clock=lambda: local)
+    overleaf_engine.log_engine_start(
+        settings,
+        overleaf_engine.EngineStart(False, "reason", failure="OSError"),
+        False,
+        clock=lambda: local,
+    )
+    assert (tmp_path / CONTROL_LOG_NAME).read_text(encoding="utf-8").splitlines() == [
+        f"2026-10-26T10:15:00-04:00 {ENGINE_STARTED_REST}",
+        f"2026-10-26T10:15:00-04:00 {ENGINE_NOT_STARTED_REST} failure=OSError",
+    ]
+    # One log file only: the settings file itself is not created by a log line.
+    assert sorted(path.name for path in tmp_path.iterdir()) == [CONTROL_LOG_NAME]
+
+
+def test_a_logging_error_does_not_change_the_card_for_a_manual_start(qtbot, tmp_path, monkeypatch):
+    def broken(path, line):
+        raise RuntimeError(SENTINEL)
+
+    monkeypatch.setattr(overleaf_engine, "append_control_line", broken)
+    engine = FakeEngine(up=False, folder=tmp_path, start_brings_up=True)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=lambda parent, title, text: True))
+    _wait_engine(qtbot, tab)
+    _button(tab, "home-overleaf-start-engine").click()
+    qtbot.waitUntil(lambda: _note(tab) == START_RUNNING_TEXT, timeout=5000)
+    assert _headline(tab) == "Engine running, session not checked yet"
+    assert SENTINEL not in _card_texts(tab)
+    assert engine.starts == [tmp_path]
+
+
+def test_a_logging_error_does_not_change_the_card_for_a_launch_start(qtbot, tmp_path, monkeypatch):
+    def broken(path, line):
+        raise RuntimeError(SENTINEL)
+
+    monkeypatch.setattr(overleaf_engine, "append_control_line", broken)
+    folder = _folder_with_starter(tmp_path)
+    _save_settings(tmp_path, engine_folder=str(folder), confirmed_engine_folder=str(folder))
+    engine = FakeEngine(up=False, start_brings_up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _launch_deps(tmp_path, engine))
+    _launch(qtbot, tab)
+    assert _note(tab) == "Engine started"
+    assert HEADLINE_TIME.match(_headline(tab))
+    assert SENTINEL not in _card_texts(tab)
+
+
+# ----------------------------------------------------------------- Amendment G: the dialog words
+
+def test_the_switch_and_folder_questions_name_the_folder_and_say_what_is_missing():
+    no_folder = auto_start_question("", "")
+    assert "No engine folder is chosen yet" in no_folder
+    assert f"Command: {COMMAND}" in no_folder
+    _assert_names_the_command(auto_start_question("engine-folder", "engine-folder"), "engine-folder")
+    unconfirmed = auto_start_question("engine-folder", "other-folder")
+    _assert_names_the_command(unconfirmed, "engine-folder")
+    assert "not confirmed yet" in unconfirmed
+    starter = "engine-folder/start_server_hidden.vbs"
+    question = engine_folder_question(starter)
+    assert starter in question
+    assert "wscript.exe //B //nologo" in question
+
+
+def test_the_manual_start_question_names_the_command_the_working_folder_and_the_starter():
+    question = engine_start_question("127.0.0.1:8471", "engine-folder")
+    assert question.startswith(START_DIALOG_HEAD)
+    _assert_names_the_command(question, "engine-folder")

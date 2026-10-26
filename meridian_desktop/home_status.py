@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
-from meridian_desktop import local_client, overleaf_client, tunnel_status, updater
+from meridian_desktop import local_client, overleaf_client, overleaf_engine, tunnel_status, updater
 from meridian_desktop.latex_client import (
     BACKUP_NOTE,
     ENGINE_CONNECTED,
@@ -456,7 +457,11 @@ LOGIN_TIMEOUT_TEXT = "The LaTeX engine did not answer in time. Try again in a mo
 LOGIN_FAILED_TEXT = "The login window could not be opened. Try again later."
 
 START_TITLE = "Start LaTeX engine"
-START_QUESTION = "Start the LaTeX engine on {} in the background?"
+# The manual Start dialog (Amendment G, rule 2). ``run`` is the command, working folder and starter that the start runs.
+START_QUESTION = "Start the LaTeX engine on {address} in the background?\n\n{run}"
+# The lines every dialog that starts the engine names: the exact command, the working folder and the starter path. The command
+# is overleaf_engine.COMMAND_TEXT, the same text start_engine's argument list is built from.
+ENGINE_RUN_TEMPLATE = "Command: {command}\nWorking folder: {folder}\nStarter: {starter}"
 START_CANCELLED_TEXT = "Start cancelled. Nothing was started."
 START_WORKING_TEXT = "Starting the LaTeX engine in the background..."
 START_RUNNING_TEXT = "The LaTeX engine is running. Press Check to see if you are signed in."
@@ -466,6 +471,22 @@ START_FAILED_TEMPLATE = "The LaTeX engine could not be started ({})."
 # The launch-time checks, the engine folder and the two switches on the card. Each is one plain sentence, and none names a
 # folder: the folder is never shown, only the words around it.
 ENGINE_FOLDER_NOT_SET_TEXT = "Engine folder not set: choose it to start the engine automatically"
+# A folder is saved but the owner has not confirmed it in this card (Amendment G, rule 3). The launch start does not run.
+ENGINE_FOLDER_NOT_CONFIRMED_TEXT = "Engine folder not confirmed: confirm it in this card before the engine starts at launch"
+ENGINE_FOLDER_CONFIRM_TITLE = "Confirm the LaTeX engine folder"
+ENGINE_FOLDER_CONFIRM_QUESTION = (
+    "Meridian will run this starter for the LaTeX engine:\n\n{starter}\n\n"
+    "It runs through wscript.exe //B //nologo, hidden and in the background. Meridian starts it only when you say yes "
+    "to Start engine, or at launch when Start the engine when Meridian opens is on.\n\n"
+    "Confirm this folder?"
+)
+ENGINE_FOLDER_CONFIRM_CANCELLED_TEXT = "Engine folder not saved: it was not confirmed. Nothing was saved."
+AUTO_START_CONFIRM_TITLE = "Start the LaTeX engine when Meridian opens"
+AUTO_START_CONFIRM_QUESTION = (
+    "Meridian will start the LaTeX engine when it opens, if the engine is not already running.\n\n{where}\n\n"
+    "Turn this on?"
+)
+AUTO_START_NOT_TURNED_ON_TEXT = "Start at launch stays off. Nothing was saved."
 LAUNCH_STARTING_TEXT = "Starting the engine..."
 LAUNCH_STARTED_TEXT = "Engine started"
 LAUNCH_NOT_STARTED_TEXT = "Engine did not start"
@@ -476,7 +497,7 @@ ENGINE_FOLDER_DIALOG_TITLE = "Choose the LaTeX engine folder"
 CHOOSE_FOLDER_TEXT = "Choose engine folder"
 CHOOSE_FOLDER_TOOLTIP = "Pick the folder that holds the engine's starter. Choosing a folder starts nothing."
 AUTO_START_LABEL = "Start the engine when Meridian opens"
-AUTO_START_TOOLTIP = "When Meridian opens, starts the LaTeX engine if it is down and its folder is chosen."
+AUTO_START_TOOLTIP = "When Meridian opens, starts the LaTeX engine if it is down and its folder is chosen and confirmed."
 AUTO_CHECK_LABEL = "Check the Overleaf session when Meridian opens"
 AUTO_CHECK_TOOLTIP = "When Meridian opens, checks the saved Overleaf session once, if the engine is running."
 
@@ -567,6 +588,42 @@ def launch_start_text(running: bool, reason: str) -> str:
     if running:
         return LAUNCH_STARTED_TEXT
     return f"{LAUNCH_NOT_STARTED_TEXT}. {reason}" if reason else LAUNCH_NOT_STARTED_TEXT
+
+
+def engine_folder_question(starter: str) -> str:
+    """The confirmation dialog's text for a chosen folder. ``starter`` is the exact start_server_hidden.vbs path it names."""
+    return ENGINE_FOLDER_CONFIRM_QUESTION.format(starter=starter)
+
+
+def engine_run_lines(folder: str) -> str:
+    """The exact command, the working folder and the starter path that a start from ``folder`` runs. ``folder`` is the
+    owner's own path, shown in a dialog only. It is never empty here: the callers check for a folder first."""
+    working = str(Path(folder))
+    starter = str(Path(folder) / overleaf_engine.STARTER_NAME)
+    return ENGINE_RUN_TEMPLATE.format(command=overleaf_engine.COMMAND_TEXT, folder=working, starter=starter)
+
+
+def engine_start_question(address: str, folder: str) -> str:
+    """The manual Start engine dialog's text: the address, then the command, working folder and starter it will run."""
+    return START_QUESTION.format(address=address, run=engine_run_lines(folder))
+
+
+def auto_start_question(folder: str, confirmed_folder: str) -> str:
+    """The confirmation dialog's text for turning the launch-time start on. When a folder is saved, it names the exact command,
+    the working folder and the starter, and says what is still missing when the folder is not confirmed. With no folder, it
+    names the command and says that nothing starts until a folder is chosen and confirmed. The folder text is the owner's
+    own path, in a dialog."""
+    if not folder:
+        where = (
+            "No engine folder is chosen yet, so nothing starts until you choose one and confirm it. "
+            "Once you confirm a folder, this command runs at launch, in that folder:\n"
+            f"Command: {overleaf_engine.COMMAND_TEXT}"
+        )
+    else:
+        where = engine_run_lines(folder)
+        if folder != confirmed_folder:
+            where += "\nThis folder is not confirmed yet. Confirm it with Choose engine folder, or nothing starts at launch."
+    return AUTO_START_CONFIRM_QUESTION.format(where=where)
 
 
 __all__ = [

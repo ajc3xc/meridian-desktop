@@ -326,8 +326,12 @@ def read_control_log_tail(path: Path | None = None, *, max_bytes: int = DEFAULT_
     return read_log_tail(path if path is not None else default_log_path(), max_bytes=max_bytes)
 
 
-def _append_line(path: Path, line: str) -> None:
-    """Append one line. A log that cannot be written never stops or fails the call."""
+def append_control_line(path: Path, line: str) -> None:
+    """Append one line to the control log. A log that cannot be written never stops or fails the call.
+
+    The runner calls and the Overleaf card's engine starts (overleaf_engine.log_engine_start) both write through here, so
+    there is one control log file.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
@@ -435,7 +439,7 @@ class RunnerControl:
     def _log(self, subcommand: str, scope: str, result: ControlResult) -> None:
         path = self._log_path if self._log_path is not None else default_log_path()
         stamp = self._clock().isoformat(timespec="seconds")
-        _append_line(path, format_log_line(stamp, subcommand, scope, result.outcome, result.pid))
+        append_control_line(path, format_log_line(stamp, subcommand, scope, result.outcome, result.pid))
 
 
 __all__ = [
@@ -444,6 +448,7 @@ __all__ = [
     "DEFAULT_SCOPE",
     "ALREADY_RUNNING",
     "CONFIRMED",
+    "append_control_line",
     "CHILD_ARGS",
     "FAILED",
     "LOCAL_DEFAULT_PORT",

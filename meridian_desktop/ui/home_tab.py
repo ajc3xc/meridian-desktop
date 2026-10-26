@@ -16,9 +16,10 @@ The Overleaf (LaTeX) card reads only the LaTeX engine's port: when Home is shown
 about the Overleaf session only on a press of its Check button, once per press, and never on the timer or on show. Log in
 asks the engine to open a login window. Start engine asks first (No is the default), then starts the engine's starter.
 Once per app launch, run_launch_checks (called by app.py after the window shows) does two things when the owner's
-switches allow it: it starts the engine when the engine is down and the owner has chosen its folder, and it checks the
-saved session once when the engine is running. Its two switches and Choose engine folder sit on this card. Nothing in
-this card stops a process.
+switches allow it: it starts the engine when the engine is down and the owner has confirmed its folder, and it checks the
+saved session once when the engine is running. Choose engine folder asks first, and saves the folder only on a yes. Turning
+the launch start on asks first too (No is the default). Its two switches and Choose engine folder sit on this card. Every
+start from this card is written to the control log (overleaf_engine.log_engine_start). Nothing in this card stops a process.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -63,12 +64,17 @@ from meridian_desktop.home_status import (
     ACTION_SETTINGS,
     AUTO_CHECK_LABEL,
     AUTO_CHECK_TOOLTIP,
+    AUTO_START_CONFIRM_TITLE,
     AUTO_START_LABEL,
+    AUTO_START_NOT_TURNED_ON_TEXT,
     AUTO_START_TOOLTIP,
     CHECKING_HEADLINE,
     CHOOSE_FOLDER_TEXT,
     CHOOSE_FOLDER_TOOLTIP,
+    ENGINE_FOLDER_CONFIRM_CANCELLED_TEXT,
+    ENGINE_FOLDER_CONFIRM_TITLE,
     ENGINE_FOLDER_DIALOG_TITLE,
+    ENGINE_FOLDER_NOT_CONFIRMED_TEXT,
     ENGINE_FOLDER_NOT_SET_TEXT,
     ENGINE_FOLDER_SAVED_TEXT,
     LAUNCH_STARTING_TEXT,
@@ -83,7 +89,6 @@ from meridian_desktop.home_status import (
     SESSION_CHECK_FAILED_TEMPLATE,
     START_CANCELLED_TEXT,
     START_FAILED_TEMPLATE,
-    START_QUESTION,
     START_TITLE,
     START_WORKING_TEXT,
     TIME_FORMAT,
@@ -92,8 +97,11 @@ from meridian_desktop.home_status import (
     OverleafFacts,
     RowView,
     ServiceFacts,
+    auto_start_question,
     checked_text,
     checking_view,
+    engine_folder_question,
+    engine_start_question,
     failed_view,
     launch_start_text,
     local_view,
@@ -268,20 +276,32 @@ def _overleaf_login_read(store: SettingsStore, deps: OverleafDeps) -> Any:
     return deps.login(store.load().settings.engine_url)
 
 
-def _overleaf_start_read(store: SettingsStore, deps: OverleafDeps, folder: Path) -> tuple[bool, str]:
-    """Start the engine's starter, then wait up to deps.wait_seconds for its port. Returns (running, reason). The reason is
-    fixed text, set only when the starter did not run. Runs on the thread pool, and only after the owner says yes."""
-    url = store.load().settings.engine_url
-    started = deps.start(folder)
-    if not started.started:
-        return False, started.reason
+def _wait_for_port(url: str, deps: OverleafDeps) -> bool:
+    """True when the engine's port answers within deps.wait_seconds. It looks again every START_POLL_SECONDS."""
     deadline = time.monotonic() + deps.wait_seconds
     while True:
         if deps.listening(url):
-            return True, ""
+            return True
         if time.monotonic() >= deadline:
-            return False, ""
+            return False
         time.sleep(START_POLL_SECONDS)
+
+
+def _overleaf_start_read(store: SettingsStore, deps: OverleafDeps, folder: Path) -> tuple[bool, str]:
+    """Start the engine's starter, then wait up to deps.wait_seconds for its port. Returns (running, reason). The reason is
+    fixed text, set only when the starter did not run. Runs on the thread pool, and only after the owner says yes, or at
+    launch for the confirmed folder. Every call that reaches the starter writes one line to the control log, whatever the
+    outcome, and that write never raises (overleaf_engine.log_engine_start)."""
+    url = store.load().settings.engine_url
+    started = deps.start(folder)
+    running, reason = False, started.reason
+    try:
+        if started.started:
+            running = _wait_for_port(url, deps)
+            reason = ""
+    finally:
+        overleaf_engine.log_engine_start(store.path, started, running)
+    return running, reason
 
 
 def _default_overleaf_deps() -> OverleafDeps:
@@ -842,9 +862,10 @@ class OverleafDeps:
     ``listening(url)`` is whether the engine's port accepts a connection (overleaf_engine.engine_listening). ``folder(settings)``
     is the folder the owner chose, or None (overleaf_engine.engine_folder). ``start(folder)`` runs the starter
     (overleaf_engine.start_engine). ``session(url)`` asks the engine once about the Overleaf session, and ``login(url)``
-    opens its login window (overleaf_client.session_status and start_login). ``confirm`` asks the owner yes or no before
-    Start engine (ask_yes_no, where No is the default and Escape is No). ``wait_seconds`` is how long Start engine waits
-    for the port. ``choose_folder(parent, start_dir)`` opens the folder picker and returns the folder, or "" when cancelled.
+    opens its login window (overleaf_client.session_status and start_login). ``confirm(parent, title, text)`` asks the
+    owner yes or no (ask_yes_no, where No is the default and Escape is No). The card asks it before Start engine, before
+    a chosen engine folder is saved, and before the launch-time start is turned on. ``wait_seconds`` is how long a start
+    waits for the port. ``choose_folder(parent, start_dir)`` opens the folder picker and returns the folder, or "" when cancelled.
     """
 
     listening: Callable[[str], bool]
@@ -1375,7 +1396,7 @@ class HomeTab(QWidget):
         folder = self._overleaf_folder
         if folder is None:
             return
-        question = START_QUESTION.format(address_text(self._overleaf_url) or "the engine address")
+        question = engine_start_question(address_text(self._overleaf_url) or "the engine address", str(folder))
         if not self._overleaf_deps.confirm(self, START_TITLE, question):
             self._overleaf.set_note(START_CANCELLED_TEXT)
             return
@@ -1402,8 +1423,8 @@ class HomeTab(QWidget):
         a show or the Home timer does nothing, so they never repeat within a launch.
 
         Each step runs only when its own switch is on, and nothing here asks the owner. The engine is started when it is
-        down and the owner has chosen its folder (engine_auto_start). The saved session is checked once when the engine is
-        running (overleaf_auto_check). With both switches off, nothing runs.
+        down, and the folder the owner saved is the folder the owner confirmed (engine_auto_start, Amendment G). The saved
+        session is checked once when the engine is running (overleaf_auto_check). With both switches off, nothing runs.
         """
         if self._launch_checks_ran:
             return
@@ -1428,8 +1449,14 @@ class HomeTab(QWidget):
             return
         if not settings.engine_auto_start:
             return
-        if value.folder is None:
+        # The launch start uses only the folder the owner confirmed in this card (Amendment G, rule 3). No folder saved, or a
+        # saved one that no longer holds the starter, is the line the card has always shown. A folder saved without the
+        # confirmation is not used, and the card says why.
+        if value.folder is None or not settings.engine_folder:
             self._overleaf.set_note(ENGINE_FOLDER_NOT_SET_TEXT)
+            return
+        if settings.engine_folder != settings.confirmed_engine_folder:
+            self._overleaf.set_note(ENGINE_FOLDER_NOT_CONFIRMED_TEXT)
             return
         self._overleaf.set_note(LAUNCH_STARTING_TEXT)
         self._run_overleaf(
@@ -1472,16 +1499,26 @@ class HomeTab(QWidget):
             box.blockSignals(False)
 
     def _on_overleaf_switch(self, key: str, checked: bool) -> None:
-        """A switch was clicked: its value is saved at once, and every other field is kept. A write that fails says so, and
-        the switch goes back to the saved value."""
+        """A switch was clicked. Turning the launch-time start on asks first, and No leaves it off and saves nothing. Any other
+        click is saved at once, and every other field is kept. A write that fails says so, and the switch goes back to the
+        saved value."""
+        store = self._deps.store
+        if key == "engine_auto_start" and checked:
+            settings = store.load().settings
+            question = auto_start_question(settings.engine_folder, settings.confirmed_engine_folder)
+            if not self._overleaf_deps.confirm(self, AUTO_START_CONFIRM_TITLE, question):
+                self._overleaf.set_note(AUTO_START_NOT_TURNED_ON_TEXT)
+                self._sync_overleaf_options()
+                return
         try:
-            self._deps.store.save(replace(self._deps.store.load().settings, **{key: checked}))
+            store.save(replace(store.load().settings, **{key: checked}))
         except (OSError, ValueError):
             self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
             self._sync_overleaf_options()
 
     def _on_overleaf_choose_folder(self) -> None:
-        """Choose engine folder: the folder is saved only when it holds the engine's starter. Choosing starts nothing."""
+        """Choose engine folder: the folder is saved only when it holds the engine's starter and the owner confirms it. A yes
+        saves it as both the engine folder and the confirmed folder. No, or no starter, saves nothing. Choosing starts nothing."""
         settings = self._deps.store.load().settings
         chosen = self._overleaf_deps.choose_folder(self, settings.engine_folder)
         if not chosen:
@@ -1489,8 +1526,13 @@ class HomeTab(QWidget):
         if not overleaf_engine.has_starter(Path(chosen)):
             self._overleaf.set_note(NO_STARTER_CHOSEN_TEXT)
             return
+        starter = str(Path(chosen) / overleaf_engine.STARTER_NAME)
+        if not self._overleaf_deps.confirm(self, ENGINE_FOLDER_CONFIRM_TITLE, engine_folder_question(starter)):
+            self._overleaf.set_note(ENGINE_FOLDER_CONFIRM_CANCELLED_TEXT)
+            return
         try:
-            self._deps.store.save(replace(settings, engine_folder=chosen))
+            store = self._deps.store
+            store.save(replace(store.load().settings, engine_folder=chosen, confirmed_engine_folder=chosen))
         except (OSError, ValueError):
             self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
             return

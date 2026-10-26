@@ -127,7 +127,11 @@ class Settings:
     # The folder the owner chose for the LaTeX engine's hidden starter (start_server_hidden.vbs). Only the text the owner
     # picked is kept, and "" means no folder is chosen. save() writes the key only when a folder is chosen.
     engine_folder: str = ""
-    # Start the LaTeX engine when Meridian opens, if it is not running and its folder is chosen. On by default, and the
+    # The same folder, once the owner has confirmed it in the Overleaf card (docs/local-trust-contract.md, Amendment G). Only
+    # a folder equal to engine_folder is used by the launch-time start. "" means not confirmed. save() writes the key only
+    # when it is set.
+    confirmed_engine_folder: str = ""
+    # Start the LaTeX engine when Meridian opens, if it is not running and its folder is confirmed. On by default, and the
     # Overleaf card shows it as a checkbox. save() writes this key only when it is off.
     engine_auto_start: bool = True
     # Check the saved Overleaf session once when Meridian opens, if the engine is running. On by default, and the Overleaf
@@ -323,6 +327,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("engine_folder must be a path as text or empty; using empty")
 
+    # confirmed_engine_folder: handled as engine_folder is. An absent key means not confirmed, with no warning.
+    if "confirmed_engine_folder" in data:
+        value = data["confirmed_engine_folder"]
+        if isinstance(value, str):
+            values["confirmed_engine_folder"] = value.strip()
+        else:
+            problems.append("confirmed_engine_folder must be a path as text or empty; using empty")
+
     # The two Overleaf card switches, both on by default. An absent key means on, with no warning. Only a real true or false
     # is accepted; any other value is reported and the default (on) is used, as check_updates does.
     for key in ENGINE_SWITCH_KEYS:
@@ -468,6 +480,9 @@ class SettingsStore:
         if not settings.engine_folder:
             # No folder chosen is the default, so a file that never chose one has no such key.
             del data["engine_folder"]
+        if not settings.confirmed_engine_folder:
+            # Not confirmed is the default, so a file whose folder was never confirmed has no such key.
+            del data["confirmed_engine_folder"]
         for key in ENGINE_SWITCH_KEYS:
             if data[key]:
                 # On is the default, so a file that keeps both Overleaf card switches on has no such key.
