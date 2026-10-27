@@ -13,6 +13,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,7 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
-from meridian_desktop.keys_file import MAX_FILE_BYTES, FileNames, KeysFileError, read_names, read_value
+from meridian_desktop.keys_file import MAX_FILE_BYTES, FileNames, KeysFileError, log_listing, read_names, read_value
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import keys_section as keys_module
@@ -147,7 +148,7 @@ def test_a_brace_file_that_is_not_valid_json_is_refused_with_a_count_and_no_valu
     assert "sk-fake" not in listing.problem
 
 
-def test_entries_that_are_not_key_names_or_text_are_refused_with_a_count_and_no_name_or_value(tmp_path):
+def test_entries_that_are_not_key_names_or_text_are_refused_with_a_count_and_each_place(tmp_path):
     path = _write(
         tmp_path,
         {"OpenAI": FAKE_VALUE, "Anthropic": 42, "GitHub": [FAKE_VALUE_TWO], "Bad/Name": FAKE_VALUE_TWO, "Blank": "   "},
@@ -156,9 +157,16 @@ def test_entries_that_are_not_key_names_or_text_are_refused_with_a_count_and_no_
     listing = read_names(path)
 
     assert listing.names == ()
-    assert "4 of 5 entries were refused" in listing.problem
-    for hidden in (FAKE_VALUE, FAKE_VALUE_TWO, "Anthropic", "GitHub", "Bad/Name", "Blank"):
-        assert hidden not in listing.problem, "a refusal names no entry and shows no value"
+    assert listing.problem == (
+        "Not loaded. 4 of 5 entries were refused.\n"
+        'entry 2 "Anthropic": value is not text\n'
+        'entry 3 "GitHub": value is not text\n'
+        f"entry 4: name is not allowed {HIDDEN}\n"
+        'entry 5 "Blank": value is empty\n'
+        "Nothing was loaded."
+    )
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem, "no value is shown"
+    assert "Bad/Name" not in listing.problem, "a name with a slash is not a plain name, so it stays hidden"
 
 
 def test_a_name_repeated_by_case_or_naming_runpod_is_refused(tmp_path):
@@ -174,8 +182,11 @@ def test_a_refused_runpod_entry_says_it_has_its_own_entry_and_shows_no_value(tmp
     listing = read_names(_write(tmp_path, {"RunPod": FAKE_VALUE, "OpenAI": FAKE_VALUE_TWO}))
 
     assert listing.names == ()
-    assert "1 of 2 entries were refused" in listing.problem
-    assert "which has its own entry" in listing.problem, "the refusal says RunPod keeps its own entry"
+    assert listing.problem == (
+        "Not loaded. 1 of 2 entries were refused.\n"
+        'entry 1 "RunPod": name is a built-in name, which has its own entry\n'
+        "Nothing was loaded."
+    )
     assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
 
 
@@ -245,14 +256,19 @@ def test_listing_and_checking_never_write_the_file(tmp_path):
 # ----------------------------------------------------------- the NAME=VALUE format
 
 
-# Each refused line with the fixed reason it is refused for.
+# The text a refused name gets when it is not plain, or looks like a key value, so it is not shown.
+HIDDEN = "(the name is not shown: it is not a plain name, or it looks like a key value)"
+# A key value of the shape a provider issues. It is a valid key name in length, but it is a run of letters and digits.
+KEY_LIKE = "sk-proj-" + "A1" * 10
+
+# Each refused line with the text it is refused with. A plain name is shown in quotes; a name that is not is not shown.
 REFUSED_ENV_LINES = [
-    (f"={FAKE_VALUE}", "name is not allowed"),
-    (f"Bad/Name={FAKE_VALUE}", "name is not allowed"),
-    (f"{'N' * (MAX_NAME_LENGTH + 1)}={FAKE_VALUE}", "name is not allowed"),
-    ("Blank=   ", "value is empty"),
-    ('Quoted=""', "value is empty"),
-    (f"Long={'x' * (MAX_SECRET_LENGTH + 1)}", "value is longer than 512 characters"),
+    (f"={FAKE_VALUE}", "line 2: name is not allowed"),
+    (f"Bad/Name={FAKE_VALUE}", f"line 2: name is not allowed {HIDDEN}"),
+    (f"{'N' * (MAX_NAME_LENGTH + 1)}={FAKE_VALUE}", f"line 2: name is not allowed {HIDDEN}"),
+    ("Blank=   ", 'line 2 "Blank": value is empty'),
+    ('Quoted=""', 'line 2 "Quoted": value is empty'),
+    (f"Long={'x' * (MAX_SECRET_LENGTH + 1)}", 'line 2 "Long": value is longer than 512 characters'),
 ]
 
 
@@ -341,16 +357,15 @@ def test_a_line_with_no_equals_or_colon_refuses_the_whole_file_on_its_line_and_s
         read_value(path, "OpenAI")
 
 
-@pytest.mark.parametrize(("line", "reason"), REFUSED_ENV_LINES)
-def test_an_invalid_name_or_value_refuses_the_whole_name_equals_value_file_on_its_line(tmp_path, line, reason):
+@pytest.mark.parametrize(("line", "expected"), REFUSED_ENV_LINES)
+def test_an_invalid_name_or_value_refuses_the_whole_name_equals_value_file_on_its_line(tmp_path, line, expected):
     path = _write(tmp_path, f"OpenAI={FAKE_VALUE_TWO}\n{line}\n", name="my-keys.env")
 
     listing = read_names(path)
 
     assert listing.names == ()
-    assert listing.problem == f"Not loaded. 1 of 2 entries were refused.\nline 2: {reason}\nNothing was loaded."
-    for hidden in (FAKE_VALUE, FAKE_VALUE_TWO, "OpenAI", "Bad/Name", "Blank", "Quoted", "Long"):
-        assert hidden not in listing.problem
+    assert listing.problem == f"Not loaded. 1 of 2 entries were refused.\n{expected}\nNothing was loaded."
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
 
 
 def test_a_repeated_name_in_a_name_equals_value_file_is_refused_by_its_slug_and_names_the_first_line(tmp_path):
@@ -361,8 +376,8 @@ def test_a_repeated_name_in_a_name_equals_value_file_is_refused_by_its_slug_and_
     assert listing.names == ()
     assert listing.problem == (
         "Not loaded. 2 of 4 entries were refused.\n"
-        "line 2: name repeats the one on line 1\n"
-        "line 4: name repeats the one on line 3\n"
+        'line 2 "openai": name repeats the one on line 1\n'
+        'line 4 "open.ai": name repeats the one on line 3\n'
         "Nothing was loaded."
     )
     assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
@@ -376,8 +391,8 @@ def test_a_built_in_name_in_a_name_equals_value_file_is_refused_on_each_line(tmp
     assert listing.names == ()
     assert listing.problem == (
         "Not loaded. 2 of 3 entries were refused.\n"
-        "line 1: name is a built-in name\n"
-        "line 2: name is a built-in name\n"
+        'line 1 "RunPod": name is a built-in name, which has its own entry\n'
+        'line 2 "runpod": name is a built-in name, which has its own entry\n'
         "Nothing was loaded."
     )
     assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
@@ -390,7 +405,7 @@ def test_a_json_line_inside_a_name_equals_value_file_is_refused_whole(tmp_path):
 
     assert listing.names == ()
     assert listing.problem == (
-        "Not loaded. 1 of 2 entries were refused.\nline 2: name is not allowed\nNothing was loaded."
+        f"Not loaded. 1 of 2 entries were refused.\nline 2: name is not allowed {HIDDEN}\nNothing was loaded."
     )
     assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
 
@@ -466,12 +481,50 @@ def test_a_json_file_with_leading_spaces_and_a_byte_order_mark_still_loads(tmp_p
         ("my-keys.env", "ZetaKey=" + "y" * (MAX_SECRET_LENGTH + 1) + "\n"),
     ],
 )
-def test_no_refusal_message_holds_a_name_or_a_value_in_either_format(tmp_path, name, text):
+def test_no_refusal_message_holds_a_value_in_either_format(tmp_path, name, text):
     listing = read_names(_write(tmp_path, text, name=name))
 
     assert listing.names == () and listing.problem
-    for hidden in ("ZetaKey", "zetakey", "Zeta/Key", FAKE_VALUE, FAKE_VALUE_TWO, "yyyy"):
-        assert hidden not in listing.problem
+    for value in (FAKE_VALUE, FAKE_VALUE_TWO, "yyyy"):
+        assert value not in listing.problem, "no value is shown, whatever the refusal"
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "shown", "hidden"),
+    [
+        ("my-keys.json", '{"ZetaKey": "%s", "zetakey": "%s"}' % (FAKE_VALUE, FAKE_VALUE_TWO),
+         'entry 2 "zetakey": name repeats the one on entry 1', None),
+        ("my-keys.json", '{"Zeta/Key": "%s"}' % FAKE_VALUE, f"entry 1: name is not allowed {HIDDEN}", "Zeta/Key"),
+        ("my-keys.json", '{"ZetaKey": "%s"}' % ("y" * (MAX_SECRET_LENGTH + 1)),
+         'entry 1 "ZetaKey": value is longer than 512 characters', None),
+        ("my-keys.env", f"ZetaKey={FAKE_VALUE}\nzetakey={FAKE_VALUE_TWO}\n",
+         'line 2 "zetakey": name repeats the one on line 1', None),
+        ("my-keys.env", f"Zeta/Key={FAKE_VALUE}\n", f"line 1: name is not allowed {HIDDEN}", "Zeta/Key"),
+        ("my-keys.env", f"RunPod={FAKE_VALUE}\n",
+         'line 1 "RunPod": name is a built-in name, which has its own entry', None),
+        ("my-keys.env", f"{FAKE_VALUE} ZetaKey\n", "line 1: no = or : between the name and the value", "ZetaKey"),
+        ("my-keys.env", "ZetaKey=\n", 'line 1 "ZetaKey": value is empty', None),
+        ("my-keys.env", "ZetaKey=" + "y" * (MAX_SECRET_LENGTH + 1) + "\n",
+         'line 1 "ZetaKey": value is longer than 512 characters', None),
+    ],
+)
+def test_a_refusal_shows_a_name_only_when_the_name_is_plain(tmp_path, name, text, shown, hidden):
+    listing = read_names(_write(tmp_path, text, name=name))
+
+    assert shown in listing.problem, "the refused entry is shown with its place and its reason"
+    if hidden is not None:
+        assert hidden not in listing.problem, "a name that is not plain is not shown"
+
+
+def test_a_name_that_looks_like_a_key_value_stays_hidden_even_when_it_repeats(tmp_path):
+    text = f"{KEY_LIKE}=ok\n{KEY_LIKE}=ok\n"
+
+    listing = read_names(_write(tmp_path, text, name="my-keys.env"))
+
+    assert listing.problem == (
+        f"Not loaded. 1 of 2 entries were refused.\nline 2: name repeats the one on line 1 {HIDDEN}\nNothing was loaded."
+    )
+    assert KEY_LIKE not in listing.problem
 
 
 def test_listing_and_checking_a_name_equals_value_file_never_write_it(tmp_path):
@@ -515,14 +568,21 @@ def test_a_comment_line_and_a_blank_line_are_skipped_even_with_a_separator_in_th
     assert read_value(path, "OpenAI") == "ok"
 
 
-@pytest.mark.parametrize("line", ["export KEY=x", "Open AI=x", "Open\tAI=x"])
-def test_a_name_that_still_has_a_space_is_refused_on_its_line(tmp_path, line):
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("export KEY=x", 'line 2 "export KEY": name has a space'),
+        ("Open AI=x", 'line 2 "Open AI": name has a space'),
+        ("Open\tAI=x", f"line 2: name has a space {HIDDEN}"),
+    ],
+)
+def test_a_name_that_still_has_a_space_is_refused_on_its_line(tmp_path, line, expected):
     path = _write(tmp_path, f"OpenAI=ok\n{line}\n", name="my-keys.env")
 
     listing = read_names(path)
 
     assert listing.names == ()
-    assert listing.problem == "Not loaded. 1 of 2 entries were refused.\nline 2: name has a space\nNothing was loaded."
+    assert listing.problem == f"Not loaded. 1 of 2 entries were refused.\n{expected}\nNothing was loaded."
 
 
 def test_an_empty_value_and_an_over_long_value_are_refused_with_their_line_numbers(tmp_path):
@@ -533,8 +593,8 @@ def test_an_empty_value_and_an_over_long_value_are_refused_with_their_line_numbe
     assert listing.names == ()
     assert listing.problem == (
         "Not loaded. 2 of 3 entries were refused.\n"
-        "line 2: value is empty\n"
-        "line 3: value is longer than 512 characters\n"
+        'line 2 "Gemini": value is empty\n'
+        'line 3 "Mistral": value is longer than 512 characters\n'
         "Nothing was loaded."
     )
     assert "yyyy" not in listing.problem
@@ -546,7 +606,7 @@ def test_a_repeat_names_the_first_line_it_repeats_even_with_other_lines_between(
     listing = read_names(_write(tmp_path, text, name="my-keys.env"))
 
     assert listing.problem == (
-        "Not loaded. 1 of 3 entries were refused.\nline 3: name repeats the one on line 1\nNothing was loaded."
+        'Not loaded. 1 of 3 entries were refused.\nline 3 "openai": name repeats the one on line 1\nNothing was loaded.'
     )
 
 
@@ -562,7 +622,7 @@ def test_more_than_ten_refused_lines_list_ten_and_say_how_many_more(tmp_path):
     assert "just words" not in listing.problem
 
 
-def test_no_refusal_line_holds_a_name_or_a_value_whatever_its_reason(tmp_path):
+def test_each_refused_line_shows_its_plain_name_and_no_value_whatever_its_reason(tmp_path):
     text = (
         "QuuxKeyName quux-value-42\n"  # no = or :
         "QuuxKey Name=quux-value-42\n"  # name has a space
@@ -580,17 +640,16 @@ def test_no_refusal_line_holds_a_name_or_a_value_whatever_its_reason(tmp_path):
     assert listing.problem == (
         "Not loaded. 7 of 8 entries were refused.\n"
         "line 1: no = or : between the name and the value\n"
-        "line 2: name has a space\n"
-        "line 3: name is not allowed\n"
-        "line 4: name is a built-in name\n"
-        "line 6: name repeats the one on line 5\n"
-        "line 7: value is empty\n"
-        "line 8: value is longer than 512 characters\n"
+        'line 2 "QuuxKey Name": name has a space\n'
+        f"line 3: name is not allowed {HIDDEN}\n"
+        'line 4 "RunPod": name is a built-in name, which has its own entry\n'
+        'line 6 "quuxkeyname": name repeats the one on line 5\n'
+        'line 7 "QuuxEmpty": value is empty\n'
+        'line 8 "QuuxLong": value is longer than 512 characters\n'
         "Nothing was loaded."
     )
-    lowered = listing.problem.lower()
-    for hidden in ("quux", "runpod", "quuxkeyname", "quux-value-42", "quux-value-43", "qqqq"):
-        assert hidden not in lowered
+    for value in ("quux-value-42", "quux-value-43", "qqqq"):
+        assert value not in listing.problem
 
 
 def test_a_json_file_still_loads_names_with_spaces_colons_and_equals_signs(tmp_path):
@@ -601,13 +660,16 @@ def test_a_json_file_still_loads_names_with_spaces_colons_and_equals_signs(tmp_p
     assert read_value(path, "URL") == "https://host/x"
 
 
-def test_a_json_refusal_keeps_its_count_text_and_lists_no_lines(tmp_path):
+def test_a_json_refusal_lists_each_refused_entry_by_its_number(tmp_path):
     listing = read_names(_write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 9}))
 
     assert listing.problem == (
-        "Not loaded. 1 of 2 entries were refused. Each entry must be a key name with a text value of up to "
-        "512 characters, and no name may repeat or be RunPod, which has its own entry. Nothing was loaded."
+        "Not loaded. 1 of 2 entries were refused.\n"
+        'entry 2 "Anthropic": value is not text\n'
+        "Nothing was loaded."
     )
+    assert listing.refused[0].where == "entry 2" and listing.refused[0].name == "Anthropic"
+    assert FAKE_VALUE not in listing.problem
 
 
 def test_a_refused_name_equals_value_file_shows_its_refused_lines_on_the_block(qtbot, settings_path, tmp_path):
@@ -617,7 +679,7 @@ def test_a_refused_name_equals_value_file_shows_its_refused_lines_on_the_block(q
     _choose(section)
 
     status = section.findChild(QLabel, "keys-file-status").text()
-    assert status == "Not loaded. 1 of 2 entries were refused.\nline 2: name has a space\nNothing was loaded."
+    assert status == 'Not loaded. 1 of 2 entries were refused.\nline 2 "export KEY": name has a space\nNothing was loaded.'
     assert SettingsStore(settings_path).load().settings.keys_file_path == ""
 
 
@@ -764,16 +826,19 @@ def test_the_choose_dialog_offers_json_and_name_equals_value_files_only(qtbot, s
     assert "All files" not in asked["names"]
 
 
-def test_a_refused_file_is_not_chosen_and_its_count_is_shown_without_a_name_or_value(qtbot, settings_path, tmp_path):
+def test_a_refused_file_is_not_chosen_and_its_refused_entry_is_shown_without_a_value(qtbot, settings_path, tmp_path):
     path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 9})
     section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
 
     _choose(section)
 
     status = section.findChild(QLabel, "keys-file-status").text()
-    assert "1 of 2 entries were refused" in status
-    for hidden in (FAKE_VALUE, "OpenAI", "Anthropic"):
-        assert hidden not in status
+    assert status == (
+        "Not loaded. 1 of 2 entries were refused.\n"
+        'entry 2 "Anthropic": value is not text\n'
+        "Nothing was loaded."
+    )
+    assert FAKE_VALUE not in status and "OpenAI" not in status
     assert SettingsStore(settings_path).load().settings.keys_file_path == ""
     assert section.findChild(QWidget, "keys-entry-openai") is None
 
@@ -961,3 +1026,66 @@ def test_the_keys_block_describes_both_file_formats_and_comments(qtbot, settings
 
     assert "JSON object" in intro and "NAME=VALUE" in intro and "NAME: VALUE" in intro
     assert "starts with #" in intro, "a line that starts with # is a comment"
+
+
+# ----------------------------------------------------------- the control log
+
+
+def _log_lines(folder: Path) -> list[str]:
+    return (folder / "runner-control.log").read_text(encoding="utf-8").splitlines()
+
+
+def test_a_refused_file_is_logged_one_line_for_each_refused_entry_and_no_value(tmp_path):
+    text = f"OpenAI={FAKE_VALUE}\nexport KEY=x\nRunPod={FAKE_VALUE_TWO}\nOpenAI=ok\n"
+    listing = read_names(_write(tmp_path, text, name="my-keys.env"))
+
+    log_listing(tmp_path / "settings.json", listing, clock=lambda: datetime(2026, 10, 26, 17, 20, 1))
+
+    assert _log_lines(tmp_path) == [
+        "2026-10-26T17:20:01 keys file refused: 3 of 4 entries, nothing loaded",
+        '2026-10-26T17:20:01 keys file line 2 "export KEY": name has a space',
+        '2026-10-26T17:20:01 keys file line 3 "RunPod": name is a built-in name, which has its own entry',
+        '2026-10-26T17:20:01 keys file line 4 "OpenAI": name repeats the one on line 1',
+    ]
+    log = (tmp_path / "runner-control.log").read_text(encoding="utf-8")
+    assert FAKE_VALUE not in log and FAKE_VALUE_TWO not in log
+
+
+def test_a_file_that_lists_its_names_and_a_missing_file_are_each_one_log_line(tmp_path):
+    clock = lambda: datetime(2026, 10, 26, 17, 20, 1)  # noqa: E731 - a fixed clock for the test
+    log_listing(tmp_path / "settings.json", read_names(_write(tmp_path, {"OpenAI": FAKE_VALUE})), clock=clock)
+    log_listing(tmp_path / "settings.json", read_names(str(tmp_path / "gone.json")), clock=clock)
+
+    assert _log_lines(tmp_path) == [
+        "2026-10-26T17:20:01 keys file: names listed, 1 in all",
+        "2026-10-26T17:20:01 keys file: The keys file is missing. Choose the file again.",
+    ]
+
+
+def test_a_log_that_cannot_be_written_never_raises_or_changes_the_listing(tmp_path):
+    (tmp_path / "runner-control.log").mkdir()  # a folder where the log file should be, so the log cannot be written
+    listing = read_names(_write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 9}))
+
+    log_listing(tmp_path / "settings.json", listing)
+
+    assert listing.problem is not None and "entry 2" in listing.problem
+
+
+def test_the_keys_block_logs_a_listing_once_and_again_only_when_the_file_changes(qtbot, settings_path, tmp_path):
+    path = _write(tmp_path, {"OpenAI": FAKE_VALUE})
+    section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
+    _choose(section)
+    section.refresh()
+    section.refresh()
+
+    assert len(_log_lines(settings_path.parent)) == 1, "a listing that has not changed is written once"
+
+    _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 9})
+    section.refresh()
+    section.refresh()
+
+    lines = _log_lines(settings_path.parent)
+    assert len(lines) == 3, "the change is written once: its count line and its one refused entry"
+    assert lines[1].endswith('keys file refused: 1 of 2 entries, nothing loaded')
+    assert lines[2].endswith('keys file entry 2 "Anthropic": value is not text')
+    assert FAKE_VALUE not in "\n".join(lines)

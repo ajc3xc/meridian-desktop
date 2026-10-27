@@ -57,7 +57,7 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
-from meridian_desktop.keys_file import read_names
+from meridian_desktop.keys_file import FileNames, log_listing, read_names
 from meridian_desktop.secret_store import SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.confirm import ask_yes_no
@@ -220,6 +220,9 @@ class KeysSection(QWidget):
         self._transport = transport
         # The settings the keys file path is kept in. The file dialog is looked up here, and None means the real dialog.
         self._settings = _settings_of(keys)
+        # The last listing written to the control log, with its path. The block is rebuilt on each refresh, so an
+        # unchanged listing is not written again.
+        self._logged_listing: tuple[str, FileNames] | None = None
         self._choose_file = choose_file if choose_file is not None else _ask_keys_file
         # The names a From file card was removed for, by slug. This session keeps them, and the file is never changed.
         self._hidden_file_slugs: set[str] = set()
@@ -518,6 +521,7 @@ class KeysSection(QWidget):
         self._file_path.setText(FILE_PATH_TEXT.format(name=Path(path).name))
         self._file_path.setToolTip(path)
         listing = read_names(path)
+        self._log_listing(path, listing)
         if listing.problem is not None:
             self._set_file_status(listing.problem)
             self._drop_file_cards(set())
@@ -532,6 +536,13 @@ class KeysSection(QWidget):
         self._drop_file_cards(set(shown))
         for name in shown:
             self._card_for(name, from_file=True).status.setText(FROM_FILE_NOTE)
+
+    def _log_listing(self, path: str, listing: FileNames) -> None:
+        """Write a listing of the keys file to the control log, unless it is the one last written for this path."""
+        if self._logged_listing == (path, listing):
+            return
+        self._logged_listing = (path, listing)
+        log_listing(self._settings.path, listing)
 
     def _set_file_status(self, text: str) -> None:
         """Show a line about the keys file, or hide the line when ``text`` is empty."""
@@ -694,6 +705,7 @@ class KeysSection(QWidget):
         if not chosen:
             return  # the owner cancelled the dialog, so nothing changed
         listing = read_names(chosen)
+        self._log_listing(chosen, listing)
         if listing.problem is not None:
             self._set_file_status(listing.problem)
             return
