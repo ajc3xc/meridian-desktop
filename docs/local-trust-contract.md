@@ -4,7 +4,7 @@ Status: CONFIRMED by the owner in chat on 2026-10-22, with Amendments A to E at 
 Amendment F, also at the end, was accepted by the owner in chat on 2026-10-23.
 Amendment G, also at the end, was accepted by the owner in chat on 2026-10-26.
 Amendment H, also at the end, was accepted by the owner in chat on 2026-10-26.
-Amendment I, also at the end, is PROPOSED on 2026-10-26 and is not accepted. It does not apply until the owner accepts it in chat.
+Amendment I, also at the end, was accepted by the owner in chat on 2026-10-26, as an optional setting that is off by default.
 Written by the desktop maintainer at the owner's request (sprint item 84d8fd28 is not in the
 repository).
 
@@ -41,7 +41,7 @@ repository).
 - Amendment F accepted by the owner in chat on: 2026-10-23
 - Amendment G accepted by the owner in chat on: 2026-10-26
 - Amendment H accepted by the owner in chat on: 2026-10-26
-- [ ] Amendment I, proposed on 2026-10-26, accepted by the owner in chat on: not yet accepted
+- [x] Amendment I, proposed on 2026-10-26, accepted by the owner in chat on: 2026-10-26, as an optional setting, off by default
 
 Once confirmed, the owner's sprint item 84d8fd28 is recorded done, and the start, stop and
 restart controls may be built to this contract.
@@ -144,12 +144,11 @@ H. Chat requests and sub-tool runs. This amendment covers three things: a chat a
       on shows the rule 2 dialog first, as G.4 does. While it is off, chat requests are refused and nothing
       is read from the core.
 
-## Amendment I (PROPOSED on 2026-10-26; not accepted by the owner)
+## Amendment I (accepted by the owner in chat on 2026-10-26)
 
-Status: proposed, not accepted. This amendment does not apply until the owner accepts it in chat, and the acceptance line
-under Owner confirmation is then filled in. Until then rules 1 to 10 and Amendments A to H stand as written, and the
-launch-time check in G.6 is unchanged. The desktop carries the hourly check's switch, which is off by default, so nothing
-is checked on a timer until the owner turns it on in the dialog.
+Status: accepted, as an optional setting. The owner asked for an opt-in setting rather than a fixed schedule, so the check
+is off by default and runs only after the owner turns it on in the dialog in item 3. The launch-time check in G.6 is
+unchanged, and so are rules 1 to 10 and Amendments A to H.
 
 I. Hourly Overleaf session check. Accepting this amendment means the owner agrees to these terms.
    1. What the check does. While the Home tab is showing, the desktop asks the LaTeX engine once an hour about the saved
