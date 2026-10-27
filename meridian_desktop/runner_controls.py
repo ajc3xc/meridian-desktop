@@ -290,6 +290,14 @@ def read_control_log_tail(path: Path | None = None, *, max_bytes: int = DEFAULT_
     return read_log_tail(path if path is not None else default_log_path(), max_bytes=max_bytes)
 
 
+def append_control_line(path: Path, line: str) -> None:
+    """Append one line to the control log. A log that cannot be written never stops or fails the call.
+
+    The Keys block's refusal listing writes through here too (keys_file.log_listing), so there is one control log file.
+    """
+    _append_line(path, line)
+
+
 def _append_line(path: Path, line: str) -> None:
     """Append one line. A log that cannot be written never stops or fails the call."""
     try:
