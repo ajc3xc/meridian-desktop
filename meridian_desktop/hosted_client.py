@@ -45,7 +45,9 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 USER_AGENT = f"MeridianDesktop/{__version__} (hosted client)"
 
-NOT_SIGNED_IN_TEXT = "No hosted token is saved. Paste your hosted token in Settings and press Save token."
+NOT_SIGNED_IN_TEXT = (
+    "No hosted token is saved. Sign in with the browser in Settings, or paste a token there and press Save token."
+)
 REJECTED_TEXT = (
     "Hosted Meridian did not accept the saved token (HTTP 401). "
     "Paste a current token in Settings and press Save token."
@@ -313,6 +315,28 @@ def health_status(
     return _send(transport if transport is not None else _urllib_transport, request, timeout).status
 
 
+def post_to(
+    base_url: str,
+    path: str,
+    body: bytes,
+    *,
+    content_type: str | None = None,
+    transport: Transport | None = None,
+    timeout: float = HOSTED_TIMEOUT,
+) -> Reply:
+    """POST ``body`` to {base_url}{path} with no Authorization header, and return the reply as it came.
+
+    Used for the sign-in steps, which carry no token. The URL is checked first, so a refused URL sends no request. A
+    non-2xx status is returned, not raised, and a redirect is not followed. The failures are the ones _send raises.
+    """
+    base = validate_base_url(base_url)
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(base + path, data=body, method="POST", headers=headers)
+    return _send(transport if transport is not None else _urllib_transport, request, timeout)
+
+
 __all__ = [
     "HEALTH_PATH",
     "HOSTED_TIMEOUT",
@@ -330,6 +354,7 @@ __all__ = [
     "Transport",
     "health_status",
     "list_projects",
+    "post_to",
     "usable_token",
     "validate_base_url",
 ]

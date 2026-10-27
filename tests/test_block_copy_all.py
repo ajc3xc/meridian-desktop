@@ -363,11 +363,12 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # one Apply and one Remove that act on every ticked client. Those two replace the six per-row Apply and Remove buttons of
 # the three clients the card had, so the push count goes down by four. The check boxes replace four push buttons in the
 # button count, so the main window's total is the same. SETTINGS_BUTTONS counts push buttons and group headers only.
-SETTINGS_PUSH_BUTTONS = 33
-SETTINGS_BUTTONS = 38
-MAIN_WINDOW_PUSH_BUTTONS = 61  # the mode bar's Test connection button is one of them
+# One more push button than before: Sign in with browser, in the Connection group (settings-sign-in).
+SETTINGS_PUSH_BUTTONS = 34
+SETTINGS_BUTTONS = 39
+MAIN_WINDOW_PUSH_BUTTONS = 62  # the mode bar's Test connection button is one of them
 # One more check box than before: the Overleaf card's hourly session check switch (home-overleaf-hourly).
-MAIN_WINDOW_BUTTONS = 87
+MAIN_WINDOW_BUTTONS = 88
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):
