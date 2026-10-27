@@ -216,19 +216,21 @@ def _client_intro(qtbot, tmp_path: Path, settings_path: Path) -> Group:
 
 
 def _client_card(qtbot, tmp_path: Path, settings_path: Path) -> Group:
-    """One client's path and detail lines, under its name and state row."""
+    """One client's path and detail lines, under its name and state row. Codex is ticked by default, so its lines are shown."""
     section = _section(qtbot, SettingsStore(settings_path))
     section.resize(720, 900)
     _shown(section)
     qtbot.waitExposed(section)
-    path = section.findChild(QLabel, "client-setup-claude-code-path")
-    detail = section.findChild(QLabel, "client-setup-claude-code-detail")
+    path = section.findChild(QLabel, "client-setup-codex-path")
+    detail = section.findChild(QLabel, "client-setup-codex-detail")
     path.setText("Settings file: an example path in the test")
     detail.setText("Meridian has no entries in this file yet.")
+    path.setVisible(True)
+    detail.setVisible(True)
     lines = [path.text(), detail.text()]
     return Group(
         section,
-        section.findChild(QLabel, "client-setup-claude-code-text"),
+        section.findChild(QLabel, "client-setup-codex-text"),
         lines,
         [path, detail],
         _same_text([path, detail]),
@@ -357,10 +359,15 @@ def test_the_second_line_starts_the_gap_a_layout_gives_labels_below_the_first(qt
 # engine folder, and two check boxes, the two switches. A check box is a QAbstractButton but not a QPushButton, so the push
 # count goes up by one and the button count by three. The Settings page does not change. The main window now holds 64
 # QPushButtons and 85 buttons in all.
-SETTINGS_PUSH_BUTTONS = 37
-SETTINGS_BUTTONS = 42
-MAIN_WINDOW_PUSH_BUTTONS = 65  # one more: the mode bar's Test connection button
-MAIN_WINDOW_BUTTONS = 86
+# The Client setup card now has one box per client (four check boxes, which are QAbstractButtons and not QPushButtons) and
+# one Apply and one Remove that act on every ticked client. Those two replace the six per-row Apply and Remove buttons of
+# the three clients the card had, so the push count goes down by four. The check boxes replace four push buttons in the
+# button count, so the main window's total is the same. SETTINGS_BUTTONS counts push buttons and group headers only.
+SETTINGS_PUSH_BUTTONS = 33
+SETTINGS_BUTTONS = 38
+MAIN_WINDOW_PUSH_BUTTONS = 61  # the mode bar's Test connection button is one of them
+# One more check box than before: the Overleaf card's hourly session check switch (home-overleaf-hourly).
+MAIN_WINDOW_BUTTONS = 87
 
 
 def test_the_settings_and_main_window_button_counts_match_after_the_search_split_and_block_change(qtbot, tmp_path):

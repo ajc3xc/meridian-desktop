@@ -431,7 +431,7 @@ def _apply_flow_run(config: Path):
         if "--yes" in argv:
             state["written"] = True
             return CommandOutput(0, json.dumps({"results": [entry("written")], "wrote": True}), "")
-        action = "unchanged" if state["written"] and argv[-1] == "all" else "would_write"
+        action = "unchanged" if state["written"] and "plan" in argv else "would_write"
         return CommandOutput(0, json.dumps({"results": [entry(action)], "wrote": False}), "")
 
     return run
@@ -444,6 +444,7 @@ def test_a_client_setup_change_makes_home_read_the_tools_again_when_it_is_shown(
     tab.hide()
     config = tmp_path / "desktop.json"
     config.write_text("{}", encoding="utf-8")
+    store.set_client_choices(["claude-desktop"])  # the fake answers for Claude Desktop only
     section = ClientSetupSection(
         store, runner=ClientSetupRunner(store, run=_apply_flow_run(config)),
         confirm=lambda parent, title, text: True, actions=actions,
@@ -452,7 +453,7 @@ def test_a_client_setup_change_makes_home_read_the_tools_again_when_it_is_shown(
     changed = []
     actions.clientSetupChanged.connect(lambda: changed.append(True))
     section.findChild(QPushButton, "client-setup-check").click()
-    apply = section.findChild(QPushButton, "client-setup-claude-desktop-apply")
+    apply = section.findChild(QPushButton, "client-setup-apply")
     qtbot.waitUntil(apply.isEnabled, timeout=5000)
     before = reads.snapshot()
 

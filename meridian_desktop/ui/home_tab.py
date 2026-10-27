@@ -13,7 +13,9 @@ Restart use the runner controls (ui/scope_controls.py), and Launch Zotero asks i
 panel uses. The Settings buttons only switch to the Settings tab.
 
 The Overleaf (LaTeX) card reads only the LaTeX engine's port: when Home is shown, and on Check now. It asks the engine
-about the Overleaf session only on a press of its Check button, once per press, and never on the timer or on show. Log in
+about the Overleaf session only on a press of its Check button, once per press, or on the hourly check the owner has turned
+on (docs/local-trust-contract.md, Amendment I, off by default). The hourly check has its own timer, which runs only while
+Home is showing. Neither the five-minute timer nor a show asks Overleaf. Log in
 asks the engine to open a login window. Start engine asks first (No is the default), then starts the engine's starter.
 Once per app launch, run_launch_checks (called by app.py after the window shows) does two things when the owner's
 switches allow it: it starts the engine when the engine is down and the owner has confirmed its folder, and it checks the
@@ -77,6 +79,11 @@ from meridian_desktop.home_status import (
     ENGINE_FOLDER_NOT_CONFIRMED_TEXT,
     ENGINE_FOLDER_NOT_SET_TEXT,
     ENGINE_FOLDER_SAVED_TEXT,
+    HOURLY_CHECK_CONFIRM_QUESTION,
+    HOURLY_CHECK_CONFIRM_TITLE,
+    HOURLY_CHECK_LABEL,
+    HOURLY_CHECK_NOT_TURNED_ON_TEXT,
+    HOURLY_CHECK_TOOLTIP,
     LAUNCH_STARTING_TEXT,
     LOGIN_FAILED_TEXT,
     NO_STARTER_CHOSEN_TEXT,
@@ -118,7 +125,7 @@ from meridian_desktop.home_status import (
 from meridian_desktop.latex_client import EngineStatus, address_text, port_text
 from meridian_desktop.runner_client import RunnerResult
 from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL
-from meridian_desktop.settings_store import Settings, SettingsStore
+from meridian_desktop.settings_store import OVERLEAF_HOURLY_CHECK_MINUTES, Settings, SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
@@ -171,6 +178,8 @@ START_POLL_SECONDS = 0.25
 OVERLEAF_CHECK_TOOLTIP = "Sends your saved session to Overleaf once, to see if you are signed in."
 OVERLEAF_LOGIN_TOOLTIP = "Opens a login window in Chrome. Sign in there, then press Check."
 OVERLEAF_START_TOOLTIP = "Starts the LaTeX engine in the background. It asks first."
+# The hourly Overleaf session check, in milliseconds (Amendment I). It runs only while Home is showing and the owner has turned it on.
+OVERLEAF_HOURLY_CHECK_MS = OVERLEAF_HOURLY_CHECK_MINUTES * 60 * 1000
 
 # Card colours: a left border per tone. The tone is a property, so the colour follows the card's state. A card that has
 # focus (for Ctrl+C) shows it on its other three sides.
@@ -267,7 +276,8 @@ def _overleaf_probe(store: SettingsStore, deps: OverleafDeps) -> OverleafProbe:
 
 
 def _overleaf_session_read(store: SettingsStore, deps: OverleafDeps) -> Any:
-    """Ask the engine once about the saved Overleaf session. Runs on the thread pool, and only on a Check press."""
+    """Ask the engine once about the saved Overleaf session. Runs on the thread pool: on a Check press, at launch, or on the
+    hourly check the owner has turned on. It never runs on a show."""
     return deps.session(store.load().settings.engine_url)
 
 
@@ -922,6 +932,11 @@ class HomeTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(CHECK_INTERVAL_MS)
         self._timer.timeout.connect(self.check_all)
+        # The hourly Overleaf session check (Amendment I). It runs only while Home is showing and the owner has turned it on.
+        self._showing = False
+        self._overleaf_hourly_timer = QTimer(self)
+        self._overleaf_hourly_timer.setInterval(OVERLEAF_HOURLY_CHECK_MS)
+        self._overleaf_hourly_timer.timeout.connect(self._on_overleaf_hourly_tick)
         # Each later show reads the quick cards again once this short pause has passed (SHOW_DEBOUNCE_MS).
         self._show_timer = QTimer(self)
         self._show_timer.setSingleShot(True)
@@ -1098,8 +1113,14 @@ class HomeTab(QWidget):
         self._overleaf_auto_check_box = self._overleaf_switch(
             box, "home-overleaf-auto-check", AUTO_CHECK_LABEL, AUTO_CHECK_TOOLTIP, "overleaf_auto_check"
         )
+        # The hourly check is off by default. Its box is connected here, and showing Home sets it to the saved value.
+        self._overleaf_hourly_box = QCheckBox(HOURLY_CHECK_LABEL, box)
+        self._overleaf_hourly_box.setObjectName("home-overleaf-hourly")
+        self._overleaf_hourly_box.setToolTip(HOURLY_CHECK_TOOLTIP)
+        self._overleaf_hourly_box.toggled.connect(self._on_overleaf_hourly)
         layout.addWidget(self._overleaf_auto_start_box)
         layout.addWidget(self._overleaf_auto_check_box)
+        layout.addWidget(self._overleaf_hourly_box)
         return box
 
     def _overleaf_switch(self, parent: QWidget, name: str, text: str, tooltip: str, key: str) -> QCheckBox:
@@ -1350,7 +1371,8 @@ class HomeTab(QWidget):
         self._overleaf_folder = value.folder
 
     def _on_overleaf_check(self) -> None:
-        """Check: asks the engine once about the saved session. This is the card's only Overleaf request, one per press."""
+        """Check: asks the engine once about the saved session. A press is one of the card's Overleaf requests. The hourly
+        check (Amendment I) makes the same request on its own timer, and only when the owner has turned it on."""
         self._run_overleaf(
             "session",
             partial(_overleaf_session_read, self._deps.store, self._overleaf_deps),
@@ -1492,6 +1514,7 @@ class HomeTab(QWidget):
         pairs = (
             (self._overleaf_auto_start_box, settings.engine_auto_start),
             (self._overleaf_auto_check_box, settings.overleaf_auto_check),
+            (self._overleaf_hourly_box, settings.overleaf_check_interval_minutes == OVERLEAF_HOURLY_CHECK_MINUTES),
         )
         for box, value in pairs:
             box.blockSignals(True)
@@ -1515,6 +1538,44 @@ class HomeTab(QWidget):
         except (OSError, ValueError):
             self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
             self._sync_overleaf_options()
+
+    def _sync_overleaf_timer(self) -> None:
+        """Run the hourly Overleaf check only while Home is showing and the saved setting is on (Amendment I). The timer
+        starts nothing. It stops when Home hides, or when the setting goes off."""
+        on = self._deps.store.load().settings.overleaf_check_interval_minutes == OVERLEAF_HOURLY_CHECK_MINUTES
+        if on and self._showing:
+            if not self._overleaf_hourly_timer.isActive():
+                self._overleaf_hourly_timer.start()
+        else:
+            self._overleaf_hourly_timer.stop()
+
+    def _on_overleaf_hourly_tick(self) -> None:
+        """One hourly check. It is the same single request as a Check press. It runs only while Home is showing and the saved
+        setting is still on, so a setting changed by hand stops it. Nothing is started, and when the engine is not running
+        nothing is sent to Overleaf."""
+        if not self._showing:
+            return
+        if self._deps.store.load().settings.overleaf_check_interval_minutes != OVERLEAF_HOURLY_CHECK_MINUTES:
+            self._overleaf_hourly_timer.stop()
+            return
+        self._on_overleaf_check()
+
+    def _on_overleaf_hourly(self, checked: bool) -> None:
+        """The hourly check box. Turning it on asks first, and No (the default) leaves it off and saves nothing. Turning it off
+        needs no dialog. A write that fails says so, and the box goes back to the saved value."""
+        store = self._deps.store
+        if checked and not self._overleaf_deps.confirm(self, HOURLY_CHECK_CONFIRM_TITLE, HOURLY_CHECK_CONFIRM_QUESTION):
+            self._overleaf.set_note(HOURLY_CHECK_NOT_TURNED_ON_TEXT)
+            self._sync_overleaf_options()
+            return
+        interval = OVERLEAF_HOURLY_CHECK_MINUTES if checked else 0
+        try:
+            store.save(replace(store.load().settings, overleaf_check_interval_minutes=interval))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            self._sync_overleaf_options()
+            return
+        self._sync_overleaf_timer()
 
     def _on_overleaf_choose_folder(self) -> None:
         """Choose engine folder: the folder is saved only when it holds the engine's starter and the owner confirms it. A yes
@@ -1544,6 +1605,7 @@ class HomeTab(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
+        self._showing = True
         self._timer.start()
         self.refresh_tunnel_gate()
         self._sync_overleaf_options()
@@ -1555,11 +1617,15 @@ class HomeTab(QWidget):
             self._show_timer.start()
         # The engine's port is looked at each time Home is shown. The Overleaf session is not read here.
         self._check_overleaf_engine()
+        # The hourly check waits for its own interval. A show never runs it.
+        self._sync_overleaf_timer()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt naming
         super().hideEvent(event)
+        self._showing = False
         self._timer.stop()
         self._show_timer.stop()
+        self._overleaf_hourly_timer.stop()
 
 
 __all__ = [

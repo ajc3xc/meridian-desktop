@@ -23,6 +23,7 @@ from meridian_desktop.home_status import (
     LOGIN_ENGINE_DOWN_TEXT,
     LOGIN_NO_CHROME_TEXT,
     LOGIN_OPENED_TEXT,
+    HOURLY_CHECK_TOOLTIP,
     START_CANCELLED_TEXT,
     START_RUNNING_TEXT,
     START_TITLE,
@@ -1149,6 +1150,164 @@ def test_each_switch_saves_at_once_when_it_is_clicked(qtbot, tmp_path):
     _checkbox(tab, "home-overleaf-auto-check").click()
     assert _saved(tmp_path).overleaf_auto_check is False
     assert _checkbox(tab, "home-overleaf-auto-check").isChecked() is False
+
+
+# ----------------------------------------------------------------- the hourly check (Amendment I, proposed; off by default)
+
+HOURLY_LABEL = "Check the Overleaf session every hour while Home is showing"
+HOURLY_TITLE = "Check the Overleaf session every hour"
+HOURLY_NOT_ON = "The hourly check stays off. Nothing was saved."
+ONE_HOUR_MS = 60 * 60 * 1000
+
+
+class _Asks:
+    """A confirm stand-in. It records each question and answers with the one it was given."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, parent, title, text):
+        self.calls.append((title, text))
+        return self.answer
+
+
+def _hourly_timers(tab):
+    """The card's hourly timer. It is the only timer of one hour, so exactly one must exist."""
+    timers = [timer for timer in tab.findChildren(QTimer) if timer.interval() == ONE_HOUR_MS]
+    assert len(timers) == 1
+    return timers[0]
+
+
+def test_the_hourly_check_is_off_by_default_and_its_timer_does_not_run(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+    box = _checkbox(tab, "home-overleaf-hourly")
+    assert box.text() == HOURLY_LABEL
+    assert box.isChecked() is False
+    assert _hourly_timers(tab).isActive() is False
+    assert _saved(tmp_path).overleaf_check_interval_minutes == 0
+    assert engine.session_calls == [], "showing Home never asks Overleaf"
+
+
+def test_turning_the_hourly_check_on_asks_first_and_no_leaves_it_off(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    asks = _Asks(answer=False)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=asks))
+    _wait_engine(qtbot, tab)
+
+    _checkbox(tab, "home-overleaf-hourly").click()
+
+    assert len(asks.calls) == 1
+    title, text = asks.calls[0]
+    assert title == HOURLY_TITLE
+    assert "once an hour" in text and "Overleaf's terms restrict automated access" in text
+    assert _checkbox(tab, "home-overleaf-hourly").isChecked() is False
+    assert _note(tab) == HOURLY_NOT_ON
+    assert _saved(tmp_path).overleaf_check_interval_minutes == 0
+    settings_file = tmp_path / "settings.json"
+    assert not settings_file.exists() or "overleaf_check_interval_minutes" not in settings_file.read_text(encoding="utf-8")
+    assert _hourly_timers(tab).isActive() is False
+    assert engine.session_calls == []
+
+
+def test_yes_saves_the_hourly_interval_and_the_timer_runs_only_while_home_is_showing(qtbot, tmp_path):
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    asks = _Asks(answer=True)
+    tab = _shown(qtbot, _deps(tmp_path, engine, confirm=asks))
+    _wait_engine(qtbot, tab)
+
+    _checkbox(tab, "home-overleaf-hourly").click()
+
+    assert [title for title, _text in asks.calls] == [HOURLY_TITLE]
+    assert _saved(tmp_path).overleaf_check_interval_minutes == 60
+    assert _checkbox(tab, "home-overleaf-hourly").isChecked() is True
+    timer = _hourly_timers(tab)
+    assert timer.isActive() is True
+    tab.hide()
+    assert timer.isActive() is False
+    tab.show()
+    qtbot.waitExposed(tab)
+    assert timer.isActive() is True
+    assert engine.session_calls == [], "turning it on and showing Home again do not ask Overleaf"
+
+
+def test_a_saved_hourly_check_shows_on_and_a_show_still_never_asks_overleaf(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_check_interval_minutes=60)
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+    assert _checkbox(tab, "home-overleaf-hourly").isChecked() is True
+    assert _hourly_timers(tab).isActive() is True
+    tab.hide()
+    tab.show()
+    qtbot.waitExposed(tab)
+    qtbot.wait(home_tab.SHOW_DEBOUNCE_MS + 200)
+    assert engine.session_calls == []
+
+
+def test_an_hourly_tick_asks_overleaf_once_through_the_engine_and_starts_nothing(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_check_interval_minutes=60)
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+
+    _hourly_timers(tab).timeout.emit()
+    _settle(qtbot, tab)
+
+    assert engine.session_calls == [LOOPBACK], "one request, to the engine, which asks Overleaf once"
+    assert engine.starts == [], "the hourly check never starts the engine"
+    assert engine.login_calls == []
+    assert HEADLINE_TIME.match(_headline(tab))
+
+
+def test_an_hourly_tick_with_the_engine_down_sends_nothing_to_overleaf_and_starts_nothing(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_check_interval_minutes=60)
+    engine = FakeEngine(up=False, session=overleaf_client.SessionStatus(overleaf_client.STATE_ENGINE_NOT_RUNNING))
+    tab = _shown(qtbot, _deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+
+    _hourly_timers(tab).timeout.emit()
+    _settle(qtbot, tab)
+
+    assert engine.starts == []
+    assert _headline(tab) == "Engine not running"
+
+
+def test_a_tick_after_the_setting_is_turned_off_by_hand_stops_and_asks_nothing(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_check_interval_minutes=60)
+    engine = FakeEngine(up=True, session=SIGNED_IN)
+    tab = _shown(qtbot, _deps(tmp_path, engine))
+    _wait_engine(qtbot, tab)
+    _save_settings(tmp_path, overleaf_check_interval_minutes=0)
+
+    _hourly_timers(tab).timeout.emit()
+    _settle(qtbot, tab)
+
+    assert engine.session_calls == []
+    assert _hourly_timers(tab).isActive() is False
+
+
+def test_turning_the_hourly_check_off_needs_no_dialog_and_stops_the_timer(qtbot, tmp_path):
+    _save_settings(tmp_path, overleaf_check_interval_minutes=60)
+    asks = _Asks(answer=True)
+    tab = _shown(qtbot, _deps(tmp_path, FakeEngine(up=False), confirm=asks))
+    _wait_engine(qtbot, tab)
+
+    _checkbox(tab, "home-overleaf-hourly").click()
+
+    assert asks.calls == [], "turning it off asks nothing"
+    assert _saved(tmp_path).overleaf_check_interval_minutes == 0
+    assert _checkbox(tab, "home-overleaf-hourly").isChecked() is False
+    assert _hourly_timers(tab).isActive() is False
+
+
+def test_the_hourly_check_is_one_more_box_on_the_card_with_its_own_words(qtbot, tmp_path):
+    tab = _shown(qtbot, _deps(tmp_path, FakeEngine(up=False)))
+    _wait_engine(qtbot, tab)
+    assert _checkbox(tab, "home-overleaf-hourly").toolTip() == HOURLY_CHECK_TOOLTIP
+    assert "home-overleaf-hourly" in {box.objectName() for box in _card(tab).findChildren(QCheckBox)}
 
 
 def test_no_cookie_token_or_path_text_shows_through_the_launch_or_the_folder_choice(qtbot, tmp_path):

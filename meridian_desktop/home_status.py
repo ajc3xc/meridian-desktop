@@ -500,6 +500,20 @@ AUTO_START_LABEL = "Start the engine when Meridian opens"
 AUTO_START_TOOLTIP = "When Meridian opens, starts the LaTeX engine if it is down and its folder is chosen and confirmed."
 AUTO_CHECK_LABEL = "Check the Overleaf session when Meridian opens"
 AUTO_CHECK_TOOLTIP = "When Meridian opens, checks the saved Overleaf session once, if the engine is running."
+# The hourly session check (docs/local-trust-contract.md, Amendment I, proposed and not yet accepted by the owner). It is off
+# until the owner says yes to the question below. Each check is one request to the engine, and the engine asks Overleaf once.
+HOURLY_CHECK_LABEL = "Check the Overleaf session every hour while Home is showing"
+HOURLY_CHECK_TOOLTIP = (
+    "Asks the LaTeX engine to check the saved Overleaf session once an hour, while Home is showing. Off until you say yes."
+)
+HOURLY_CHECK_CONFIRM_TITLE = "Check the Overleaf session every hour"
+HOURLY_CHECK_CONFIRM_QUESTION = (
+    "While the Home tab is showing, Meridian will check your saved Overleaf session once an hour. Each check sends your "
+    "saved session to Overleaf once, through the LaTeX engine, to see if you are signed in. The check starts nothing. If the "
+    "engine is not running, nothing is sent to Overleaf.\n\n"
+    "Overleaf's terms restrict automated access to its service. Turn the hourly check on?"
+)
+HOURLY_CHECK_NOT_TURNED_ON_TEXT = "The hourly check stays off. Nothing was saved."
 
 
 @dataclass(frozen=True)

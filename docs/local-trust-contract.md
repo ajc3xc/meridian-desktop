@@ -4,6 +4,7 @@ Status: CONFIRMED by the owner in chat on 2026-10-22, with Amendments A to E at 
 Amendment F, also at the end, was accepted by the owner in chat on 2026-10-23.
 Amendment G, also at the end, was accepted by the owner in chat on 2026-10-26.
 Amendment H, also at the end, was accepted by the owner in chat on 2026-10-26.
+Amendment I, also at the end, is PROPOSED on 2026-10-26 and is not accepted. It does not apply until the owner accepts it in chat.
 Written by the desktop maintainer at the owner's request (sprint item 84d8fd28 is not in the
 repository).
 
@@ -40,6 +41,7 @@ repository).
 - Amendment F accepted by the owner in chat on: 2026-10-23
 - Amendment G accepted by the owner in chat on: 2026-10-26
 - Amendment H accepted by the owner in chat on: 2026-10-26
+- [ ] Amendment I, proposed on 2026-10-26, accepted by the owner in chat on: not yet accepted
 
 Once confirmed, the owner's sprint item 84d8fd28 is recorded done, and the start, stop and
 restart controls may be built to this contract.
@@ -141,3 +143,35 @@ H. Chat requests and sub-tool runs. This amendment covers three things: a chat a
    9. Switch. Chat requests have their own switch, chat_requests_enabled, which defaults to off. Turning it
       on shows the rule 2 dialog first, as G.4 does. While it is off, chat requests are refused and nothing
       is read from the core.
+
+## Amendment I (PROPOSED on 2026-10-26; not accepted by the owner)
+
+Status: proposed, not accepted. This amendment does not apply until the owner accepts it in chat, and the acceptance line
+under Owner confirmation is then filled in. Until then rules 1 to 10 and Amendments A to H stand as written, and the
+launch-time check in G.6 is unchanged. The desktop carries the hourly check's switch, which is off by default, so nothing
+is checked on a timer until the owner turns it on in the dialog.
+
+I. Hourly Overleaf session check. Accepting this amendment means the owner agrees to these terms.
+   1. What the check does. While the Home tab is showing, the desktop asks the LaTeX engine once an hour about the saved
+      Overleaf session. That is the same one request as a press of the Overleaf card's Check button. The engine sends the
+      owner's saved session to Overleaf once. The desktop never reads, shows or logs the session cookie.
+   2. Off by default. The setting is overleaf_check_interval_minutes. Its default is 0, which is off. The only other value
+      is 60, one hour, and a different interval needs another amendment. A file that holds any other value, or a value
+      that is not a whole number, is read as 0, and the settings warning says so.
+   3. Turning it on asks first. The hourly check box on the Overleaf card shows a confirmation dialog. The dialog says that
+      each check sends the saved session to Overleaf once through the engine, that the check starts nothing, that nothing
+      is sent when the engine is not running, and that Overleaf's terms restrict automated access. No, the default, leaves
+      the check off and saves nothing. A yes saves 60.
+   4. Turning it off needs no dialog. The timer stops at once.
+   5. Only while Home is showing. The timer runs only while the Home tab is showing, and it stops when Home is hidden. A
+      show does not run a check, and the first check comes an hour after the timer starts.
+   6. Nothing else starts. The timer never starts, stops or restarts the engine, never sends a login request and never
+      opens a window. Rule 1 still holds.
+   7. Engine not running. If the engine is not answering, the check sends nothing to Overleaf, and the card says that the
+      engine is not running.
+   8. Logging. The hourly check starts nothing, so it writes no line to the control log, as the launch-time check in G.6
+      does not.
+   9. Unchanged. The Check button, the launch-time check in G.6 and the five-minute Home timer are unchanged. The
+      five-minute timer still reads only the cards and the engine's port, and never asks Overleaf.
+   10. Terms. The owner accepts that an hourly check is automated access to Overleaf, that Overleaf's terms restrict such
+      access, and that turning the check on is the owner's own choice, made in the dialog in item 3.

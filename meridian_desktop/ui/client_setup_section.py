@@ -1,24 +1,27 @@
 """Client setup on the Settings page: the Meridian core checkout, its Python, and one row per client.
 
-Each row shows the client's settings file, its state, and Apply and Remove buttons. Check setup runs
-the core's plan and changes nothing. Apply and Remove first run a dry run, so the confirmation dialog
-names the exact file, the exact change and the exact command. Only a Yes runs the change, and the
-core makes a backup first. The result line then shows the backup path and whether a restart is needed.
+Each row has a box the owner ticks to include that client, the client's settings file, and its state. Only ticked
+clients are touched: Check setup plans the ticked clients, and Apply and Remove write them. Each box saves at once.
+Check setup runs the core's plan and changes nothing. Apply and Remove first run a dry run for the ticked clients, so the
+confirmation dialog names each client's exact file, the exact change and the exact command. Only a Yes runs the change,
+and the core makes a backup of each file first. The result line then shows the backup paths and whether a restart is needed.
+A client the core could not set up shows its own message on its own row.
 
-Every command runs on the thread pool, so the window stays responsive. The core checkout and Python
-are typed or chosen here and saved through settings_store, which refuses a path that does not exist.
-The top of the section says what the desktop found on this computer (ui/runner_actions.py, RunnerActions.find_core),
-with Find it again, and Choose the Meridian core folder when nothing usable was found. The owner does not have to type
-either path. The runner and the dialogs are injected, so the tests never start the real command or open a real dialog.
+Every command runs on the thread pool, so the window stays responsive. The core checkout and Python are typed or chosen here
+and saved through settings_store, which refuses a path that does not exist. The top of the section says what the desktop
+found on this computer (ui/runner_actions.py, RunnerActions.find_core), with Find it again, and Choose the Meridian core folder
+when nothing usable was found. The owner does not have to type either path. The runner and the dialogs are injected, so
+the tests never start the real command or open a real dialog.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -32,10 +35,13 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop.client_setup_runner import (
     CLIENTS,
-    IN_PLACE,
+    FAILED_ACTION,
     KIND_FAILED,
     LABELS,
-    MISSING,
+    NOT_INSTALLED_ACTION,
+    NOT_INSTALLED_TEXT,
+    NOT_SELECTED,
+    NOT_SELECTED_TEXT,
     NOT_SET_CHECKOUT_TEXT,
     NOT_SET_PYTHON_TEXT,
     STATE_TEXT,
@@ -44,7 +50,10 @@ from meridian_desktop.client_setup_runner import (
     ClientRow,
     ClientSetupRunner,
     CommandResult,
+    covered_ticked,
     names_text,
+    row_from_change,
+    ticked_clients,
     unchecked_rows,
 )
 from meridian_desktop.core_locator import LocatedCore
@@ -64,9 +73,10 @@ NOT_FOUND_TEXT = (
     "or press Find it again after you move or install it."
 )
 INTRO_TEXT = (
-    "Writes Meridian's local tools into each client's own settings file. Check setup changes nothing. "
-    "Apply and Remove ask first, and a backup of the file is made before anything is written."
+    "Writes Meridian's local tools into the settings file of each client you tick. Check setup changes nothing. "
+    "Apply and Remove ask first, and a backup of each file is made before anything is written."
 )
+CHOICES_TEXT = "Clients to set up:"
 CHECKOUT_LABEL = "Meridian core checkout:"
 PYTHON_LABEL = "Python for Meridian core:"
 BROWSE_TEXT = "Browse..."
@@ -81,7 +91,8 @@ YES_TEXT = "Yes"
 NO_TEXT = "No"
 APPLY_DIALOG_TITLE = "Apply Meridian's entries?"
 REMOVE_DIALOG_TITLE = "Remove Meridian's entries?"
-DEFAULT_STATUS_TEXT = "Press Check setup to read each client's settings file. Nothing is written."
+DEFAULT_STATUS_TEXT = "Press Check setup to read each ticked client's settings file. Nothing is written."
+NO_TICK_STATUS_TEXT = "No client is ticked. Tick the clients to set up. Nothing is written."
 CHECKING_TEXT = "Checking the clients' settings files. Nothing is written."
 CHECKOUT_SAVED_TEXT = "Meridian core checkout saved."
 LAUNCH_STARTS_OFF_TEXT = (
@@ -91,6 +102,7 @@ LAUNCH_STARTS_OFF_TEXT = (
 PYTHON_SAVED_TEXT = "Python for Meridian core saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written."
 CANCELLED_TEXT = "Cancelled. Nothing was changed."
+NOTHING_CHANGED_TEXT = "Nothing was changed."
 ALREADY_IN_PLACE_TEXT = "{label} is already in place. Nothing was changed."
 NOTHING_TO_REMOVE_TEXT = "No Meridian entries are in {path}. Nothing was changed."
 WRITTEN_TEXT = "Written: {path}."
@@ -102,9 +114,8 @@ NO_FILE_TEXT = "No settings file is written for this client yet."
 PATH_UNKNOWN_TEXT = "File: not known until Check setup reads it."
 FILE_PREFIX = "File: "
 REASON_NOT_SET = "Set the Meridian core checkout and Python first, then save them."
-REASON_NOT_COVERED = "The Meridian core does not cover this client yet."
-REASON_IN_PLACE = "Already in place. Nothing to apply."
-REASON_MISSING = "There are no Meridian entries to remove: the file is missing."
+REASON_NOT_TICKED = "Tick at least one client first."
+REASON_NOT_COVERED = "The Meridian core does not cover the ticked clients yet."
 TOOLTIP_CHECK_FIRST = "Press Check setup first."
 
 _CHECK = "check"
@@ -116,26 +127,33 @@ FolderChooser = Callable[[QWidget, str], str]
 Confirm = Callable[[QWidget, str, str], bool]
 
 
-def confirmation_text(mode: str, label: str, change: ClientChange, command: str) -> str:
-    """The confirmation dialog's text: the exact file, the exact change, the exact command, and what is left alone."""
+def _join_labels(labels: Sequence[str]) -> str:
+    """'A', 'A and B', or 'A, B and C'."""
+    if len(labels) <= 1:
+        return "".join(labels)
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def confirmation_text(mode: str, entries: Sequence[tuple[str, ClientChange]], command: str) -> str:
+    """The confirmation dialog's text: each client's exact file and change, the exact command, and what is left alone."""
+    labels = _join_labels([label for label, _change in entries])
     if mode == "apply":
-        heading = f"Apply Meridian's entries to {label}?"
+        heading = f"Apply Meridian's entries to {labels}?"
     else:
-        heading = f"Remove Meridian's entries from {label}?"
-    return "\n".join(
-        [
-            heading,
-            f"File: {change.path}",
-            f"Change: {names_text(change)}",
-            "Entries that Meridian does not own are left alone. A backup of the file is made first.",
-            f"Restart {label} after the change to load it.",
-            f"Command: {command}",
-        ]
-    )
+        heading = f"Remove Meridian's entries from {labels}?"
+    lines = [heading]
+    for label, change in entries:
+        lines.append(f"{label}:")
+        lines.append(f"File: {change.path}")
+        lines.append(f"Change: {names_text(change)}")
+    lines.append("Entries that Meridian does not own are left alone. A backup of each file is made first.")
+    lines.extend(RESTART_TEXT.format(label=label) for label, _change in entries)
+    lines.append(f"Command: {command}")
+    return "\n".join(lines)
 
 
 def result_text(mode: str, label: str, change: ClientChange) -> str:
-    """The result line after a real change: the file, the backup path, and a restart note when needed."""
+    """The result lines after a real change: the file, the backup path, and a restart note when needed."""
     lines = [
         (REMOVED_TEXT if mode == "remove" else WRITTEN_TEXT).format(path=change.path),
         BACKUP_TEXT.format(backup=change.backup) if change.backup else NO_BACKUP_TEXT,
@@ -152,24 +170,14 @@ def no_change_text(mode: str, label: str, path: str) -> str:
     return ALREADY_IN_PLACE_TEXT.format(label=label)
 
 
-def _can_apply(row: ClientRow, configured: bool) -> bool:
-    return configured and row.covered and row.state != IN_PLACE
-
-
-def _can_remove(row: ClientRow, configured: bool) -> bool:
-    return configured and row.covered and row.state != MISSING
-
-
-def _reason(row: ClientRow, configured: bool, mode: str) -> str:
-    """The tooltip for a disabled button. Empty when the button is enabled."""
+def _action_reason(configured: bool, ticked: Sequence[str], covered: Sequence[str]) -> str:
+    """The tooltip for a disabled Apply or Remove. Empty when the buttons are enabled."""
     if not configured:
         return REASON_NOT_SET
-    if not row.covered:
+    if not ticked:
+        return REASON_NOT_TICKED
+    if not covered:
         return REASON_NOT_COVERED
-    if mode == "apply" and row.state == IN_PLACE:
-        return REASON_IN_PLACE
-    if mode == "remove" and row.state == MISSING:
-        return REASON_MISSING
     return ""
 
 
@@ -223,10 +231,13 @@ def _ask_yes_no(parent: QWidget, title: str, text: str) -> bool:
 
 @dataclass(frozen=True)
 class _Pending:
-    """What a background command was started for. It is handed back with the result."""
+    """What a background command was started for. It is handed back with the result.
+
+    clients is the ticked clients the command was started for, in display order.
+    """
 
     purpose: str
-    client: str
+    clients: tuple[str, ...]
     mode: str
 
 
@@ -269,7 +280,7 @@ class _CommandJob(QRunnable):
             # The class name only: an exception's text could hold a path or a value.
             text = f"The Meridian setup step failed ({exc.__class__.__name__})."
             if self._pending.purpose == _CHECK:
-                payload = CheckResult(rows=unchecked_rows(), message=text)
+                payload = CheckResult(rows=unchecked_rows(self._pending.clients), message=text)
             else:
                 payload = CommandResult(False, KIND_FAILED, text)
         self._delivery.delivered.emit(Delivered(self._owner, _Done(self._generation, self._pending, payload)))
@@ -277,15 +288,14 @@ class _CommandJob(QRunnable):
 
 @dataclass
 class _RowWidgets:
+    choice: QCheckBox
     state: QLabel
     path: QLabel
     detail: QLabel
-    apply: QPushButton
-    remove: QPushButton
 
 
 class ClientSetupSection(QWidget):
-    """The client setup block for the Settings page. One section, one row per client.
+    """The client setup block for the Settings page. One section, one row per client, and Check, Apply and Remove.
 
     ``coreChanged`` is emitted after a core path is saved, or after the core search changes the setup, so the runner
     block on the same tab shows its switches and its local state again. The boxes follow the saved paths, except a box the
@@ -316,6 +326,8 @@ class ClientSetupSection(QWidget):
         # The saved values the two boxes last showed. A box that still shows one follows the saved value; any other is typed.
         self._shown_checkout = ""
         self._shown_python = ""
+        # The clients the owner has ticked, as saved. Only these are checked, applied or removed.
+        self._choices: frozenset[str] = frozenset()
         self._rows: dict[str, ClientRow] = {row.client: row for row in unchecked_rows()}
         self._widgets: dict[str, _RowWidgets] = {}
         self._busy = False
@@ -399,8 +411,18 @@ class ClientSetupSection(QWidget):
         self._status = _label(self, "client-setup-status")
         layout.addWidget(self._status)
 
+        choices_caption = _label(self, "client-setup-choices-caption", CHOICES_TEXT)
+        layout.addWidget(choices_caption)
         for client, label in CLIENTS:
             layout.addLayout(self._client_block(client, label))
+
+        action_row = QHBoxLayout()
+        self._apply_all = _button(self, "client-setup-apply", APPLY_TEXT)
+        self._remove_all = _button(self, "client-setup-remove", REMOVE_TEXT)
+        action_row.addWidget(self._apply_all)
+        action_row.addWidget(self._remove_all)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
 
         self._result = _label(self, "client-setup-result")
         _set_message(self._result, "")
@@ -411,6 +433,8 @@ class ClientSetupSection(QWidget):
         self._save_checkout.clicked.connect(self._on_save_checkout)
         self._save_python.clicked.connect(self._on_save_python)
         self._check_button.clicked.connect(self._on_check_clicked)
+        self._apply_all.clicked.connect(self._on_apply_clicked)
+        self._remove_all.clicked.connect(self._on_remove_clicked)
         self._find_again.clicked.connect(self._on_find_again_clicked)
         self._choose_core.clicked.connect(self._on_choose_core_clicked)
 
@@ -427,43 +451,47 @@ class ClientSetupSection(QWidget):
     def _client_block(self, client: str, label: str) -> QVBoxLayout:
         block = QVBoxLayout()
         head = QHBoxLayout()
-        head.addWidget(_label(self, f"client-setup-{client}-name", label))
+        choice = QCheckBox(label, self)
+        choice.setObjectName(f"client-setup-{client}-choice")
+        head.addWidget(choice)
         state = _label(self, f"client-setup-{client}-state")
         head.addWidget(state, 1)
         block.addLayout(head)
-        # The path and the detail line are one block, so one drag over them selects both. The name and the state sit on
-        # one row above it, and the buttons below. The gap is the 6 px a layout gives two labels on this style. The block
-        # layout has no parent yet, so its own spacing() is unset here and cannot supply it.
+        # The path and the detail line are one block, so one drag over them selects both. The gap is the 6 px a layout
+        # gives two labels on this style. The block layout has no parent yet, so its own spacing() is unset here and
+        # cannot supply it.
         text = TextBlock(self, f"client-setup-{client}-text", spacing=6)
         path = text.line(f"client-setup-{client}-path", "")
         detail = text.line(f"client-setup-{client}-detail", "")
         _set_message(detail, "")
         block.addWidget(text.label)
 
-        buttons = QHBoxLayout()
-        apply_button = _button(self, f"client-setup-{client}-apply", APPLY_TEXT)
-        remove_button = _button(self, f"client-setup-{client}-remove", REMOVE_TEXT)
-        buttons.addWidget(apply_button)
-        buttons.addWidget(remove_button)
-        buttons.addStretch(1)
-        block.addLayout(buttons)
-
-        self._widgets[client] = _RowWidgets(state, path, detail, apply_button, remove_button)
-        apply_button.clicked.connect(lambda *_, c=client: self._start_preview(c, "apply"))
-        remove_button.clicked.connect(lambda *_, c=client: self._start_preview(c, "remove"))
+        self._widgets[client] = _RowWidgets(choice, state, path, detail)
+        choice.toggled.connect(lambda checked, c=client: self._on_choice_toggled(c, bool(checked)))
         return block
 
     # ----------------------------------------------------------- state on screen
 
     def refresh(self) -> None:
-        """Show the saved core checkout and Python in the boxes, then update the status and the buttons."""
+        """Show the saved core checkout, Python and ticked clients, then update the status and the buttons."""
         settings = self._store.load().settings
         self._checkout_input.setText(settings.core_checkout)
         self._python_input.setText(settings.core_python)
         self._shown_checkout = settings.core_checkout
         self._shown_python = settings.core_python
+        self._choices = frozenset(settings.client_choices)
+        self._sync_choice_boxes()
         self._recompute()
         self._render_finder()
+        self._render_rows()
+
+    def _sync_choice_boxes(self) -> None:
+        """Tick the boxes the saved choices name. Showing the saved value must not save it again."""
+        for client, _label in CLIENTS:
+            box = self._widgets[client].choice
+            box.blockSignals(True)
+            box.setChecked(client in self._choices)
+            box.blockSignals(False)
 
     def _follow_saved_boxes(self) -> None:
         """Move a box to a new saved path, unless the owner has typed into it since it last showed a saved path."""
@@ -509,20 +537,34 @@ class ClientSetupSection(QWidget):
         self._apply_enablement()
 
     def _refresh_status(self) -> None:
-        _set_message(self._status, self._missing or self._last_status)
+        if self._missing:
+            text = self._missing
+        elif not ticked_clients(self._choices):
+            text = NO_TICK_STATUS_TEXT
+        else:
+            text = self._last_status
+        _set_message(self._status, text)
+
+    def _display_row(self, client: str, label: str) -> ClientRow:
+        """The row to show. A client that is not ticked shows as Not selected, whatever was read for it before."""
+        if client not in self._choices:
+            return ClientRow(client, label, NOT_SELECTED, detail=NOT_SELECTED_TEXT)
+        return self._rows[client]
 
     def _render_rows(self) -> None:
-        for client, _name in CLIENTS:
-            row = self._rows[client]
+        for client, label in CLIENTS:
+            row = self._display_row(client, label)
             widgets = self._widgets[client]
             widgets.state.setText(STATE_TEXT[row.state])
-            if not row.covered:
+            if row.state == NOT_SELECTED:
+                path_text = ""
+            elif not row.covered:
                 path_text = NO_FILE_TEXT
             elif row.path:
                 path_text = FILE_PREFIX + row.path
             else:
                 path_text = PATH_UNKNOWN_TEXT
-            widgets.path.setText(path_text)
+            _set_message(widgets.path, path_text)
             _set_message(widgets.detail, row.detail)
 
     def _apply_enablement(self) -> None:
@@ -536,18 +578,39 @@ class ClientSetupSection(QWidget):
             self._save_python,
         ):
             widget.setEnabled(not busy)
+        for widgets in self._widgets.values():
+            widgets.choice.setEnabled(not busy)
         self._check_button.setEnabled(not busy)
         searching = self._actions.locating
         self._find_again.setEnabled(not busy and not searching)
         self._choose_core.setEnabled(not busy and not searching)
         self._choose_core.setVisible(self._choose_core_needed())
-        for client, _name in CLIENTS:
-            row = self._rows[client]
-            widgets = self._widgets[client]
-            widgets.apply.setEnabled(not busy and _can_apply(row, self._configured))
-            widgets.remove.setEnabled(not busy and _can_remove(row, self._configured))
-            widgets.apply.setToolTip(_reason(row, self._configured, "apply"))
-            widgets.remove.setToolTip(_reason(row, self._configured, "remove"))
+        reason = _action_reason(self._configured, ticked_clients(self._choices), covered_ticked(self._choices))
+        for button in (self._apply_all, self._remove_all):
+            button.setEnabled(not busy and not reason)
+            button.setToolTip(reason)
+
+    # ----------------------------------------------------------- the clients the owner ticks
+
+    def _on_choice_toggled(self, client: str, checked: bool) -> None:
+        """Save the owner's tick at once. A save that is refused puts the box back and says why."""
+        names = set(self._choices)
+        if checked:
+            names.add(client)
+        else:
+            names.discard(client)
+        try:
+            saved = self._store.set_client_choices(ticked_clients(names))
+        except (ValueError, OSError):
+            _set_message(self._settings_message, NOT_WRITTEN_TEXT)
+            self._sync_choice_boxes()
+            return
+        self._choices = frozenset(saved.client_choices)
+        if client in self._choices:
+            # A client just ticked shows the state it has not been checked for yet, not an old result.
+            self._rows[client] = next(row for row in unchecked_rows(self._choices) if row.client == client)
+        self._render_rows()
+        self._recompute()
 
     # ----------------------------------------------------------- saving the core paths
 
@@ -623,12 +686,23 @@ class ClientSetupSection(QWidget):
     @Slot()
     def _on_check_clicked(self) -> None:
         _set_message(self._status, CHECKING_TEXT)
-        self._start(_Pending(_CHECK, "", ""), self._runner.check)
-
-    def _start_preview(self, client: str, mode: str) -> None:
-        """Dry run first. The dialog then shows exactly what a Yes would write."""
+        clients = ticked_clients(self._choices)
         runner = self._runner
-        self._start(_Pending(_PREVIEW, client, mode), lambda: runner.preview(client, mode))
+        self._start(_Pending(_CHECK, clients, ""), lambda: runner.check(clients))
+
+    @Slot()
+    def _on_apply_clicked(self) -> None:
+        self._start_preview("apply")
+
+    @Slot()
+    def _on_remove_clicked(self) -> None:
+        self._start_preview("remove")
+
+    def _start_preview(self, mode: str) -> None:
+        """Dry run first, for the ticked clients. The dialog then shows exactly what a Yes would write."""
+        clients = ticked_clients(self._choices)
+        runner = self._runner
+        self._start(_Pending(_PREVIEW, clients, mode), lambda: runner.preview(clients, mode))
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:
@@ -657,43 +731,65 @@ class ClientSetupSection(QWidget):
         self._refresh_status()
         self._apply_enablement()
 
+    def _show_own_row(self, change: ClientChange) -> None:
+        """A client the core could not set up, or whose folder is missing, shows its own row, and no other row."""
+        self._rows[change.client] = row_from_change(change, LABELS.get(change.client, change.client))
+        self._render_rows()
+
     def _after_preview(self, pending: _Pending, result: object) -> None:
         assert isinstance(result, CommandResult)
-        label = LABELS.get(pending.client, pending.client)
         if not result.ok:
             _set_message(self._result, result.message)
             return
-        change = result.changes[0]
-        if change.action == "unchanged":
-            _set_message(self._result, no_change_text(pending.mode, label, change.path))
+        mode = pending.mode
+        for change in result.changes:
+            if change.action in (FAILED_ACTION, NOT_INSTALLED_ACTION):
+                self._show_own_row(change)
+        unchanged = [change for change in result.changes if change.action == "unchanged"]
+        missing = [change for change in result.changes if change.action == NOT_INSTALLED_ACTION]
+        # A client whose folder is missing has nothing to write, so it is left out of the confirmation and its command.
+        to_write = [
+            change for change in result.changes if change.action not in ("unchanged", FAILED_ACTION, NOT_INSTALLED_ACTION)
+        ]
+        if not to_write:
+            notes = [no_change_text(mode, LABELS.get(change.client, change.client), change.path) for change in unchanged]
+            notes += [NOT_INSTALLED_TEXT.format(label=LABELS.get(change.client, change.client)) for change in missing]
+            _set_message(self._result, "\n".join(notes) if notes else NOTHING_CHANGED_TEXT)
             return
-        command = self._runner.describe_command(pending.client, pending.mode)
-        title = APPLY_DIALOG_TITLE if pending.mode == "apply" else REMOVE_DIALOG_TITLE
-        if not self._confirm(self, title, confirmation_text(pending.mode, label, change, command)):
+        entries = [(LABELS.get(change.client, change.client), change) for change in to_write]
+        clients = tuple(change.client for change in to_write)
+        command = self._runner.describe_command(clients, mode)
+        title = APPLY_DIALOG_TITLE if mode == "apply" else REMOVE_DIALOG_TITLE
+        if not self._confirm(self, title, confirmation_text(mode, entries, command)):
             _set_message(self._result, CANCELLED_TEXT)
             return
         runner = self._runner
-        self._start(
-            _Pending(_CHANGE, pending.client, pending.mode),
-            lambda: runner.run_change(pending.client, pending.mode),
-        )
+        self._start(_Pending(_CHANGE, clients, mode), lambda: runner.run_change(clients, mode))
 
     def _after_change(self, pending: _Pending, result: object) -> None:
         assert isinstance(result, CommandResult)
         # The change may have written a client's file, whatever it reports, so Home reads its Tools card again.
         self._actions.notify_client_setup_changed()
-        label = LABELS.get(pending.client, pending.client)
         if not result.ok:
             _set_message(self._result, result.message)
             return
-        change = result.changes[0]
-        if change.action == "unchanged":
-            _set_message(self._result, no_change_text(pending.mode, label, change.path))
-        else:
-            _set_message(self._result, result_text(pending.mode, label, change))
-        # Read the file again, so the row shows its new state.
+        blocks: list[str] = []
+        for change in result.changes:
+            label = LABELS.get(change.client, change.client)
+            if change.action in (FAILED_ACTION, NOT_INSTALLED_ACTION):
+                self._show_own_row(change)
+                if change.action == NOT_INSTALLED_ACTION:
+                    blocks.append(NOT_INSTALLED_TEXT.format(label=label))
+            elif change.action == "unchanged":
+                blocks.append(no_change_text(pending.mode, label, change.path))
+            else:
+                blocks.append(result_text(pending.mode, label, change))
+        _set_message(self._result, "\n".join(blocks) if blocks else NOTHING_CHANGED_TEXT)
+        # Read the files again, so the rows show their new state.
         _set_message(self._status, CHECKING_TEXT)
-        self._start(_Pending(_CHECK, "", ""), self._runner.check)
+        clients = ticked_clients(self._choices)
+        runner = self._runner
+        self._start(_Pending(_CHECK, clients, ""), lambda: runner.check(clients))
 
 
 __all__ = [

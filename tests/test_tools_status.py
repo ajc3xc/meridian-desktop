@@ -26,6 +26,7 @@ from meridian_desktop.tools_status import (
     ENTRY_MISSING_TEXT,
     NO_PLAN_TEXT,
     NOT_COVERED_TEXT,
+    NOT_TICKED_TEXT,
     PYTHON_MISSING_TEXT,
     SERVER_NO_ANSWER_TEXT,
     SERVER_NOT_MERIDIAN_TEXT,
@@ -121,14 +122,18 @@ def core_error(message: str) -> CommandOutput:
 
 
 def responder(per_client: dict, *, whole: CommandOutput | None = None):
-    """Answer a plan. ``whole`` answers 'plan --client all'. A per-client value is a result dict or a CommandOutput."""
+    """Answer a plan. ``whole`` answers 'plan --client all' and any plan that names two or more clients, as the core
+    would when that one command fails. Otherwise a plan names the clients it reads, and a per-client value is a result
+    dict or a CommandOutput.
+    """
 
     def respond(argv: list[str]) -> CommandOutput:
         target = argv[-1]
-        if target == "all":
+        if target == "all" or "," in target:
             if whole is not None:
                 return whole
-            return plan_out(*(value for value in per_client.values() if isinstance(value, dict)))
+            names = list(per_client) if target == "all" else target.split(",")
+            return plan_out(*(per_client[name] for name in names if isinstance(per_client.get(name), dict)))
         value = per_client[target]
         return value if isinstance(value, CommandOutput) else plan_out(value)
 
@@ -238,6 +243,7 @@ def test_the_server_and_tunnel_rows_are_still_shown_when_the_core_is_not_set(tmp
         ["py", "-m", CORE_MODULE, "plan", "--client", "codex", "extra"],
         ["py", "-m", CORE_MODULE, "plan", "--client", "codex", "--yes"],
         ["py", "-m", CORE_MODULE, "plan", "--client", "claude-code"],
+        ["py", "-m", CORE_MODULE, "plan", "--client", "codex,claude-code"],
         ["py", "-m", CORE_MODULE, "plan"],
         ["py", "-m", CORE_MODULE, "plan", "--client", "all", "--client", "codex"],
     ],
@@ -255,7 +261,10 @@ def test_the_plan_guard_refuses_a_remove_a_trailing_word_or_any_other_list(tmp_p
     assert seen == []
 
 
-@pytest.mark.parametrize("target", ["all", "codex", "claude-desktop"])
+@pytest.mark.parametrize(
+    "target",
+    ["all", "codex", "claude-desktop", "cursor", "claude-desktop,codex", "claude-desktop,codex,cursor"],
+)
 def test_the_plan_guard_runs_exactly_the_plan_argv_the_module_builds(tmp_path, target):
     seen: list[list[str]] = []
 
@@ -430,6 +439,57 @@ def test_claude_code_is_never_sent_to_the_core(tmp_path, core):
     run = FakeRun(responder({"codex": entry("codex", tmp_path / "codex.toml", "unchanged")}))
     read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
     assert all("claude-code" not in argv for argv in run.argvs)
+
+
+def test_the_home_card_plans_only_the_ticked_clients_and_never_names_cursor(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    run = FakeRun(responder({"codex": entry("codex", tmp_path / "codex.toml", "unchanged")}))
+
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+
+    assert run.argvs == [[python, "-m", CORE_MODULE, "plan", "--client", "claude-desktop,codex"]]
+    assert all("cursor" not in part for part in run.argvs[0][1:])
+    cursor = rows_for(status, "Cursor")
+    assert len(cursor) == 1
+    assert cursor[0].configured == UNCHECKED
+    assert cursor[0].detail == NOT_TICKED_TEXT
+
+
+def test_the_home_card_reads_a_ticked_cursor_and_its_entries(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    store.set_client_choices(["claude-desktop", "codex", "cursor"])
+    run = FakeRun(
+        responder(
+            {
+                "codex": entry("codex", tmp_path / "codex.toml", "unchanged"),
+                "cursor": entry("cursor", tmp_path / "mcp.json", "unchanged", unchanged=["meridian-docs"]),
+            }
+        )
+    )
+
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+
+    assert run.argvs == [[python, "-m", CORE_MODULE, "plan", "--client", "claude-desktop,codex,cursor"]]
+    cursor = rows_for(status, "Cursor")
+    assert [row.tool for row in cursor] == ["meridian-docs"]
+    assert cursor[0].configured == YES
+
+
+def test_the_home_card_with_nothing_ticked_runs_no_plan(tmp_path, core):
+    checkout, python = core
+    store = store_with(tmp_path, checkout=str(checkout), python=python)
+    store.set_client_choices([])
+    run = FakeRun(responder({}))
+
+    status = read_tools_status(store, run=run, probe=FakeProbe(), clock=clock)
+
+    assert run.argvs == [], "with no client ticked, the core is not asked about any client"
+    for label in ("Claude Desktop", "Codex", "Cursor"):
+        rows = rows_for(status, label)
+        assert len(rows) == 1 and rows[0].configured == UNCHECKED
+        assert rows[0].detail == NOT_TICKED_TEXT
 
 
 def test_a_core_error_for_one_client_leaves_the_others_readable(tmp_path, core):

@@ -499,9 +499,9 @@ def test_client_setup_apply_remove_and_the_check_result_are_fully_visible_at_128
     actions = [
         button
         for button in tab.findChild(CollapsibleGroup, "settings-group-client-setup").findChildren(QPushButton)
-        if button.objectName().endswith(("-apply", "-remove"))
+        if button.objectName() in ("client-setup-apply", "client-setup-remove")
     ]
-    assert len(actions) >= 4, "each client has its Apply and Remove"
+    assert len(actions) == 2, "one Apply and one Remove act on every ticked client"
     for button in actions:
         assert button.height() >= button.minimumSizeHint().height() - 1, button.objectName()
         assert _fully_inside(button, tab), button.objectName()
