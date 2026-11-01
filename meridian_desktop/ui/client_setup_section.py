@@ -569,7 +569,7 @@ class ClientSetupSection(QWidget):
         else:
             self._shown_python = saved.core_python
         # A saved core path turns both launch-time switches off (contract amendment C), and the status line says so.
-        turned_off = before.zotero_autostart or before.local_server_autostart
+        turned_off = before.zotero_autostart or before.local_server_autostart or before.tunnel_autostart
         _set_message(self._settings_message, f"{saved_text} {LAUNCH_STARTS_OFF_TEXT}" if turned_off else saved_text)
         self._recompute()  # the other box keeps what the user typed, saved or not
         self.coreChanged.emit()  # the runner block on this tab shows the switches as they are saved now

@@ -7,3 +7,6 @@ __pycache__/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+# local Claude Code state and the owner's local handoff notes (not part of the source tree)
+.claude/
+docs/handoffs/

@@ -25,8 +25,8 @@ from PySide6.QtWidgets import QFileDialog, QLabel, QMessageBox, QPushButton, QWi
 
 from meridian_desktop import local_client, zotero_client
 from meridian_desktop.core_locator import NOT_FOUND, LocatedCore, locate_core, remember_core
-from meridian_desktop.launch_starts import LaunchDeps, LaunchNote, run_launch_starts
-from meridian_desktop.runner_controls import SCOPE_LOCAL, RunnerControl, default_log_path
+from meridian_desktop.launch_starts import TUNNEL_MODES, LaunchDeps, LaunchNote, run_launch_starts
+from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL, RunnerControl, default_log_path
 from meridian_desktop.settings_store import CONFIRMED_KEYS, CONTROL_FLAG_KEYS, CORE_CHECKOUT_KEY, SettingsStore
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
@@ -68,6 +68,9 @@ class CoreSetup:
     confirmed_python: str = ""
     confirmed_cwd: str = ""
     confirmed_zotero_exe: str = ""
+    # The desktop mode, and the tunnel's launch-time switch (amendment G). The tunnel start needs a TUNNEL_MODES mode.
+    mode: str = "local"
+    tunnel_autostart: bool = False
 
     @property
     def core_ready(self) -> bool:
@@ -200,6 +203,8 @@ class RunnerActions(QObject):
             confirmed_python=settings.confirmed_core_python,
             confirmed_cwd=settings.confirmed_core_checkout,
             confirmed_zotero_exe=settings.confirmed_zotero_exe,
+            mode=settings.mode,
+            tunnel_autostart=settings.tunnel_autostart,
         )
 
     def control(self, python: str, cwd: str) -> RunnerControl:
@@ -263,7 +268,7 @@ class RunnerActions(QObject):
         # A search that is still running may have started for the old setup. Its result is dropped by the new generation.
         self._locating = False
         self.find_core()
-        if before.zotero_autostart or before.local_server_autostart:
+        if before.zotero_autostart or before.local_server_autostart or before.tunnel_autostart:
             return f"{CHOSEN_TEXT} {LAUNCH_SWITCHES_OFF_TEXT}"
         return CHOSEN_TEXT
 
@@ -321,6 +326,10 @@ class RunnerActions(QObject):
             local_status=lambda: control.status(SCOPE_LOCAL),
             local_start=lambda: control.start(SCOPE_LOCAL),
             core_ready=core.launch_ready,
+            tunnel_mode=core.mode in TUNNEL_MODES,
+            tunnel_controls_on=core.tunnel_control_enabled,
+            tunnel_status=lambda: control.status(SCOPE_TUNNEL),
+            tunnel_start=lambda: control.start(SCOPE_TUNNEL),
         )
 
 
@@ -389,11 +398,15 @@ class LaunchStarts(QObject):
             return
         self._started = True
         core = self._actions.core()
-        zotero_on, local_on = core.zotero_autostart, core.local_server_autostart
-        if not (zotero_on or local_on):
+        zotero_on, local_on, tunnel_on = core.zotero_autostart, core.local_server_autostart, core.tunnel_autostart
+        if not (zotero_on or local_on or tunnel_on):
             return
         deps = self._actions.launch_deps(core)
-        submit(self._owner, _LAUNCH_GENERATION, lambda: run_launch_starts(zotero_on, local_on, deps))
+        submit(
+            self._owner,
+            _LAUNCH_GENERATION,
+            lambda: run_launch_starts(zotero_on, local_on, deps, tunnel_on=tunnel_on),
+        )
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:

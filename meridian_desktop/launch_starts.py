@@ -1,4 +1,4 @@
-"""The two launch-time starts in docs/local-trust-contract.md (amendments A and B). Pure Python: no Qt import.
+"""The launch-time starts in docs/local-trust-contract.md (amendments A, B and G). Pure Python: no Qt import.
 
 Each start runs at most once, when the desktop launches, and only when its own setting is on:
 
@@ -8,9 +8,14 @@ Each start runs at most once, when the desktop launches, and only when its own s
   answers at the local URL, and the runner reports the local scope not running. It runs the fixed local start once,
   through runner_controls, which logs the attempt. The local URL check is an extra guard: the core's server stops any
   program already using its port before it starts, so a server the owner runs by hand must not be replaced.
+- The hosted tunnel (amendment G): only in Hosted or Tunnel mode, only when the core checkout and its Python were
+  confirmed in Settings, only while the tunnel buttons are on (tunnel_control_enabled), and only when the runner
+  reports the tunnel scope not running. It runs the fixed tunnel start once, through runner_controls, which logs the
+  attempt. The tunnel gives claude.ai access to the working folder, so the owner confirms the switch in a dialog that
+  names it, and nothing else starts the tunnel by itself.
 
-A switch that is on but has no confirmed value is skipped with a plain sentence, so the status line says why. Neither
-start restarts anything, and an unknown state is never treated as not running. The caller supplies every outside call
+A switch that is on but has no confirmed value is skipped with a plain sentence, so the status line says why. No start
+restarts anything, and an unknown state is never treated as not running. The caller supplies every outside call
 through LaunchDeps, so the tests use fakes. Each step catches its own failure and reports it in plain words, with a
 class name only when there is no fixed message.
 """
@@ -28,6 +33,10 @@ from meridian_desktop.zotero_client import API_NOT_RUNNING, ZoteroError
 
 PROGRAM_ZOTERO = "Zotero"
 PROGRAM_LOCAL = "Local server"
+PROGRAM_TUNNEL = "Hosted tunnel"
+
+#: The desktop modes in which the tunnel start is allowed at launch (amendment G).
+TUNNEL_MODES = ("hosted", "tunnel")
 
 STARTED = "started"
 SKIPPED = "skipped"
@@ -48,6 +57,19 @@ LOCAL_ANSWERING_TEXT = "Something already answers at the local URL, so the local
 LOCAL_STATUS_TEXT = "The runner does not report the local server as not running, so it was not started at launch."
 LOCAL_FAILED_TEXT = "The local server was not started at launch. {}"
 LOCAL_STARTED_TEXT = "The local server was started once, at launch."
+TUNNEL_STARTED_TEXT = "The hosted tunnel was started once, at launch."
+TUNNEL_MODE_TEXT = (
+    "The hosted tunnel was not started at launch, because the desktop is not set to Hosted or Tunnel mode."
+)
+TUNNEL_CONTROLS_OFF_TEXT = (
+    "The hosted tunnel was not started at launch, because the tunnel buttons are off. Turn them on in Settings first."
+)
+TUNNEL_CORE_NOT_SET_TEXT = (
+    "The core checkout and its Python were not confirmed in Settings, so the hosted tunnel was not started at launch. "
+    "Turn the tunnel switch on again to confirm them."
+)
+TUNNEL_STATUS_TEXT = "The runner does not report the tunnel as not running, so it was not started at launch."
+TUNNEL_FAILED_TEXT = "The hosted tunnel was not started at launch. {}"
 
 
 @dataclass(frozen=True)
@@ -67,7 +89,9 @@ class LaunchDeps:
     path the owner confirmed in Settings, or None when none was confirmed. zotero_start(exe) starts it and raises
     ZoteroError on failure. local_health() returns a local_client HEALTH_* word for the saved local URL. local_status()
     and local_start() return a ControlResult for the local scope. core_ready says whether the core checkout and its
-    Python were confirmed in Settings.
+    Python were confirmed in Settings. tunnel_mode says whether the desktop is in a TUNNEL_MODES mode, and
+    tunnel_controls_on whether the tunnel buttons are on. tunnel_status() and tunnel_start() return a ControlResult
+    for the tunnel scope.
     """
 
     zotero_probe: Callable[[], Any]
@@ -77,6 +101,10 @@ class LaunchDeps:
     local_status: Callable[[], ControlResult]
     local_start: Callable[[], ControlResult]
     core_ready: bool
+    tunnel_mode: bool
+    tunnel_controls_on: bool
+    tunnel_status: Callable[[], ControlResult]
+    tunnel_start: Callable[[], ControlResult]
 
 
 def _zotero_step(deps: LaunchDeps) -> LaunchNote:
@@ -111,22 +139,46 @@ def _local_step(deps: LaunchDeps) -> LaunchNote:
     return LaunchNote(PROGRAM_LOCAL, FAILED, LOCAL_FAILED_TEXT.format(result.message))
 
 
-def run_launch_starts(zotero_on: bool, local_on: bool, deps: LaunchDeps) -> tuple[LaunchNote, ...]:
-    """Run each start whose setting is on, once, in order: Zotero, then the local server. Off means no call at all."""
+def _tunnel_step(deps: LaunchDeps) -> LaunchNote:
+    if not deps.tunnel_mode:
+        return LaunchNote(PROGRAM_TUNNEL, SKIPPED, TUNNEL_MODE_TEXT)
+    if not deps.core_ready:
+        return LaunchNote(PROGRAM_TUNNEL, SKIPPED, TUNNEL_CORE_NOT_SET_TEXT)
+    if not deps.tunnel_controls_on:
+        return LaunchNote(PROGRAM_TUNNEL, SKIPPED, TUNNEL_CONTROLS_OFF_TEXT)
+    try:
+        if deps.tunnel_status().state != NOT_RUNNING:
+            return LaunchNote(PROGRAM_TUNNEL, SKIPPED, TUNNEL_STATUS_TEXT)
+        result = deps.tunnel_start()
+    except Exception as exc:  # noqa: BLE001 - a launch step never raises into the window
+        return LaunchNote(PROGRAM_TUNNEL, FAILED, TUNNEL_FAILED_TEXT.format(exc.__class__.__name__))
+    if result.outcome == CONFIRMED:
+        return LaunchNote(PROGRAM_TUNNEL, STARTED, TUNNEL_STARTED_TEXT)
+    return LaunchNote(PROGRAM_TUNNEL, FAILED, TUNNEL_FAILED_TEXT.format(result.message))
+
+
+def run_launch_starts(
+    zotero_on: bool, local_on: bool, deps: LaunchDeps, *, tunnel_on: bool = False
+) -> tuple[LaunchNote, ...]:
+    """Run each start whose setting is on, once, in order: Zotero, the local server, then the tunnel. Off means no call."""
     notes: list[LaunchNote] = []
     if zotero_on:
         notes.append(_zotero_step(deps))
     if local_on:
         notes.append(_local_step(deps))
+    if tunnel_on:
+        notes.append(_tunnel_step(deps))
     return tuple(notes)
 
 
 __all__ = [
     "FAILED",
     "PROGRAM_LOCAL",
+    "PROGRAM_TUNNEL",
     "PROGRAM_ZOTERO",
     "SKIPPED",
     "STARTED",
+    "TUNNEL_MODES",
     "LaunchDeps",
     "LaunchNote",
     "run_launch_starts",

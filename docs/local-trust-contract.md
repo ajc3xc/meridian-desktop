@@ -7,8 +7,9 @@ repository).
 
 ## Rules
 
-1. Start and stop are user actions only, except the two launch-time starts in the Amendment,
-   each off by default. Nothing starts on a timer or from any request that arrives over the network.
+1. Start and stop are user actions only, except the three launch-time starts in the Amendment
+   (Zotero and the local server, amendments A and B, and the hosted tunnel, amendment G), each off by
+   default. Nothing starts on a timer or from any request that arrives over the network.
 2. Each action shows a confirmation dialog that names the exact command, the scope and the
    working folder. Cancel changes nothing.
 3. The command is fixed: `python -m meridian.local_runner` with the subcommands `start`,
@@ -72,3 +73,20 @@ F. Owner decision, 2026-10-23. `tunnel_control_enabled` now defaults to `true`, 
    owner first, every time, in the same dialog from rule 2, and Restart still asks before its start
    (rule 9). Cancel changes nothing. A saved `tunnel_control_enabled: false` turns the buttons off. No
    other part of the contract changes.
+
+## Amendment G (requested by the owner in chat on 2026-10-31; each switch-on needs its own confirmation)
+
+G. Hosted tunnel at launch. The setting `tunnel_autostart` (default false) turns this on. When the desktop
+   launches with it on, the desktop starts the tunnel once, through the fixed tunnel start in rule 3 and
+   under the same timeouts and log as rules 5, 6 and E, only when all of these hold: the desktop is in
+   `hosted` or `tunnel` mode, the core checkout and its Python were confirmed in Settings, the tunnel
+   buttons are on (`tunnel_control_enabled`, Amendment F), and the runner reports the tunnel scope not
+   running. Nothing else starts the tunnel by itself, and a launch that finds the tunnel running starts
+   nothing.
+   The tunnel gives claude.ai access to the working folder. So the switch shows the same confirmation
+   dialog as rule 2, which names the exact tunnel command, the working folder, and says that claude.ai can
+   reach that folder every time the desktop opens. Confirming it records the core Python and checkout
+   the dialog showed, as `confirmed_core_python` and `confirmed_core_checkout`. Cancel leaves the switch
+   off. Turning it off saves at once and asks nothing. Saving a core checkout or Python path later turns
+   this switch off, as it does the two in Amendments A and B, and the owner must confirm it again.
+   Every launch start in G is logged as rule E says.

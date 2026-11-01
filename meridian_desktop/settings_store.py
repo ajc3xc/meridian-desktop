@@ -49,7 +49,7 @@ HOSTED_MODE = "hosted"
 
 # The three owner-confirmed control switches. Each is a real true or false. An absent key means the default in
 # CONTROL_FLAG_DEFAULTS, which is set once below the Settings class.
-CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
+CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart", "tunnel_autostart")
 
 # The exact values the owner saw in the confirmation dialog when a launch-time switch was turned on (amendments A and B
 # of docs/local-trust-contract.md). The launch-time starts run only with these, and never with the current core setup.
@@ -95,6 +95,9 @@ class Settings:
     tunnel_control_enabled: bool = True
     zotero_autostart: bool = False
     local_server_autostart: bool = False
+    # tunnel_autostart starts the hosted tunnel once at launch, only in Hosted or Tunnel mode. Default off, and turned
+    # on only after the owner confirms the dialog that names the working folder claude.ai can reach (amendment G).
+    tunnel_autostart: bool = False
     confirmed_core_python: str = ""
     confirmed_core_checkout: str = ""
     confirmed_zotero_exe: str = ""
@@ -437,8 +440,8 @@ class SettingsStore:
         """Validate and save one core setting. Raises ValueError with plain words when it is refused.
 
         A refused value writes nothing. Every other field in the saved file is kept, except that a saved core path turns
-        off both launch-time switches (zotero_autostart and local_server_autostart). The owner must confirm them again
-        against the new setup. The caller says so in the Settings status line.
+        off every launch-time switch (zotero_autostart, local_server_autostart and tunnel_autostart). The owner must
+        confirm them again against the new setup. The caller says so in the Settings status line.
         """
         text = value.strip()
         problem = core_path_problem(key, text)
@@ -449,6 +452,7 @@ class SettingsStore:
             **{key: text, CORE_AUTO_FLAGS[key]: False},
             zotero_autostart=False,
             local_server_autostart=False,
+            tunnel_autostart=False,
         )
         self.save(updated)
         return updated

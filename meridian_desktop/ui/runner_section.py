@@ -6,8 +6,8 @@ The block has three parts, in this order:
   pool when the tab is shown, and the block says "checking" until it answers. An unknown state is never shown as running.
 - Start, Stop and Restart for the local scope (ui/scope_controls.py). They are on when the Meridian core checkout and
   its Python are set, and each one asks the owner first.
-- Two switches, zotero_autostart and local_server_autostart (amendments A to C of the contract). Turning one on shows
-  the same confirmation dialog, and Cancel leaves it off. Confirming it saves the switch with the exact values the
+- Three switches: zotero_autostart and local_server_autostart (amendments A to C of the contract), and
+  tunnel_autostart (amendment G). Turning one on shows the same confirmation dialog, and Cancel leaves it off. Confirming it saves the switch with the exact values the
   dialog showed (the Zotero program, or the core Python and checkout), and the launch start uses only those. Turning
   one off saves at once and asks nothing.
 
@@ -23,7 +23,8 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QCheckBox, QLabel, QVBoxLayout, QWidget
 
-from meridian_desktop.runner_controls import SCOPE_LOCAL, START, ControlResult, confirmation_text
+from meridian_desktop.launch_starts import TUNNEL_MODES
+from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL, START, ControlResult, confirmation_text
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
 from meridian_desktop.ui.scope_controls import CORE_NOT_SET_TEXT, ScopeControls, local_gate
@@ -57,6 +58,23 @@ ZOTERO_ON_TEXT = "Saved. Zotero will start when the desktop opens, if nothing an
 LOCAL_ON_TEXT = "Saved. The local server will start when the desktop opens, if the runner reports it not running."
 SWITCH_OFF_TEXT = "Saved. It will not start when the desktop opens."
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
+TUNNEL_CHECK_TEXT = (
+    "Start the hosted tunnel when the desktop opens, only in Hosted or Tunnel mode and only when the runner "
+    "reports it not running"
+)
+TUNNEL_QUESTION = "Start the hosted tunnel when the desktop opens?"
+TUNNEL_BODY_EXTRA = (
+    "The tunnel starts once per desktop launch, only in Hosted or Tunnel mode, and only when the runner reports it "
+    "not running. While it runs, claude.ai can reach the working folder shown above. It starts again on every desktop "
+    "launch with no further question. Turn this switch off to stop that."
+)
+TUNNEL_MODE_NOT_SET_TEXT = "Not turned on. Set the desktop to Hosted or Tunnel mode first."
+TUNNEL_CONTROLS_OFF_TEXT = "Not turned on. The tunnel buttons are off. Turn them on first."
+TUNNEL_CANCELLED_TEXT = "Not turned on. The tunnel will not start when the desktop opens."
+TUNNEL_ON_TEXT = (
+    "Saved. The tunnel will start when the desktop opens, if the desktop is in Hosted or Tunnel mode and the "
+    "runner reports it not running."
+)
 
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -95,8 +113,11 @@ class RunnerSection(QWidget):
         self._zotero_box.setObjectName("settings-zotero-autostart")
         self._local_box = QCheckBox(LOCAL_CHECK_TEXT, self)
         self._local_box.setObjectName("settings-local-autostart")
+        self._tunnel_box = QCheckBox(TUNNEL_CHECK_TEXT, self)
+        self._tunnel_box.setObjectName("settings-tunnel-autostart")
         layout.addWidget(self._zotero_box)
         layout.addWidget(self._local_box)
+        layout.addWidget(self._tunnel_box)
 
         self._message = _label(self, "runner-autostart-message")
         self._message.setVisible(False)
@@ -104,6 +125,7 @@ class RunnerSection(QWidget):
 
         self._zotero_box.clicked.connect(self._on_zotero_clicked)
         self._local_box.clicked.connect(self._on_local_clicked)
+        self._tunnel_box.clicked.connect(self._on_tunnel_clicked)
         self.refresh_flags()
 
     # ----------------------------------------------------------- state
@@ -111,7 +133,11 @@ class RunnerSection(QWidget):
     def refresh_flags(self) -> None:
         """Show the two saved switches. Signals are blocked, so showing them never asks the owner."""
         core = self._actions.core()
-        for box, on in ((self._zotero_box, core.zotero_autostart), (self._local_box, core.local_server_autostart)):
+        for box, on in (
+            (self._zotero_box, core.zotero_autostart),
+            (self._local_box, core.local_server_autostart),
+            (self._tunnel_box, core.tunnel_autostart),
+        ):
             box.blockSignals(True)
             box.setChecked(on)
             box.blockSignals(False)
@@ -241,6 +267,31 @@ class RunnerSection(QWidget):
         # The exact Python and folder the dialog showed are stored. The launch start uses these, not the later setup.
         self._save(
             "local_server_autostart", True, self._local_box, LOCAL_ON_TEXT,
+            confirmed={"confirmed_core_python": core.python, "confirmed_core_checkout": core.cwd},
+        )
+
+    @Slot(bool)
+    def _on_tunnel_clicked(self, checked: bool) -> None:
+        if not checked:
+            self._save("tunnel_autostart", False, self._tunnel_box, TUNNEL_ON_TEXT)
+            return
+        core = self._actions.core()
+        if core.mode not in TUNNEL_MODES:
+            self._revert(self._tunnel_box, TUNNEL_MODE_NOT_SET_TEXT)
+            return
+        if not core.core_ready:
+            self._revert(self._tunnel_box, LOCAL_NOT_SET_TEXT)
+            return
+        if not core.tunnel_control_enabled:
+            self._revert(self._tunnel_box, TUNNEL_CONTROLS_OFF_TEXT)
+            return
+        body = confirmation_text(core.python, START, SCOPE_TUNNEL, core.cwd) + f"\n\n{TUNNEL_BODY_EXTRA}"
+        if not self._actions.ask(self, TUNNEL_QUESTION, body, "Turn on"):
+            self._revert(self._tunnel_box, TUNNEL_CANCELLED_TEXT)
+            return
+        # The exact Python and folder the dialog showed are stored. The launch start uses these, not the later setup.
+        self._save(
+            "tunnel_autostart", True, self._tunnel_box, TUNNEL_ON_TEXT,
             confirmed={"confirmed_core_python": core.python, "confirmed_core_checkout": core.cwd},
         )
 

@@ -1,4 +1,4 @@
-"""Tests for meridian_desktop/launch_starts.py: the launch-time starts of amendments A and B. Pure Python, all fakes.
+"""Tests for meridian_desktop/launch_starts.py: the launch-time starts of amendments A, B and G. Pure Python, all fakes.
 
 Each test builds LaunchDeps from recording fakes. No Zotero, no runner and no socket is touched. A start happens only
 when its setting is on and its guard passes, and each start is called at most once.
@@ -13,9 +13,11 @@ import pytest
 from meridian_desktop.launch_starts import (
     FAILED,
     PROGRAM_LOCAL,
+    PROGRAM_TUNNEL,
     PROGRAM_ZOTERO,
     SKIPPED,
     STARTED,
+    TUNNEL_MODES,
     LaunchDeps,
     run_launch_starts,
 )
@@ -32,7 +34,8 @@ class Recorder:
 
     def __init__(self, *, probe=API_NOT_RUNNING, exe=EXE, zotero_error=None, zotero_raises=None,
                  health=HEALTH_NOT_RUNNING, status_state=NOT_RUNNING, local_result=None, local_raises=None,
-                 core_ready=True):
+                 core_ready=True, tunnel_mode=True, tunnel_controls_on=True, tunnel_state=NOT_RUNNING,
+                 tunnel_result=None, tunnel_raises=None):
         self.calls: list[str] = []
         self._probe = probe
         self._exe = exe
@@ -43,6 +46,11 @@ class Recorder:
         self._local_result = local_result or ControlResult("start", "local", CONFIRMED, "started", RUNNING, 42)
         self._local_raises = local_raises
         self._core_ready = core_ready
+        self._tunnel_mode = tunnel_mode
+        self._tunnel_controls_on = tunnel_controls_on
+        self._tunnel_state = tunnel_state
+        self._tunnel_result = tunnel_result or ControlResult("start", "tunnel", CONFIRMED, "started", RUNNING, 43)
+        self._tunnel_raises = tunnel_raises
 
     def deps(self) -> LaunchDeps:
         return LaunchDeps(
@@ -53,6 +61,10 @@ class Recorder:
             local_status=self._local_status,
             local_start=self._local_start,
             core_ready=self._core_ready,
+            tunnel_mode=self._tunnel_mode,
+            tunnel_controls_on=self._tunnel_controls_on,
+            tunnel_status=self._tunnel_status,
+            tunnel_start=self._tunnel_start,
         )
 
     def _zotero_probe(self):
@@ -87,9 +99,19 @@ class Recorder:
             raise self._local_raises
         return self._local_result
 
+    def _tunnel_status(self):
+        self.calls.append("tunnel_status")
+        return ControlResult("status", "tunnel", CONFIRMED, "state", self._tunnel_state)
 
-def _run(recorder, *, zotero=False, local=False):
-    return run_launch_starts(zotero, local, recorder.deps())
+    def _tunnel_start(self):
+        self.calls.append("tunnel_start")
+        if self._tunnel_raises is not None:
+            raise self._tunnel_raises
+        return self._tunnel_result
+
+
+def _run(recorder, *, zotero=False, local=False, tunnel=False):
+    return run_launch_starts(zotero, local, recorder.deps(), tunnel_on=tunnel)
 
 
 # ------------------------------------------------------------------ off means no call at all
@@ -100,6 +122,13 @@ def test_both_switches_off_makes_no_call_and_no_note():
 
     assert _run(rec, zotero=False, local=False) == ()
     assert rec.calls == []
+
+
+def test_the_tunnel_switch_off_makes_no_tunnel_call():
+    rec = Recorder()
+
+    assert _run(rec, tunnel=False) == ()
+    assert not any(call.startswith("tunnel") for call in rec.calls)
 
 
 # ------------------------------------------------------------------ Zotero at launch (amendment A)
@@ -217,14 +246,88 @@ def test_an_unexpected_local_error_is_failed_with_the_class_name_only():
     assert "a path that must not be shown" not in notes[0].message
 
 
-# ------------------------------------------------------------------ both, in order, each once
+# ------------------------------------------------------------------ the hosted tunnel at launch (amendment G)
 
 
-def test_both_starts_run_in_order_each_exactly_once():
-    rec = Recorder(probe=API_NOT_RUNNING, status_state=NOT_RUNNING)
+def test_the_tunnel_starts_once_in_hosted_or_tunnel_mode_when_the_runner_says_not_running():
+    assert TUNNEL_MODES == ("hosted", "tunnel")
+    rec = Recorder(tunnel_mode=True, tunnel_controls_on=True, tunnel_state=NOT_RUNNING)
 
-    notes = _run(rec, zotero=True, local=True)
+    notes = _run(rec, tunnel=True)
 
-    assert [n.program for n in notes] == [PROGRAM_ZOTERO, PROGRAM_LOCAL]
+    assert [n.outcome for n in notes] == [STARTED]
+    assert notes[0].program == PROGRAM_TUNNEL
+    assert rec.calls == ["tunnel_status", "tunnel_start"]
+
+
+def test_the_tunnel_is_not_started_outside_hosted_or_tunnel_mode_and_says_so():
+    rec = Recorder(tunnel_mode=False)
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [SKIPPED]
+    assert "not set to Hosted or Tunnel mode" in notes[0].message
+    assert not any(call.startswith("tunnel") for call in rec.calls)
+
+
+def test_the_tunnel_is_not_started_when_the_core_is_not_confirmed():
+    rec = Recorder(core_ready=False, tunnel_mode=True)
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [SKIPPED]
+    assert "not confirmed in Settings" in notes[0].message
+    assert not any(call.startswith("tunnel") for call in rec.calls)
+
+
+def test_the_tunnel_is_not_started_while_the_tunnel_buttons_are_off():
+    rec = Recorder(tunnel_mode=True, tunnel_controls_on=False)
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [SKIPPED]
+    assert "tunnel buttons are off" in notes[0].message
+    assert not any(call.startswith("tunnel") for call in rec.calls)
+
+
+@pytest.mark.parametrize("state", [RUNNING, "unknown"])
+def test_the_tunnel_is_not_started_unless_the_runner_says_not_running(state):
+    rec = Recorder(tunnel_mode=True, tunnel_controls_on=True, tunnel_state=state)
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [SKIPPED]
+    assert "tunnel_start" not in rec.calls
+
+
+def test_a_failed_tunnel_start_is_reported_with_its_message():
+    rec = Recorder(tunnel_result=ControlResult("start", "tunnel", CONTROL_FAILED, "The tunnel did not stay running."))
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [FAILED]
+    assert "did not stay running" in notes[0].message
+
+
+def test_an_unexpected_tunnel_error_is_failed_with_the_class_name_only():
+    rec = Recorder(tunnel_raises=OSError("a working folder that must not be shown"))
+
+    notes = _run(rec, tunnel=True)
+
+    assert [n.outcome for n in notes] == [FAILED]
+    assert "OSError" in notes[0].message
+    assert "a working folder that must not be shown" not in notes[0].message
+
+
+# ------------------------------------------------------------------ all three, in order, each once
+
+
+def test_all_three_starts_run_in_order_each_exactly_once():
+    rec = Recorder(probe=API_NOT_RUNNING, status_state=NOT_RUNNING, tunnel_state=NOT_RUNNING)
+
+    notes = _run(rec, zotero=True, local=True, tunnel=True)
+
+    assert [n.program for n in notes] == [PROGRAM_ZOTERO, PROGRAM_LOCAL, PROGRAM_TUNNEL]
     assert [call for call in rec.calls if call.startswith("zotero_start")] == [f"zotero_start:{EXE}"]
     assert rec.calls.count("local_start") == 1
+    assert rec.calls.count("tunnel_start") == 1
