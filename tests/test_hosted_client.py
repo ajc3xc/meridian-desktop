@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -240,6 +243,20 @@ def test_network_failure_maps_to_unreachable_without_the_cause(error):
     assert info.value.__context__ is None
     _assert_no_token_in(info.value)
     assert len(transport.requests) == 1
+
+
+def test_network_failure_is_logged_with_its_class_and_host_but_never_the_token(caplog):
+    caplog.set_level(logging.WARNING, logger="meridian_desktop.hosted_client")
+    transport = FakeTransport(error=urllib.error.URLError(OSError(f"refused {FAKE_TOKEN}")))
+
+    with pytest.raises(HostedUnreachable):
+        list_projects(HTTPS_BASE, FAKE_TOKEN, transport=transport)
+
+    host = urllib.parse.urlsplit(HTTPS_BASE).hostname
+    assert "hosted request failed: unreachable" in caplog.text
+    assert f"host={host}" in caplog.text
+    assert "URLError(reason=OSError, errno=None)" in caplog.text
+    assert FAKE_TOKEN not in caplog.text
 
 
 def test_timeout_maps_to_hosted_timeout_and_is_not_retried():

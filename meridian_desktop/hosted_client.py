@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import time
 import urllib.error
 import urllib.parse
@@ -37,6 +38,8 @@ from meridian_desktop.local_client import LOOPBACK_HOSTS
 
 HOSTED_TIMEOUT = 10.0
 PROJECTS_PATH = "/projects"
+
+_LOG = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 USER_AGENT = f"MeridianDesktop/{__version__} (hosted client)"
@@ -213,17 +216,38 @@ def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
         raise
 
 
+def _failure_detail(exc: BaseException) -> str:
+    """The exception's class, and for a URLError the reason's class and errno. Never a message text: a message can
+    hold a token or a header, and a URLError reason is only the text of an OS error."""
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        reason_name = type(reason).__name__ if reason is not None else "none"
+        return f"URLError(reason={reason_name}, errno={getattr(reason, 'errno', None)})"
+    return type(exc).__name__
+
+
+def _host_of(request: urllib.request.Request) -> str:
+    """The hostname the request goes to. The URL holds no token, and only the host is logged."""
+    return urllib.parse.urlsplit(request.full_url).hostname or "unknown"
+
+
 def _send(transport: Transport, request: urllib.request.Request, timeout: float) -> Reply:
     """Run the transport and map its failures to typed errors. The original exception is not attached."""
     kind = "unreachable"
+    detail = "none"
     try:
         return transport(request, timeout)
     except HostedError:
         raise
-    except TimeoutError:
+    except TimeoutError as exc:
         kind = "timeout"
-    except (OSError, http.client.HTTPException, ValueError):
+        detail = type(exc).__name__
+    except (OSError, http.client.HTTPException, ValueError) as exc:
         kind = "unreachable"
+        detail = _failure_detail(exc)
+    # Logged to desktop.log so a failed attempt leaves a line behind: the kind, the host, and the exception's
+    # class and errno. No message text, no headers, no token.
+    _LOG.warning("hosted request failed: %s, host=%s, %s", kind, _host_of(request), detail)
     # Raised outside the except blocks, so the transport's exception (which may hold request headers)
     # is not attached as context.
     if kind == "timeout":
