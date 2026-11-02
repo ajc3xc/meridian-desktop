@@ -24,7 +24,7 @@ from meridian_desktop import hosted_client, local_client, projects_backup
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop.ui.projects_tab import LOADING_TEXT, ProjectsTab
+from meridian_desktop.ui.projects_tab import BACKUP_FAILED_TEXT, LOADING_TEXT, ProjectsTab
 from meridian_desktop.ui.settings_tab import SettingsTab
 
 FAKE_TOKEN = "sk_meridian_fake-choice-0006"
@@ -486,3 +486,138 @@ def test_a_legacy_backup_is_removed_only_when_a_newer_kept_backup_holds_all_its_
 
     assert (legacy.path.name in names) is not covered
     assert len(list(folder.glob(FULL_GLOB))) >= projects_backup.BACKUPS_KEPT
+
+
+# ----------------------------------------------------------------- one reset path: every trigger clears the same way
+
+
+CHOOSE_PROMPT_TEXT = "Press Choose projects to back up to read the hosted projects."
+
+
+def _trigger_account_changed(qtbot, tab, settings_path, holder):
+    SettingsStore(settings_path).save(Settings(mode="local", hosted_url="https://other.test", local_url=LOCAL_URL))
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return RESET_TEXT_FOR["account_changed"]
+
+
+def _trigger_token_removed(qtbot, tab, settings_path, holder):
+    holder["token"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return RESET_TEXT_FOR["token_removed"]
+
+
+def _trigger_token_added(qtbot, tab, settings_path, holder):
+    holder["token"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    holder["token"] = FAKE_TOKEN
+    tab.refresh()
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return RESET_TEXT_FOR["token_added"]
+
+
+def _trigger_no_projects(qtbot, tab, settings_path, holder):
+    holder["answers"] = []
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+    qtbot.waitUntil(lambda: backup_status.text() == projects_backup.NO_PROJECTS_TEXT, timeout=5000)
+    return projects_backup.NO_PROJECTS_TEXT
+
+
+def _trigger_choose_failed(qtbot, tab, settings_path, holder):
+    holder["fail"] = True
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+    qtbot.waitUntil(lambda: backup_status.text().startswith(BACKUP_FAILED_TEXT), timeout=5000)
+    return BACKUP_FAILED_TEXT
+
+
+def _trigger_write_refused(qtbot, tab, settings_path, holder):
+    holder["token"] = "sk_meridian_fake-other-account-0011"
+    tab.findChild(QPushButton, "projects-backup-write-checked").click()
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+    qtbot.waitUntil(lambda: backup_status.text() == projects_backup.ACCOUNT_CHANGED_TEXT, timeout=5000)
+    return projects_backup.ACCOUNT_CHANGED_TEXT
+
+
+def _trigger_stale_choose(qtbot, tab, settings_path, holder):
+    """A Choose is in flight when the token is removed. Its late answer resets the busy flag and the status line."""
+    holder["block"] = threading.Event()
+    holder["entered"] = threading.Event()
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+    # Wait until the Choose has read the token and is inside the hosted read, so the removal comes after the read.
+    assert holder["entered"].wait(timeout=5)
+    holder["token"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    holder["block"].set()
+    qtbot.waitUntil(lambda: not tab._backup_running, timeout=5000)
+    return CHOOSE_PROMPT_TEXT
+
+
+RESET_TEXT_FOR = {
+    "account_changed": "The hosted account changed, so the checklist was cleared. Choose the projects again.",
+    "token_removed": "No hosted token is saved, so the checklist was cleared.",
+    "token_added": "A hosted token was saved again, so the checklist was cleared. Choose the projects again.",
+}
+
+TRIGGERS = {
+    "account_changed": _trigger_account_changed,
+    "token_removed": _trigger_token_removed,
+    "token_added": _trigger_token_added,
+    "no_projects": _trigger_no_projects,
+    "choose_failed": _trigger_choose_failed,
+    "write_refused": _trigger_write_refused,
+    "stale_choose": _trigger_stale_choose,
+}
+
+
+@pytest.mark.parametrize("trigger", sorted(TRIGGERS))
+def test_every_trigger_resets_the_checklist_through_the_same_path(qtbot, settings_path, local_folder, trigger):
+    """Each trigger must clear the checklist, its rows and key, hide it, disable Write, and set the status line.
+
+    The triggers are run one by one. Each one starts from a shown checklist, except token_added, which starts from a
+    removed token because a list cannot be shown without one.
+    """
+    holder: dict = {"token": FAKE_TOKEN, "answers": list(HOSTED_ROWS), "fail": False}
+
+    def list_hosted(url, token):
+        block = holder.get("block")
+        if block is not None:
+            holder["entered"].set()
+            block.wait(timeout=5)
+        if holder["fail"]:
+            raise hosted_client.HostedUnreachable()
+        return list(holder["answers"])
+
+    sources_token = {"get": lambda: holder["token"]}
+    SettingsStore(settings_path).save(Settings(mode="local", hosted_url=HOSTED_URL, local_url=LOCAL_URL))
+    sources = DataSources(
+        probe=lambda url: local_client.HEALTH_NOT_RUNNING,
+        read_server=lambda url: [],
+        read_file=lambda path: [],
+        get_token=lambda: sources_token["get"](),
+        list_hosted=list_hosted,
+    )
+    tab = ProjectsTab(SettingsStore(settings_path), sources)
+    qtbot.addWidget(tab)
+    tab.refresh()
+    qtbot.waitUntil(lambda: tab.findChild(QLabel, "projects-status").text() != LOADING_TEXT, timeout=5000)
+    if trigger != "token_added":
+        _choose(qtbot, tab)
+
+    expected = TRIGGERS[trigger](qtbot, tab, settings_path, holder)
+
+    status = tab.findChild(QLabel, "projects-backup-status")
+    assert _checklist(tab).count() == 0
+    assert _choice_box(tab).isHidden()
+    assert not _write_button(tab).isEnabled()
+    assert tab._chosen == ()
+    assert not tab._backup_running
+    assert status.text().startswith(expected)

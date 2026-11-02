@@ -76,6 +76,20 @@ BACKUP_FAILED_TEXT = "Projects could not be backed up"
 CHOOSE_BUTTON_TEXT = "Choose projects to back up"
 WRITE_CHECKED_TEXT = "Back up checked projects"
 CHOOSING_TEXT = "Reading the hosted project list..."
+CHOOSE_PROMPT_TEXT = "Press Choose projects to back up to read the hosted projects."
+# Why a checklist is cleared. _reset_choice is the one place that clears it, and each reason has the line the owner sees.
+RESET_ACCOUNT_CHANGED = "account_changed"
+RESET_TOKEN_REMOVED = "token_removed"
+RESET_TOKEN_ADDED = "token_added"
+RESET_CHOOSE_ENDED = "choose_ended"
+RESET_WRITE_REFUSED = "write_refused"
+RESET_TEXT = {
+    RESET_ACCOUNT_CHANGED: "The hosted account changed, so the checklist was cleared. Choose the projects again.",
+    RESET_TOKEN_REMOVED: "No hosted token is saved, so the checklist was cleared.",
+    RESET_TOKEN_ADDED: "A hosted token was saved again, so the checklist was cleared. Choose the projects again.",
+    RESET_CHOOSE_ENDED: "The checklist was cleared.",
+    RESET_WRITE_REFUSED: "The write was refused, so the checklist was cleared. Choose the projects again.",
+}
 
 FIELD_LABELS = {
     "id": "ID",
@@ -176,9 +190,13 @@ class _Loaded:
 
 @dataclass(frozen=True)
 class _Backed:
-    """One finished backup: the status line for it. It holds no Qt object and no token."""
+    """One finished backup: the status line for it, and the reset reason when the write was refused.
+
+    It holds no Qt object and no token.
+    """
 
     message: str
+    reset: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,9 +313,9 @@ def _write_checked(
     settings = store.load().settings
     token = sources.get_token()
     if not _usable_token(token):
-        return _Backed(projects_backup.NO_TOKEN_TEXT)
+        return _Backed(projects_backup.NO_TOKEN_TEXT, RESET_WRITE_REFUSED)
     if projects_backup.account_key(settings.hosted_url, str(token)) != key:
-        return _Backed(projects_backup.ACCOUNT_CHANGED_TEXT)
+        return _Backed(projects_backup.ACCOUNT_CHANGED_TEXT, RESET_WRITE_REFUSED)
     try:
         written = projects_backup.write_backup(
             list(rows),
@@ -400,6 +418,8 @@ class ProjectsTab(QWidget):
         # Each Choose takes the next number, and removing the token takes one too. A Choose result with an older number
         # is dropped, so a list read before the token was removed can never show again.
         self._choice_generation = 0
+        # Whether a hosted token was saved at the last load. A change between two loads resets the checklist.
+        self._token_seen: bool | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
@@ -521,12 +541,14 @@ class ProjectsTab(QWidget):
         The widgets are built the first time a token is seen saved. A tab that never sees one never builds them. The
         destination line is set on each call, so it names the folder the backup would be written to now.
 
-        A removed token also clears the checklist and drops any Choose still in flight (a newer generation number), so its
-        answer cannot show the checklist again.
+        A token removed, or saved again, resets the checklist through _reset_choice. That also drops any Choose still in
+        flight, so its late answer cannot show the checklist again.
         """
+        previous, self._token_seen = self._token_seen, saved
         if not saved:
-            self._choice_generation += 1
-            self._clear_choice()
+            self._reset_choice(RESET_TOKEN_REMOVED)
+        elif previous is False:
+            self._reset_choice(RESET_TOKEN_ADDED)
         if self._backup_row is None:
             if not saved:
                 return
@@ -539,13 +561,18 @@ class ProjectsTab(QWidget):
             row.choice.setVisible(False)
 
     def _sync_account(self, account_key: str | None) -> None:
-        """Clear a checklist that was read for another hosted URL or token, and drop a Choose still in flight for it."""
+        """Reset a checklist that was read for another hosted URL or token."""
         if self._chosen_key is not None and account_key != self._chosen_key:
-            self._choice_generation += 1
-            self._clear_choice()
+            self._reset_choice(RESET_ACCOUNT_CHANGED)
 
-    def _clear_choice(self) -> None:
-        """Empty the checklist, forget its projects, and disable its write button. The checklist box is hidden."""
+    def _reset_choice(self, reason: str, text: str | None = None) -> None:
+        """The one path that clears the checklist. Every trigger calls it, and every step runs each time.
+
+        The generation moves on, so a Choose still in flight is dropped when it answers. The rows and the account key are
+        forgotten, the checklist is emptied and hidden, Write is disabled, and the status line says why. ``text`` replaces
+        the reason's own sentence, for a Choose or a write that has its own message.
+        """
+        self._choice_generation += 1
         self._chosen = ()
         self._chosen_key = None
         row = self._backup_row
@@ -556,6 +583,7 @@ class ProjectsTab(QWidget):
         row.checklist.blockSignals(False)
         row.choice.setVisible(False)
         row.write.setEnabled(False)
+        row.status.setText(text if text is not None else RESET_TEXT[reason])
 
     def _build_backup_row(self) -> _BackupRow:
         column = QVBoxLayout()
@@ -678,12 +706,13 @@ class ProjectsTab(QWidget):
         if row is None:
             return
         if chosen.generation != self._choice_generation:
+            # A late answer for a checklist that was already reset: it frees the busy flag and the status line.
             self._set_busy(False)
+            row.status.setText(CHOOSE_PROMPT_TEXT)
             return
         if not chosen.rows:
-            self._clear_choice()
+            self._reset_choice(RESET_CHOOSE_ENDED, text=chosen.message)
             self._set_busy(False)
-            row.status.setText(chosen.message)
             return
         self._chosen = chosen.rows
         self._chosen_key = chosen.key
@@ -713,6 +742,10 @@ class ProjectsTab(QWidget):
 
     def _show_backup(self, report: _Backed) -> None:
         self._set_busy(False)
+        if report.reset is not None:
+            # A refused write clears the checklist, and its own message is the status line.
+            self._reset_choice(report.reset, text=report.message)
+            return
         if self._backup_row is None:
             return
         self._backup_row.status.setText(report.message)
