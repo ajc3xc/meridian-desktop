@@ -198,7 +198,8 @@ def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settin
     _select(window, "Sessions")
     page = _page(window, "Sessions")
     table = page.findChild(QTableWidget, "sessions-table")
-    qtbot.waitUntil(lambda: table.rowCount() == 1, timeout=5000)
+    # One project header row, then the one session row.
+    qtbot.waitUntil(lambda: table.rowCount() == 2, timeout=5000)
 
     # The local URL comes from Settings, and the project id from the Projects resolver. The hosted fallback
     # gets the Settings URL and the token from the store. The list may refresh while the test runs, so
@@ -208,7 +209,7 @@ def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settin
     picker = page.findChild(QComboBox, "sessions-project-picker")
     assert picker.itemText(0) == "Alpha"
     assert picker.itemData(0) == PID
-    assert table.item(0, 0).text() == "auth-refactor"
+    assert table.item(1, 0).text() == "auth-refactor"  # row 0 is the project header
     assert page.findChild(QLabel, "sessions-status").text().startswith("1 session(s) from hosted Meridian.")
 
     # The token reaches the client only. No label, picker entry or table cell shows it, and no project field
@@ -252,7 +253,8 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
     _select(window, "Sessions")
     page = _page(window, "Sessions")
     table = page.findChild(QTableWidget, "sessions-table")
-    qtbot.waitUntil(lambda: table.rowCount() == 1, timeout=5000)
+    # One project header row, then the one session row.
+    qtbot.waitUntil(lambda: table.rowCount() == 2, timeout=5000)
     assert page.findChild(QPushButton, "sessions-refresh") is not None
     assert hosted_calls == [(HOSTED, PID)]  # the first show read the hosted sessions once
 
@@ -261,7 +263,7 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
         page._timer.timeout.emit()  # noqa: SLF001 - the timer's real connection
         qtbot.waitUntil(lambda: page._in_flight is None, timeout=5000)  # noqa: SLF001
     assert (len(local_calls), len(hosted_calls)) == reads  # three hosted-mode ticks read nothing
-    assert table.rowCount() == 1
+    assert table.rowCount() == 2  # one project header row and one session row
 
 
 # ----------------------------------------------------------- Tools

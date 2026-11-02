@@ -7,6 +7,7 @@ shown, and that a refused address sends nothing. The token is checked against ev
 
 import gc
 import json
+import re
 import threading
 import weakref
 from datetime import datetime, timedelta, timezone
@@ -14,22 +15,27 @@ from types import SimpleNamespace
 
 import pytest
 import shiboken6
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from _shared_delivery import emit, recording_deliveries, visible_state
 from meridian_desktop import hosted_client, sessions_client as sc
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.ui.sessions_panel import (
+    ACTIVE_COLOR,
     COLUMNS,
+    IDLE_COLOR,
     LOADING_TEXT,
+    MAX_GROUPS,
     NO_PROJECTS_TEXT,
     PRESS_REFRESH_TEXT,
     PROJECTS_FAILED_TEXT,
     READ_FAILED_TEXT,
     REFRESH_MS,
+    Project,
     SessionsPanel,
     choose_project,
+    project_tree,
     row_cells,
     status_text,
 )
@@ -194,6 +200,37 @@ def all_visible_text(panel):
     return "\n".join(parts)
 
 
+def is_header_row(table, row):
+    """A project header row spans every column. A session row spans one."""
+    return table.columnSpan(row, 0) > 1
+
+
+def session_cells(panel):
+    """Each session row as its four cell texts, in column order. Project header rows are left out."""
+    table = table_of(panel)
+    return [
+        tuple(table.item(row, column).text() for column in range(table.columnCount()))
+        for row in range(table.rowCount())
+        if not is_header_row(table, row)
+    ]
+
+
+def header_texts(panel):
+    """The text of each project header row, in table order."""
+    table = table_of(panel)
+    return [table.item(row, 0).text() for row in range(table.rowCount()) if is_header_row(table, row)]
+
+
+def header_text(label, count, collapsed=False):
+    """A header row's text: the arrow (open or closed), the project's path label, and its session count."""
+    arrow = "▸" if collapsed else "▾"
+    return f"{arrow} {label}  ({count})"
+
+
+def project(pid, name, parent=""):
+    return Project(project_id=pid, name=name, parent_id=parent)
+
+
 # ----------------------------------------------------------------- nothing sent before the tab is shown
 
 
@@ -258,16 +295,17 @@ def test_refresh_runs_off_the_ui_thread(qtbot):
 # ----------------------------------------------------------------- rows and the status line
 
 
-def test_rows_show_name_status_age_and_client(qtbot):
-    local = FakeLocal(body=body_of([session(name="auth-refactor", status="active", client_type="claude-code")]))
+def test_rows_show_name_state_local_last_seen_and_client(qtbot):
+    # A fixed old time, so the row is idle whatever day the test runs.
+    seen = datetime(2020, 1, 1, 9, 30, 15, tzinfo=timezone.utc)
+    local = FakeLocal(body=body_of([session(name="auth-refactor", last_seen=seen.isoformat(), client_type="claude-code")]))
     panel, _hosted = make_panel(qtbot, local=local)
     panel.show()
     settle(qtbot, panel)
     table = table_of(panel)
     assert [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] == list(COLUMNS)
-    assert table.rowCount() == 1
-    cells = [table.item(0, column).text() for column in range(table.columnCount())]
-    assert cells == ["auth-refactor", "active", "2 h ago", "claude-code"]
+    assert session_cells(panel) == [("auth-refactor", "Idle", sc.format_local(seen), "claude-code")]
+    assert header_texts(panel) == [header_text("Alpha", "1 session(s)")]
     assert "1 session(s) from this computer's Meridian server" in status_of(panel)
 
 
@@ -283,7 +321,8 @@ def test_empty_list_says_no_sessions_right_now(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal(body=b"[]"))
     panel.show()
     settle(qtbot, panel)
-    assert table_of(panel).rowCount() == 0
+    assert session_cells(panel) == []
+    assert header_texts(panel) == [header_text("Alpha", "0 session(s)")]
     assert "No sessions from this computer's Meridian server right now." in status_of(panel)
 
 
@@ -291,7 +330,7 @@ def test_unnamed_row_reads_as_unnamed(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session(name="")])))
     panel.show()
     settle(qtbot, panel)
-    assert table_of(panel).item(0, 0).text() == "(unnamed)"
+    assert session_cells(panel)[0][0] == "(unnamed)"
 
 
 def test_table_is_read_only_and_the_only_button_is_refresh(qtbot):
@@ -327,8 +366,8 @@ def test_running_claude_processes_say_not_connected_and_list_none(qtbot):
     line = panel.findChild(QLabel, "sessions-claude-processes").text()
     assert "Claude Desktop and Claude Code" in line
     assert "Not connected" in line
-    # The only table row is the one session the local server sent, never a process.
-    assert table_of(panel).rowCount() == 1
+    # The only session row is the one session the local server sent, never a process.
+    assert len(session_cells(panel)) == 1
 
 
 # ----------------------------------------------------------------- picker
@@ -410,7 +449,7 @@ def test_local_not_running_with_a_token_reads_hosted_and_names_the_source(qtbot)
     request, _timeout = hosted.calls[0]
     assert request.full_url.startswith(HOSTED + "/projects/")
     assert request.get_header("Authorization") == f"Bearer {SENTINEL_TOKEN}"
-    assert table_of(panel).item(0, 0).text() == "from-hosted"
+    assert session_cells(panel)[0][0] == "from-hosted"
     assert "1 session(s) from hosted Meridian" in status_of(panel)
 
 
@@ -582,7 +621,7 @@ def test_a_local_tick_that_gets_no_answer_changes_nothing_and_asks_hosted_nothin
     assert counts.hosted == hosted_reads
     assert hosted.calls == []
     assert status_of(panel) == status_before
-    assert table_of(panel).item(0, 0).text() == "kept"
+    assert session_cells(panel)[0][0] == "kept"
 
 
 def test_a_project_change_outside_local_mode_reads_nothing_and_says_press_refresh(qtbot):
@@ -637,16 +676,17 @@ def test_a_stale_result_is_dropped_when_a_newer_refresh_has_started(qtbot):
     panel.show()
     qtbot.waitUntil(lambda: len(local.paths) == 1)
     panel.refresh()
-    qtbot.waitUntil(lambda: table_of(panel).rowCount() == 1 and table_of(panel).item(0, 0).text() == "new-run")
+    qtbot.waitUntil(lambda: _first_name(panel) == "new-run")
     gate.set()
     qtbot.wait(150)
     settle(qtbot, panel)
-    assert table_of(panel).item(0, 0).text() == "new-run"
+    assert _first_name(panel) == "new-run"
 
 
 def _first_name(panel):
-    table = table_of(panel)
-    return table.item(0, 0).text() if table.rowCount() == 1 else ""
+    """The name of the only session row, or "" when there is not exactly one."""
+    cells = session_cells(panel)
+    return cells[0][0] if len(cells) == 1 else ""
 
 
 def test_a_result_from_another_tab_or_from_a_superseded_read_is_dropped(qtbot):
@@ -705,10 +745,12 @@ def test_status_text_for_each_state():
     )
 
 
-def test_row_cells_orders_the_four_columns_and_shows_an_age():
+def test_row_cells_orders_the_four_columns_with_state_local_time_and_one_client():
     now = datetime(2026, 10, 22, 12, 0, 0, tzinfo=timezone.utc)
     row = sc.SessionRow(name="", status="idle", last_seen="2026-10-22 11:55:00", client="codex")
-    assert row_cells(row, now) == ("(unnamed)", "idle", "5 min ago", "codex")
+    # Five minutes ago is inside the 10-minute window, so the row is Active, whatever the server status says.
+    expected_seen = sc.format_local(datetime(2026, 10, 22, 11, 55, 0, tzinfo=timezone.utc))
+    assert row_cells(row, now) == ("(unnamed)", "Active", expected_seen, "codex")
 
 
 def test_the_table_uses_single_row_selection(qtbot):
@@ -772,3 +814,251 @@ def test_a_read_still_running_when_its_tab_is_deleted_does_not_keep_the_tab(qtbo
     finally:
         gate.set()
         gc.enable()
+
+
+# ----------------------------------------------------------------- search
+
+
+def two_sessions():
+    return body_of(
+        [
+            session(name="Auth-Refactor", client_type="claude-code", last_seen=ago(minutes=1)),
+            session(name="docs-pass", client_type="codex", last_seen=ago(minutes=1)),
+        ]
+    )
+
+
+def names_of(panel):
+    return [cells[0] for cells in session_cells(panel)]
+
+
+def test_search_filters_rows_by_name_and_by_client_ignoring_case(qtbot):
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=two_sessions()))
+    panel.show()
+    settle(qtbot, panel)
+    assert names_of(panel) == ["Auth-Refactor", "docs-pass"]
+    panel._search.setText("AUTH")  # noqa: SLF001 - the search box is the test's input
+    assert names_of(panel) == ["Auth-Refactor"]
+    panel._search.setText("codex")  # noqa: SLF001
+    assert names_of(panel) == ["docs-pass"]
+    assert '1 of 2 match "codex".' in status_of(panel)
+
+
+def test_search_reads_nothing_hides_an_empty_group_and_clearing_restores_it(qtbot):
+    local = FakeLocal(body=two_sessions())
+    panel, _hosted = make_panel(qtbot, local=local)
+    panel.show()
+    settle(qtbot, panel)
+    reads = len(local.calls)
+    panel._search.setText("nothing-matches")  # noqa: SLF001
+    assert len(local.calls) == reads
+    assert session_cells(panel) == []
+    assert header_texts(panel) == []  # the only group has no match, so its header goes too
+    assert '0 of 2 match "nothing-matches".' in status_of(panel)
+    panel._search.setText("")  # noqa: SLF001
+    assert names_of(panel) == ["Auth-Refactor", "docs-pass"]
+    assert header_texts(panel) == [header_text("Alpha", "2 session(s)")]
+    assert "match" not in status_of(panel)
+
+
+# ----------------------------------------------------------------- subprojects and groups
+
+PID3 = "22222222-3333-4444-8555-666666666666"
+PID4 = "33333333-4444-4555-8666-777777777777"
+# Alpha, with Core under it and Parser under Core. Beta is a separate top-level project.
+TREE = ((PID, "Alpha", ""), (PID2, "Core", PID), (PID3, "Parser", PID2), (PID4, "Beta", ""))
+ALPHA_CORE = "Alpha › Core"
+ALPHA_CORE_PARSER = "Alpha › Core › Parser"
+
+
+class RoutedLocal:
+    """A local transport that answers each project from its own body or status, and records the project ids asked."""
+
+    def __init__(self, bodies, statuses=None):
+        self.bodies = bodies
+        self.statuses = statuses or {}
+        self.asked = []
+
+    def __call__(self, base_url, path, timeout):
+        project_id = path.split("/projects/")[1].split("/")[0]
+        self.asked.append(project_id)
+        return SimpleNamespace(status=self.statuses.get(project_id, 200), body=self.bodies.get(project_id, b"[]"))
+
+
+def tree_panel(qtbot, statuses=None):
+    bodies = {
+        PID: body_of([session(name="root-run", last_seen=ago(minutes=1))]),
+        PID2: body_of([session(name="core-run", last_seen=ago(minutes=1))]),
+        PID3: body_of([session(name="parser-run", last_seen=ago(hours=3))]),
+        PID4: body_of([session(name="beta-run", last_seen=ago(minutes=1))]),
+    }
+    routed = RoutedLocal(bodies, statuses)
+    panel, _hosted = make_panel(qtbot, local=routed, projects=TREE)
+    panel.show()
+    settle(qtbot, panel)
+    return panel, routed
+
+
+def header_row(panel, label):
+    """The row of the header whose path label is exactly ``label``."""
+    table = table_of(panel)
+    for row in range(table.rowCount()):
+        if is_header_row(table, row) and table.item(row, 0).text().split("  (")[0][2:] == label:
+            return row
+    raise AssertionError(f"no header row for {label!r}")
+
+
+def click_header(panel, label):
+    table_of(panel).cellClicked.emit(header_row(panel, label), 0)
+
+
+def test_subprojects_are_grouped_under_the_picked_project_in_tree_order(qtbot):
+    panel, routed = tree_panel(qtbot)
+    assert header_texts(panel) == [
+        header_text("Alpha", "1 session(s)"),
+        header_text(ALPHA_CORE, "1 session(s)"),
+        header_text(ALPHA_CORE_PARSER, "1 session(s)"),
+    ]
+    assert names_of(panel) == ["root-run", "core-run", "parser-run"]
+    assert routed.asked[:3] == [PID, PID2, PID3]  # the picked project, then its subprojects in tree order
+    assert PID4 not in routed.asked  # Beta is another top-level project, not part of Alpha's tree
+    assert "Grouped by project: 3 shown, including subprojects." in status_of(panel)
+
+
+def test_the_project_picker_covers_subprojects_by_their_path(qtbot):
+    panel, _routed = tree_panel(qtbot)
+    combo = picker_of(panel)
+    assert [combo.itemText(index) for index in range(combo.count())] == [
+        "Alpha",
+        ALPHA_CORE,
+        ALPHA_CORE_PARSER,
+        "Beta",
+    ]
+
+
+def test_a_collapsed_group_hides_its_subtree_and_stays_collapsed_across_a_refresh(qtbot):
+    panel, _routed = tree_panel(qtbot)
+    click_header(panel, ALPHA_CORE)
+    assert header_texts(panel) == [
+        header_text("Alpha", "1 session(s)"),
+        header_text(ALPHA_CORE, "1 session(s)", collapsed=True),
+    ]
+    assert names_of(panel) == ["root-run"]  # Core's rows and its subproject Parser are hidden with it
+    panel.refresh()
+    settle(qtbot, panel)
+    assert names_of(panel) == ["root-run"]  # still collapsed after a full read
+    click_header(panel, ALPHA_CORE)
+    assert names_of(panel) == ["root-run", "core-run", "parser-run"]
+
+
+def test_enter_and_space_on_a_selected_header_collapse_and_expand_it(qtbot):
+    panel, _routed = tree_panel(qtbot)
+    table = table_of(panel)
+    table.setCurrentCell(header_row(panel, ALPHA_CORE), 0)
+    qtbot.keyClick(table, Qt.Key.Key_Return)
+    assert names_of(panel) == ["root-run"]
+    qtbot.keyClick(table, Qt.Key.Key_Space)  # the header is still selected after the redraw
+    assert names_of(panel) == ["root-run", "core-run", "parser-run"]
+
+
+def test_a_subproject_that_cannot_be_read_keeps_its_header_with_the_reason(qtbot):
+    panel, _routed = tree_panel(qtbot, statuses={PID2: 404})
+    assert header_texts(panel) == [
+        header_text("Alpha", "1 session(s)"),
+        f"▾ {ALPHA_CORE}  (could not be read)",
+        header_text(ALPHA_CORE_PARSER, "1 session(s)"),
+    ]
+    assert names_of(panel) == ["root-run", "parser-run"]  # the other subprojects still show
+    table = table_of(panel)
+    assert table.item(header_row(panel, ALPHA_CORE), 0).toolTip() == sc.MISSING_ROUTE_MESSAGE
+    assert "1 project(s) could not be read." in status_of(panel)
+
+
+def test_a_search_keeps_only_the_groups_with_a_match(qtbot):
+    panel, _routed = tree_panel(qtbot)
+    panel._search.setText("parser")  # noqa: SLF001
+    assert header_texts(panel) == [header_text(ALPHA_CORE_PARSER, "1 of 1 session(s)")]
+    assert names_of(panel) == ["parser-run"]
+
+
+def test_the_tree_is_cut_at_the_group_limit_and_says_so(qtbot):
+    many = [(PID, "Root", "")] + [
+        (f"00000000-0000-4000-8000-{index:012d}", f"C{index:03d}", PID) for index in range(40)
+    ]
+    entries, total = project_tree(PID, [project(*row) for row in many])
+    assert len(entries) == MAX_GROUPS
+    assert total == 41
+    assert entries[0][0] == PID
+
+
+# ----------------------------------------------------------------- active, idle and the legend
+
+
+def test_active_rows_are_green_idle_rows_grey_and_the_legend_says_so(qtbot):
+    # Nine minutes is inside the 10-minute window, so Active. Eleven minutes is outside it, so Idle.
+    local = FakeLocal(
+        body=body_of(
+            [
+                session(name="nine", last_seen=ago(minutes=9)),
+                session(name="eleven", last_seen=ago(minutes=11)),
+            ]
+        )
+    )
+    panel, _hosted = make_panel(qtbot, local=local)
+    panel.show()
+    settle(qtbot, panel)
+    table = table_of(panel)
+    states = {cells[0]: cells[1] for cells in session_cells(panel)}
+    assert states == {"nine": "Active", "eleven": "Idle"}
+    rows = {table.item(row, 0).text(): row for row in range(table.rowCount()) if not is_header_row(table, row)}
+    assert table.item(rows["nine"], 1).foreground().color().name() == ACTIVE_COLOR
+    assert table.item(rows["eleven"], 1).foreground().color().name() == IDLE_COLOR
+    legend_active = panel.findChild(QLabel, "sessions-legend-active")
+    legend_idle = panel.findChild(QLabel, "sessions-legend-idle")
+    assert "Active" in legend_active.text()
+    assert f"{sc.ACTIVE_WINDOW_MINUTES} minutes" in legend_active.text()
+    assert "Idle" in legend_idle.text()
+    assert ACTIVE_COLOR in legend_active.styleSheet()
+    assert IDLE_COLOR in legend_idle.styleSheet()
+
+
+def test_last_seen_tooltip_says_it_is_the_last_contact_not_the_last_keystroke(qtbot):
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session(name="one", last_seen=ago(minutes=2))])))
+    panel.show()
+    settle(qtbot, panel)
+    table = table_of(panel)
+    row = next(index for index in range(table.rowCount()) if not is_header_row(table, index))
+    tip = table.item(row, 2).toolTip()
+    assert "contacted the server, through a tool call or keepalive" in tip
+    assert "It is not the last keystroke." in tip
+    assert "Server status: active" in table.item(row, 1).toolTip()
+
+
+def test_one_client_is_shown_per_row(qtbot):
+    body = body_of([session(name="both", client_type="claude-code", agent_framework="codex", last_seen=ago(minutes=1))])
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body))
+    panel.show()
+    settle(qtbot, panel)
+    assert session_cells(panel)[0][3] == "claude-code"
+
+
+# ----------------------------------------------------------------- one timestamp format, local time
+
+
+def test_every_timestamp_in_the_tab_is_local_time_in_one_format(qtbot):
+    # The server writes last_seen as SQLite UTC text with no offset.
+    panel, _hosted = make_panel(
+        qtbot, local=FakeLocal(body=body_of([session(name="old", last_seen="2020-01-01 09:30:15")]))
+    )
+    panel.show()
+    settle(qtbot, panel)
+    expected_local = sc.format_local(datetime(2020, 1, 1, 9, 30, 15, tzinfo=timezone.utc))
+    assert session_cells(panel)[0][2] == expected_local
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", expected_local)
+    # Row 0 is the project header, so the one session row is row 1.
+    assert expected_local in table_of(panel).item(1, 2).toolTip()
+    checked = re.search(r"Checked at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.", status_of(panel))
+    assert checked is not None
+    # The check time is this computer's local wall clock, not UTC: it is within a couple of minutes of datetime.now().
+    checked_at = datetime.strptime(checked.group(1), sc.TIME_FORMAT)
+    assert abs((datetime.now() - checked_at).total_seconds()) < 120
