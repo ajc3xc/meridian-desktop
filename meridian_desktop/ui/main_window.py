@@ -17,7 +17,7 @@ A check makes its call when the window first shows, on the Home tab's five-minut
 its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
 only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
 pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
-on the Test connection button in Settings.
+on the Test connection and Try again buttons in Settings.
 
 The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
 and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
