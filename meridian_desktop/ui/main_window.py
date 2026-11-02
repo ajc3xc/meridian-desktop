@@ -168,24 +168,32 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
     return read
 
 
-def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str]]]:
-    """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
+def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str, str]]]:
+    """The projects the Projects tab resolves, as (id, name, parent id) triples, through the same resolver and Settings.
 
+    The parent id is "" for a top-level project. The Sessions tab uses it to group a project's subprojects under it.
     When the resolver found no source to read, the provider raises ProjectsUnavailable. The Sessions tab then
     says the projects could not be read, rather than that no projects exist.
     """
 
-    def read() -> list[tuple[str, str]]:
+    def read() -> list[tuple[str, str, str]]:
         outcome = resolve(store.load().settings, sources)
         if outcome.state != STATE_OK:
             raise ProjectsUnavailable(outcome.message)
-        pairs: list[tuple[str, str]] = []
+        triples: list[tuple[str, str, str]] = []
         for row in outcome.rows:
             pid = row.get("id")
             if isinstance(pid, str) and pid.strip():
                 name = row.get("name")
-                pairs.append((pid, name if isinstance(name, str) else ""))
-        return pairs
+                parent = row.get("parent_project_id")
+                triples.append(
+                    (
+                        pid,
+                        name if isinstance(name, str) else "",
+                        parent if isinstance(parent, str) else "",
+                    )
+                )
+        return triples
 
     return read
 

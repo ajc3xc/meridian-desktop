@@ -48,6 +48,17 @@ SESSIONS_TIMEOUT = 5.0
 MAX_SESSIONS = 200
 MAX_TEXT_CHARS = 120
 
+# A session is active while it was last seen less than this many minutes ago. It is the server's default
+# active-session window (active_session_warning_minutes, 10 by default). The desktop does not read the workspace
+# setting, so a workspace that changes the window is not reflected here.
+ACTIVE_WINDOW_MINUTES = 10
+ACTIVE = "active"
+IDLE = "idle"
+
+# One timestamp format for the Sessions tab, the same one the other status panels use.
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+UNKNOWN_TIME_TEXT = "Unknown"
+
 # Typed states.
 SESSIONS = "sessions"
 NOT_RUNNING = "not_running"
@@ -334,8 +345,54 @@ def last_seen_age(last_seen: str, now: datetime) -> str:
     return f"{int(seconds // 86400)} d ago"
 
 
+# ----------------------------------------------------------------- active or idle
+
+
+def session_state(last_seen: str, now: datetime) -> str:
+    """ACTIVE while the session was last seen less than ACTIVE_WINDOW_MINUTES ago, otherwise IDLE.
+
+    This is the server's own rule: the active-session check in meridian/mcp/handler.py counts a session as active
+    while ``now - last_seen < threshold``, and the threshold defaults to 10 minutes. The boundary is strict, so a
+    session seen exactly 10 minutes ago is idle. A last-seen value that cannot be read is IDLE, because nothing
+    shows that the session was seen. A time in the future (clock skew) is ACTIVE.
+    """
+    seen = parse_timestamp(last_seen)
+    if seen is None:
+        return IDLE
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    seconds = (current - seen).total_seconds()
+    return ACTIVE if seconds < ACTIVE_WINDOW_MINUTES * 60 else IDLE
+
+
+# ----------------------------------------------------------------- one timestamp format
+
+
+def format_local(when: datetime) -> str:
+    """The one timestamp format of the Sessions tab: local wall-clock time, 24-hour, with seconds.
+
+    A naive value is read as UTC, the way the server writes its times. The result is converted to this computer's
+    local zone before it is formatted.
+    """
+    aware = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    return aware.astimezone().strftime(TIME_FORMAT)
+
+
+def local_time_text(last_seen: str) -> str:
+    """A server timestamp in the one local format, or UNKNOWN_TIME_TEXT when it cannot be read."""
+    seen = parse_timestamp(last_seen)
+    if seen is None:
+        return UNKNOWN_TIME_TEXT
+    try:
+        return format_local(seen)
+    except (OverflowError, OSError, ValueError):
+        return UNKNOWN_TIME_TEXT
+
+
 __all__ = [
+    "ACTIVE",
+    "ACTIVE_WINDOW_MINUTES",
     "ERROR",
+    "IDLE",
     "MAX_SESSIONS",
     "MISSING_ROUTE",
     "NO_PROJECT",
@@ -344,11 +401,16 @@ __all__ = [
     "SESSIONS_TIMEOUT",
     "SOURCE_HOSTED",
     "SOURCE_LOCAL",
+    "TIME_FORMAT",
     "UNAUTHORISED",
+    "UNKNOWN_TIME_TEXT",
     "SessionRow",
     "SessionsResult",
+    "format_local",
     "hosted_sessions",
     "last_seen_age",
     "local_sessions",
+    "local_time_text",
     "parse_timestamp",
+    "session_state",
 ]
