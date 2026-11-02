@@ -38,7 +38,7 @@ LOCAL_TIMEOUT_SECONDS = 10.0
 SSH_TIMEOUT_SECONDS = 20.0
 # A saved host is an SSH alias from the owner's own ssh config: letters, digits, dot, dash, underscore and "@" for
 # user@host. It may not start with a dash, so it can never be read as an option.
-ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,62}$")
+ALIAS_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,62}")
 
 LOCAL_HOST = "This computer"
 
@@ -222,7 +222,8 @@ def ssh_argv(alias: str) -> tuple[str, ...]:
 
 def check_alias(text: str) -> bool:
     """True when the text is a safe SSH host name for a saved host."""
-    return isinstance(text, str) and ALIAS_PATTERN.match(text) is not None
+    # fullmatch, not match with "$": a "$" also matches before a trailing newline, which would let "gpu-box\n" through.
+    return isinstance(text, str) and ALIAS_PATTERN.fullmatch(text) is not None
 
 
 def parse_host_list(text: str) -> tuple[tuple[str, ...], list[str]]:

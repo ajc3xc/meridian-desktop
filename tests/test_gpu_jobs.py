@@ -298,7 +298,7 @@ def test_safe_host_names_are_accepted(name):
 
 @pytest.mark.parametrize(
     "name",
-    ["", "-oProxyCommand=x", "a b", "a;rm", "a$(x)", "x" * 64, "tab\there", None],
+    ["", "-oProxyCommand=x", "a b", "a;rm", "a$(x)", "x" * 64, "tab\there", None, "gpu-box\n"],
 )
 def test_unsafe_host_names_are_refused(name):
     assert not gpu_jobs.check_alias(name)
