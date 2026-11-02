@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import pytest
 
 from meridian_desktop import gpu_jobs
+from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.gpu_jobs import (
     BJOBS_ARGV,
     LOCAL_HOST,
@@ -814,6 +815,38 @@ def test_runpod_not_connected_when_the_server_is_not_answering():
     (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
     assert status.text == gpu_jobs.RUNPOD_NOT_CONNECTED_TEXT
     assert "refused" not in status.text
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("http_404", gpu_jobs.RUNPOD_NO_ROUTE_TEXT),
+        ("http_403", gpu_jobs.RUNPOD_REFUSED_TEXT),
+        ("http_500", gpu_jobs.RUNPOD_SERVER_ERROR_TEXT),
+        ("not_running", gpu_jobs.RUNPOD_NOT_CONNECTED_TEXT),
+        ("timeout", gpu_jobs.RUNPOD_NOT_LISTED_TEXT),
+    ],
+)
+def test_each_runpod_failure_code_has_its_own_text(code, expected):
+    def failing():
+        raise LocalClientError(code, "the local message is not shown")
+
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), failing, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.text == expected
+    assert "local message" not in status.text
+
+
+def test_a_404_says_to_update_meridian_and_is_not_called_not_answering():
+    def no_route():
+        raise LocalClientError("http_404", "not found")
+
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), no_route, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert "Update Meridian" in status.text
+    assert "not answering" not in status.text
 
 
 def test_runpod_not_listed_when_the_server_says_not_ok():

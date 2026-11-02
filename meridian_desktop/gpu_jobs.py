@@ -116,6 +116,17 @@ NAME_HIDDEN_PREFIX = "["  # nvidia-smi writes a process name in brackets when it
 
 RUNPOD_NOT_CONNECTED_TEXT = "Not connected. The local Meridian server is not answering, so RunPod pods are not listed."
 RUNPOD_NOT_LISTED_TEXT = "Not connected. The local Meridian server did not list RunPod pods."
+RUNPOD_NO_ROUTE_TEXT = "The local Meridian server has no RunPod pods route yet (HTTP 404). Update Meridian to a build that includes it."
+RUNPOD_REFUSED_TEXT = "The local Meridian server refused the RunPod request (HTTP 403)."
+RUNPOD_SERVER_ERROR_TEXT = "The local Meridian server could not list RunPod pods (HTTP 500)."
+# The local client's error codes (local_client.LocalClientError.code) and the text each one gets. A connection that
+# never opened is code "not_running", which is "not answering".
+RUNPOD_TEXT_BY_CODE = {
+    "http_404": RUNPOD_NO_ROUTE_TEXT,
+    "http_403": RUNPOD_REFUSED_TEXT,
+    "http_500": RUNPOD_SERVER_ERROR_TEXT,
+    "not_running": RUNPOD_NOT_CONNECTED_TEXT,
+}
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -716,13 +727,24 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Readi
 # ----------------------------------------------------------------- collect
 
 
+def _runpod_failure(exc: Exception) -> SourceStatus:
+    """The status for a RunPod list that raised. A local-client error names its code; anything else means the server
+    was not answering."""
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str):
+        return SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_ABSENT, RUNPOD_NOT_CONNECTED_TEXT)
+    text = RUNPOD_TEXT_BY_CODE.get(code, RUNPOD_NOT_LISTED_TEXT)
+    state = STATE_ABSENT if text == RUNPOD_NOT_CONNECTED_TEXT else STATE_FAILED
+    return SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, state, text)
+
+
 def _runpod_reading(runpod: Callable[[], Mapping[str, Any]] | None) -> _Reading:
     if runpod is None:
         return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_ABSENT, RUNPOD_NOT_CONNECTED_TEXT),))
     try:
         payload = runpod()
-    except Exception:  # noqa: BLE001 - an unreachable server is named in plain words, never by class or value
-        return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_ABSENT, RUNPOD_NOT_CONNECTED_TEXT),))
+    except Exception as exc:  # noqa: BLE001 - the failure is named in plain words, never by class or raw value
+        return _Reading(statuses=(_runpod_failure(exc),))
     if not isinstance(payload, Mapping) or payload.get("ok") is False:
         return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_FAILED, RUNPOD_NOT_LISTED_TEXT),))
     pods = parse_runpod_pods(payload)
