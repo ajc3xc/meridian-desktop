@@ -659,8 +659,8 @@ def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
                 "Host key verification failed.",
             ),
             STATE_FAILED,
-            "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect "
-            "once in a terminal to add it. Do not add a fingerprint you have not verified.",
+            "This host has no key of this type in known_hosts. If you have connected to it before, its key may have changed. "
+            "Check its fingerprint with the host's admin before you add any key. Do not add a fingerprint you have not verified.",
         ),
         (
             CommandResult(
@@ -1168,8 +1168,8 @@ def test_a_key_type_mismatch_is_not_backed_off_as_a_login_failure():
 
 
 FIRST_CONTACT_TEXT = (
-    "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect once "
-    "in a terminal to add it. Do not add a fingerprint you have not verified."
+    "This host has no key of this type in known_hosts. If you have connected to it before, its key may have changed. "
+    "Check its fingerprint with the host's admin before you add any key. Do not add a fingerprint you have not verified."
 )
 
 
@@ -1180,8 +1180,17 @@ def test_a_first_contact_host_gets_the_not_in_known_hosts_text_that_never_says_c
     status = _host_status(run, "gpu-box", None)
     assert status.state == STATE_FAILED
     assert status.text == FIRST_CONTACT_TEXT
-    assert "changed" not in status.text.lower()
+    assert "may have changed" in status.text
+    assert "Host key changed" not in status.text
     assert _no_accept_instruction(status.text)
+
+
+def test_every_sentence_about_adding_a_key_in_the_first_contact_path_carries_the_verify_clause():
+    for sentence in FIRST_CONTACT_TEXT.split(". "):
+        if "add" in sentence.lower():
+            assert "verif" in sentence.lower() or "fingerprint" in sentence.lower(), sentence
+    assert "accept" not in FIRST_CONTACT_TEXT.lower()
+    assert "Do not add a fingerprint you have not verified." in FIRST_CONTACT_TEXT
 
 
 def test_a_changed_banner_keeps_the_changed_key_text_with_no_accept_advice():

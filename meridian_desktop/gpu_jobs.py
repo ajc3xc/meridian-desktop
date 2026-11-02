@@ -58,8 +58,8 @@ KEY_TYPE_TEXT = "The host offers no SSH key type this computer accepts. This nee
 # The "No <type> host key is known" line is printed for first contact, and for a key type the host does not offer. The
 # text says it is not in known_hosts and never says the key changed.
 FIRST_CONTACT_TEXT = (
-    "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect once "
-    "in a terminal to add it. Do not add a fingerprint you have not verified."
+    "This host has no key of this type in known_hosts. If you have connected to it before, its key may have changed. "
+    "Check its fingerprint with the host's admin before you add any key. Do not add a fingerprint you have not verified."
 )
 CHANGED_KEY_TEXT = (
     "Host key changed. This may be a reinstall or an attack. "
