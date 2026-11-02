@@ -626,13 +626,16 @@ def test_four_blocked_hosts_do_not_hold_back_the_local_tables(qtbot):
         panel.findChild(QThreadPool, "gpu-local-pool").setMaxThreadCount(2)
         qtbot.waitUntil(lambda: table(panel, "gpu-gpus").rowCount() == 1, timeout=5000)
         # All four hosts are blocked now. A second local read must run and deliver.
+        # Refresh asks for each blocked host again. The in-flight guard must refuse, so no host is called twice.
         _press_refresh(qtbot, panel)
         qtbot.waitUntil(lambda: run.calls == 2, timeout=5000)
         qtbot.waitUntil(lambda: button(panel).isEnabled(), timeout=5000)
-        assert run.ssh_calls == 4  # the four blocked hosts are still the only remote reads
     finally:
         gate.set()
     qtbot.waitUntil(lambda: sum(1 for text in _status_texts(panel) if "timed out" in text.lower()) >= 4, timeout=5000)
+    # Released, and given a moment: the runner was called exactly once per host, four calls in all.
+    qtbot.wait(200)
+    assert run.ssh_calls == 4
 
 
 def test_remote_reads_have_their_own_pool_sized_to_the_saved_hosts(qtbot):
