@@ -511,8 +511,17 @@ def _ssh_failure(where: str, result: CommandResult) -> SourceStatus:
     if result.timed_out:
         return SourceStatus(where, PART_GPUS, STATE_FAILED, "Timed out. The host did not answer in time.")
     stderr = result.stderr.lower()
-    if "host key verification failed" in stderr or "no matching host key" in stderr:
+    # A changed key prints the identification banner, and ssh then reports the same bare "Host key verification
+    # failed." line as an unknown key. So the banner is checked first, and the new key is never offered for acceptance.
+    if "remote host identification has changed" in stderr:
+        reason = (
+            "Host key changed. This may be a reinstall or an attack. "
+            "Do not accept the new key until the host's admin confirms it."
+        )
+    elif "host key is known" in stderr or "no matching host key" in stderr:
         reason = "Host key unknown. Connect to it once in a terminal to accept its key."
+    elif "host key verification failed" in stderr:
+        reason = "Host key not accepted. Check the host's key in a terminal before trying again."
     elif "permission denied" in stderr:
         reason = "Auth failed. The key for this host is not accepted without a password."
     elif "timed out" in stderr:

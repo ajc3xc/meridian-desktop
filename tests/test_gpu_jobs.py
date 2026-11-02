@@ -528,9 +528,30 @@ def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
     ("answer", "state", "expected"),
     [
         (
-            CommandResult(returncode=255, stderr="Host key verification failed."),
+            CommandResult(
+                returncode=255,
+                stderr="No ED25519 host key is known for gpu-box and you have requested strict checking.\r\n"
+                "Host key verification failed.",
+            ),
             STATE_FAILED,
             "Host key unknown. Connect to it once in a terminal to accept its key.",
+        ),
+        (
+            CommandResult(
+                returncode=255,
+                stderr="@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
+                "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                "Host key verification failed.",
+            ),
+            STATE_FAILED,
+            "Host key changed. This may be a reinstall or an attack. "
+            "Do not accept the new key until the host's admin confirms it.",
+        ),
+        (
+            CommandResult(returncode=255, stderr="Host key verification failed."),
+            STATE_FAILED,
+            "Host key not accepted. Check the host's key in a terminal before trying again.",
         ),
         (
             CommandResult(returncode=255, stderr="user@x: Permission denied (publickey)."),
