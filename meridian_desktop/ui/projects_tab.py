@@ -1,8 +1,10 @@
-"""Read-only Projects tab: a list of projects and a detail pane for the selected one.
+"""Projects tab: a list of projects and a detail pane for the selected one.
 
-This is Qt code and sits in ui/, so the boundary check allows it. The tab has no write
-control: no button, line edit, combo box or spin box. Its rows come from data_source.resolve,
-and every outside read is an injected callable in DataSources.
+This is Qt code and sits in ui/, so the boundary check allows it. The tab never writes to projects. Its rows come from
+data_source.resolve, and every outside read is an injected callable in DataSources. Its one control is the button
+"Back up hosted projects to this computer", shown only when a hosted token is saved. The button reads the hosted project
+list with GET and writes a backup file under the desktop data folder (projects_backup). Nothing is written to the hosted
+service.
 
 The resolve runs on the thread pool, so a slow probe never blocks the window. Each load has a
 generation number, and a result from an older load is dropped once a newer load has started.
@@ -20,14 +22,16 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QItemSelectionModel, QRunnable, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSplitter,
     QTableWidget,
@@ -36,8 +40,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, local_client, projects_reader, token_store
+from meridian_desktop import hosted_client, local_client, projects_backup, projects_reader, token_store
 from meridian_desktop.data_source import (
+    SOURCE_BACKUP,
     SOURCE_FILE,
     SOURCE_HOSTED,
     SOURCE_SERVER,
@@ -51,12 +56,16 @@ from meridian_desktop.projects_reader import PROJECT_COLUMNS
 from meridian_desktop.secret_store import SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
+from meridian_desktop.ui.tab_scroll import MIN_TABLE_HEIGHT, let_the_wheel_pass, scrolled
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 PROBE_TIMEOUT = 2.0
 LOADING_TEXT = "Loading projects..."
 DETAIL_EMPTY_TEXT = "Select a project to see its details."
 NONE_TEXT = "(none)"
+BACKUP_BUTTON_TEXT = "Back up hosted projects to this computer"
+BACKUP_RUNNING_TEXT = "Backing up hosted projects..."
+BACKUP_FAILED_TEXT = "Projects could not be backed up"
 
 FIELD_LABELS = {
     "id": "ID",
@@ -75,6 +84,7 @@ SOURCE_TEXT = {
     SOURCE_SERVER: "the local Meridian server",
     SOURCE_FILE: "the database file",
     SOURCE_HOSTED: "hosted Meridian",
+    SOURCE_BACKUP: "the backup on this computer",
 }
 
 
@@ -85,7 +95,9 @@ def default_sources(secrets: SecretStore, *, server_transport: local_client.Tran
     local_client.list_projects: one loopback GET /projects, with no token. The file reader opens
     the database read-only. The token comes from the keychain through token_store, and only in
     hosted mode. The hosted reader is hosted_client.list_projects: one GET /projects with the bearer
-    token. ``server_transport`` is for tests: when given, the server read sends through it, not urllib.
+    token. The backup reader is projects_backup.newest_backup: the newest backup in the desktop backups folder that
+    holds projects.
+    ``server_transport`` is for tests: when given, the server read sends through it, not urllib.
     """
     return DataSources(
         probe=lambda url: local_client.probe_health(url, PROBE_TIMEOUT),
@@ -93,6 +105,7 @@ def default_sources(secrets: SecretStore, *, server_transport: local_client.Tran
         read_file=projects_reader.list_projects,
         get_token=lambda: token_store.get_token(store=secrets),
         list_hosted=hosted_client.list_projects,
+        read_backup=projects_backup.newest_backup,
     )
 
 
@@ -115,24 +128,79 @@ def detail_text(row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _usable_token(token: object) -> bool:
+    return isinstance(token, str) and bool(token.strip())
+
+
 @dataclass(frozen=True)
 class _Loaded:
-    """One finished load: the number it was started with, and what the resolver returned.
+    """One finished load: the number it was started with, what the resolver returned, and whether a hosted token is
+    saved.
 
-    It is the value of a Delivered whose owner is the tab's token, so it holds no Qt object.
+    ``token_saved`` is None when the load failed before it could tell, so the backup button keeps what it shows. It is
+    the value of a Delivered whose owner is the tab's token, so it holds no Qt object.
     """
 
     generation: int
     outcome: Resolution
+    token_saved: bool | None = None
+
+
+@dataclass(frozen=True)
+class _Backed:
+    """One finished backup: the status line for it. It holds no Qt object and no token."""
+
+    message: str
+
+
+def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool]:
+    """Runs on a worker: reads the saved settings, resolves the one source the mode uses, and says whether a hosted
+    token is saved.
+
+    The token is read at most once. The resolve's own read is reused. A load whose resolve never reads it reads it here.
+    """
+    read: list[object] = []
+
+    def get_token() -> object:
+        if not read:
+            read.append(sources.get_token())
+        return read[0]
+
+    outcome = resolve(store.load().settings, replace(sources, get_token=get_token))
+    try:
+        token = get_token()
+    except Exception:  # noqa: BLE001 - an unreadable token only hides the backup button
+        token = None
+    return outcome, _usable_token(token)
 
 
 def _settings_resolution(store: SettingsStore, sources: DataSources) -> Resolution:
-    """Runs on a worker: reads the saved settings, then resolves the one source the mode uses."""
-    return resolve(store.load().settings, sources)
+    """The resolved source alone, as _load gives it, for the tests that check the resolve on its own."""
+    return _load(store, sources)[0]
+
+
+def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
+    """Runs on a worker: backs up the hosted projects, read through the same hosted reader the Projects tab uses."""
+    settings = store.load().settings
+    token = sources.get_token()
+    if not _usable_token(token):
+        return _Backed(projects_backup.NO_TOKEN_TEXT)
+    try:
+        written = projects_backup.backup_hosted(
+            sources.list_hosted,
+            settings.hosted_url,
+            str(token),
+            folder=projects_backup.backup_dir(),
+            taken_at=projects_backup.utc_now(),
+        )
+    except projects_backup.NoUsableProjects:
+        # An empty answer writes nothing, so the newest backup that holds projects is still on disk.
+        return _Backed(projects_backup.NO_PROJECTS_TEXT)
+    return _Backed(written.message)
 
 
 class _LoadJob(QRunnable):
-    """Run one resolve on the thread pool and deliver its _Loaded to the shared delivery object.
+    """Run one load on the thread pool and deliver its _Loaded to the shared delivery object.
 
     The job holds plain data only: an owner token, a generation number, the work, and the shared delivery object.
     It never holds the tab, so the worker never touches a tab, even one that was deleted while the load ran. A failure
@@ -144,7 +212,7 @@ class _LoadJob(QRunnable):
         self,
         owner: object,
         generation: int,
-        work: Callable[[], Resolution],
+        work: Callable[[], tuple[Resolution, bool]],
         delivery: Delivery,
     ) -> None:
         super().__init__()
@@ -155,12 +223,42 @@ class _LoadJob(QRunnable):
         self._delivery = delivery
 
     def run(self) -> None:
+        token_saved: bool | None
         try:
-            outcome = self._work()
+            outcome, token_saved = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
-            outcome = Resolution(STATE_READ_FAILED, None, message=f"Projects could not be loaded ({exc.__class__.__name__}).")
+            failed = f"Projects could not be loaded ({exc.__class__.__name__})."
+            outcome = Resolution(STATE_READ_FAILED, None, message=failed)
+            token_saved = None
         try:
-            self._delivery.delivered.emit(Delivered(self._owner, _Loaded(self._generation, outcome)))
+            self._delivery.delivered.emit(Delivered(self._owner, _Loaded(self._generation, outcome, token_saved)))
+        except RuntimeError:
+            pass  # the shared delivery object is gone, for example at shutdown
+
+
+class _BackupJob(QRunnable):
+    """Run one backup on the thread pool and deliver its _Backed to the shared delivery object.
+
+    Like _LoadJob, it holds plain data only and never the tab. A failure is named in plain words: the hosted client's
+    own fixed text, or the exception class only. No token, response body or path reaches the UI.
+    """
+
+    def __init__(self, owner: object, work: Callable[[], _Backed], delivery: Delivery) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._owner = owner
+        self._work = work
+        self._delivery = delivery
+
+    def run(self) -> None:
+        try:
+            report = self._work()
+        except hosted_client.HostedError as exc:
+            report = _Backed(f"{BACKUP_FAILED_TEXT}. {exc}")
+        except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+            report = _Backed(f"{BACKUP_FAILED_TEXT} ({exc.__class__.__name__}).")
+        try:
+            self._delivery.delivered.emit(Delivered(self._owner, report))
         except RuntimeError:
             pass  # the shared delivery object is gone, for example at shutdown
 
@@ -177,13 +275,19 @@ class ProjectsTab(QWidget):
         # Identifies this tab's loads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._rows: list[dict[str, Any]] = []
+        # The backup button and its status line exist only once a hosted token has been seen saved, so a tab without a
+        # token has no control at all. A backup runs one at a time.
+        self._backup_widgets: tuple[QPushButton, QLabel] | None = None
+        self._backup_running = False
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
     # ----------------------------------------------------------- layout
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # The content is one column in a vertical scroll area, so a short window scrolls the tab (see ui/tab_scroll.py).
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
 
         self._status = make_selectable(QLabel(LOADING_TEXT, self))
         self._status.setObjectName("projects-status")
@@ -193,10 +297,13 @@ class ProjectsTab(QWidget):
 
         self._table = QTableWidget(0, len(TABLE_FIELDS), self)
         self._table.setObjectName("projects-table")
+        # Short windows scroll the tab rather than squeeze the table to nothing (see ui/tab_scroll.py).
+        self._table.setMinimumHeight(MIN_TABLE_HEIGHT)
         self._table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in TABLE_FIELDS])
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Whole rows, and several of them: a drag, Shift or Ctrl selects more, and Ctrl+C copies them as tab-separated lines.
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -212,6 +319,9 @@ class ProjectsTab(QWidget):
         detail_scroll = QScrollArea(self)
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setWidget(self._detail)
+        # A short detail, or the table with a few rows, has nothing to scroll: the wheel goes on to the tab then.
+        let_the_wheel_pass(detail_scroll)
+        let_the_wheel_pass(self._table)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._table)
@@ -219,6 +329,9 @@ class ProjectsTab(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scrolled(content, self))
 
     # ----------------------------------------------------------- loading
 
@@ -227,17 +340,22 @@ class ProjectsTab(QWidget):
         self._generation += 1
         self._status.setText(LOADING_TEXT)
         # The job gets the store, the sources and the shared delivery object, not self: a worker never holds the tab.
-        work = functools.partial(_settings_resolution, self._settings, self._sources)
+        work = functools.partial(_load, self._settings, self._sources)
         QThreadPool.globalInstance().start(_LoadJob(self._owner, self._generation, work, shared_delivery()))
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:
-        # Runs on the GUI thread. Another tab's load, or a load a newer one has superseded, is dropped.
+        # Runs on the GUI thread. Another tab's result, or a load a newer one has superseded, is dropped.
         if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        if isinstance(item.value, _Backed):
+            self._show_backup(item.value)
             return
         loaded = item.value
         if not isinstance(loaded, _Loaded) or loaded.generation != self._generation:
             return
+        if loaded.token_saved is not None:
+            self._offer_backup(loaded.token_saved)
         self._show(loaded.outcome)
 
     def _show(self, outcome: Resolution) -> None:
@@ -251,9 +369,12 @@ class ProjectsTab(QWidget):
         self._fill()
         where = SOURCE_TEXT.get(outcome.source or "", "Meridian")
         if self._rows:
-            self._status.setText(f"Showing {len(self._rows)} project(s) from {where}.")
+            text = f"Showing {len(self._rows)} project(s) from {where}."
         else:
-            self._status.setText(f"No projects found in {where}.")
+            text = f"No projects found in {where}."
+        # A read of the core folder's file carries its snapshot label (data_source.file_note), shown after the count,
+        # as the Sessions tab shows it. Other ok results carry no message.
+        self._status.setText(f"{text} {outcome.message}" if outcome.message else text)
 
     def _fill(self) -> None:
         self._table.setRowCount(len(self._rows))
@@ -261,18 +382,71 @@ class ProjectsTab(QWidget):
             for column, field in enumerate(TABLE_FIELDS):
                 self._table.setItem(row_index, column, QTableWidgetItem(_table_text(row.get(field))))
         if self._rows:
-            self._table.selectRow(0)
+            # Only the first row, whatever keys are held: selectRow reads Shift and Ctrl under ExtendedSelection.
+            self._table.setCurrentCell(
+                0, 0, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+            )
         self._show_detail()
 
     # ----------------------------------------------------------- detail
 
     @Slot()
     def _show_detail(self) -> None:
+        """The detail of the first selected row. With several rows selected, the topmost one is shown."""
         selected = sorted({item.row() for item in self._table.selectedItems()})
         if not selected or selected[0] >= len(self._rows):
             self._detail.setText(DETAIL_EMPTY_TEXT)
             return
         self._detail.setText(detail_text(self._rows[selected[0]]))
+
+    # ----------------------------------------------------------- backup
+
+    def _offer_backup(self, saved: bool) -> None:
+        """Show the backup button and its status line while a hosted token is saved, and hide them when none is.
+
+        The widgets are built the first time a token is seen saved. A tab that never sees one never builds them.
+        """
+        if self._backup_widgets is None:
+            if not saved:
+                return
+            self._backup_widgets = self._build_backup_row()
+        button, status = self._backup_widgets
+        button.setVisible(saved)
+        status.setVisible(saved)
+
+    def _build_backup_row(self) -> tuple[QPushButton, QLabel]:
+        row = QHBoxLayout()
+        button = QPushButton(BACKUP_BUTTON_TEXT, self)
+        button.setObjectName("projects-backup-button")
+        button.clicked.connect(self._start_backup)
+        status = make_selectable(QLabel("", self))
+        status.setObjectName("projects-backup-status")
+        status.setTextFormat(Qt.TextFormat.PlainText)
+        status.setWordWrap(True)
+        row.addWidget(button)
+        row.addWidget(status, 1)
+        # Below the source line, above the table.
+        self.layout().insertLayout(1, row)
+        return button, status
+
+    def _start_backup(self, _checked: bool = False) -> None:
+        """Start one backup on the pool. A press while one runs does nothing."""
+        if self._backup_running or self._backup_widgets is None:
+            return
+        button, status = self._backup_widgets
+        self._backup_running = True
+        button.setEnabled(False)
+        status.setText(BACKUP_RUNNING_TEXT)
+        work = functools.partial(_backup_work, self._settings, self._sources)
+        QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
+
+    def _show_backup(self, report: _Backed) -> None:
+        self._backup_running = False
+        if self._backup_widgets is None:
+            return
+        button, status = self._backup_widgets
+        button.setEnabled(True)
+        status.setText(report.message)
 
     # ----------------------------------------------------------- first show
 

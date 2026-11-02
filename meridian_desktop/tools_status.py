@@ -25,6 +25,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 
 from meridian_desktop import client_setup_runner, local_client, tunnel_status
@@ -34,6 +35,7 @@ from meridian_desktop.client_setup_runner import (
     IN_PLACE,
     MISSING,
     NOT_READABLE,
+    NOT_SELECTED,
     WOULD_CHANGE,
     CheckResult,
     ClientRow,
@@ -93,6 +95,7 @@ NOT_COVERED_TEXT = (
     "entries. Check {label}'s own settings for Meridian tools."
 )
 NO_RESULT_TEXT = "The Meridian core did not report on {label}. Press Refresh to check again."
+NOT_TICKED_TEXT = "Not ticked in Settings, so the Meridian core was not asked about it. Tick it in Client setup to check it."
 NO_PLAN_TEXT = "The core check did not return a plan. See the Logs tab."
 CHECK_FAILED_TEXT = "The Meridian setup check failed ({name}). No tool is started or stopped."
 # The plan's own success line describes only the plan. The panel's line covers the whole read, including the
@@ -131,15 +134,22 @@ _HEALTH_TEXT = {
 # The tunnel child state the runner reports for a tunnel it has no record of.
 NOT_STARTED_CHILD = "not_started"
 
-# The argument lists this module runs, after the program path. Each is the core's plan command, either for
-# every client at once (ClientSetupRunner.check) or for one core client (its per-client fallback).
-PLAN_TAILS = frozenset(
-    {
-        ("-m", CORE_MODULE, "plan", "--client", "all"),
-        ("-m", CORE_MODULE, "plan", "--client", "codex"),
-        ("-m", CORE_MODULE, "plan", "--client", "claude-desktop"),
-    }
-)
+
+def _plan_tails() -> frozenset[tuple[str, ...]]:
+    """The argument lists this module runs, after the program path: the core's plan command for every client at once,
+    and for each non-empty set of the core's clients in display order. ClientSetupRunner.check sends one such list for
+    the ticked clients the core covers, and its per-client fallback sends one client. Apply, remove and --yes are never here.
+    """
+    covered = tuple(
+        client for client, _label in client_setup_runner.CLIENTS if client in client_setup_runner.CORE_CLIENTS
+    )
+    names = ["all"]
+    for size in range(1, len(covered) + 1):
+        names.extend(",".join(combo) for combo in combinations(covered, size))
+    return frozenset(("-m", CORE_MODULE, "plan", "--client", name) for name in names)
+
+
+PLAN_TAILS = _plan_tails()
 
 
 def status_word(configured: str, live: str) -> str:
@@ -315,6 +325,8 @@ def _client_rows(check: CheckResult, entries: dict[str, _Entries], not_ready: st
         label = client_row.label
         if not client_row.covered:
             rows.append(ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, NOT_COVERED_TEXT.format(label=label)))
+        elif client_row.state == NOT_SELECTED:
+            rows.append(ToolRow(label, ENTRIES_TOOL, UNCHECKED, UNCHECKED, NOT_TICKED_TEXT))
         elif not check.configured:
             rows.append(ToolRow(label, ENTRIES_TOOL, NOT_SET, UNCHECKED, not_ready))
         else:
@@ -459,7 +471,10 @@ def read_tools_status(
     try:
         check = ClientSetupRunner(settings_store, run=plan).check()
     except Exception as exc:  # noqa: BLE001 - the other rows must still be shown
-        check = CheckResult(rows=unchecked_rows(), message=CHECK_FAILED_TEXT.format(name=exc.__class__.__name__))
+        check = CheckResult(
+            rows=unchecked_rows(settings.client_choices),
+            message=CHECK_FAILED_TEXT.format(name=exc.__class__.__name__),
+        )
     message = PANEL_CHECKED_TEXT if check.message == CHECKED_TEXT else check.message
     not_ready = ""
     if not check.configured:

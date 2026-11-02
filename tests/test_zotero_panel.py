@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop.ui.text import SELECTABLE_TEXT
 
 from _shared_delivery import emit, recording_deliveries, visible_state
+from _shared_text import MARKUP_LINE, assert_shows_literally
 from meridian_desktop.ui.zotero_panel import (
     API_NOT_READY_TEXT,
     API_READY_TEXT,
@@ -437,7 +438,21 @@ def test_every_label_is_selectable_and_plain_text(qtbot):
     assert labels
     for label in labels:
         assert (label.textInteractionFlags() & SELECTABLE_TEXT) == SELECTABLE_TEXT, label.objectName()
-        assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+        # The status block is rich text, so its lines can be paragraphs of their own. Each line is still inserted as plain
+        # text (text.block_html), so only the block is rich; every other label is plain.
+        if label.objectName() == "zotero-status-text":
+            assert label.textFormat() == Qt.TextFormat.RichText
+        else:
+            assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+
+
+def test_a_markup_looking_line_in_the_status_block_shows_its_characters_and_no_bold(qtbot):
+    # The status block is rich text, so a line in it must still show markup-looking text as its own characters.
+    panel = _shown_panel(qtbot, FakeZotero())
+    intro = panel.findChild(QLabel, "zotero-intro")
+    intro.setText(MARKUP_LINE)
+    assert intro.textFormat() == Qt.TextFormat.PlainText
+    assert_shows_literally(panel.findChild(QLabel, "zotero-status-text"), MARKUP_LINE)
 
 
 def test_no_label_says_not_built_yet(qtbot):

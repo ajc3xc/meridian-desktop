@@ -16,10 +16,12 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
+
+from meridian_desktop.agent_processes import clean_custom_names
 
 # local: the Meridian server or database file on this computer. hosted: the hosted Meridian account.
 # tunnel: the hosted account, which reaches this computer through the tunnel. Its projects are read
@@ -47,14 +49,36 @@ CORE_AUTO_KEYS = tuple(CORE_AUTO_FLAGS.values())
 # The mode a run starts in when the file names none and a hosted token is saved (owner decision, 2026-10-23).
 HOSTED_MODE = "hosted"
 
+# How long a tunnel sign-in lasts, in days. The owner picks one of these in Settings. A file with no key, or one with a
+# value that is not a choice, reads as the default, 30 days.
+TUNNEL_SIGNIN_DAY_CHOICES = (30, 90, 365)
+DEFAULT_TUNNEL_SIGNIN_DAYS = 30
+
 # The three owner-confirmed control switches. Each is a real true or false. An absent key means the default in
 # CONTROL_FLAG_DEFAULTS, which is set once below the Settings class.
 CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart", "tunnel_autostart")
+# The two Overleaf (LaTeX) card switches. Both default to on, and save() writes one only when it is off.
+ENGINE_SWITCH_KEYS = ("engine_auto_start", "overleaf_auto_check")
+# The hourly Overleaf session check, in minutes (docs/local-trust-contract.md, Amendment I, proposed and not yet accepted by
+# the owner). 0 is off, the default. The owner turns the check on in the Overleaf card, after a dialog. 60 is the only other choice.
+OVERLEAF_HOURLY_CHECK_MINUTES = 60
+OVERLEAF_CHECK_INTERVAL_CHOICES = (0, OVERLEAF_HOURLY_CHECK_MINUTES)
+DEFAULT_OVERLEAF_CHECK_INTERVAL_MINUTES = 0
 
 # The exact values the owner saw in the confirmation dialog when a launch-time switch was turned on (amendments A and B
 # of docs/local-trust-contract.md). The launch-time starts run only with these, and never with the current core setup.
 # An empty value means the owner has not confirmed one yet.
 CONFIRMED_KEYS = ("confirmed_core_python", "confirmed_core_checkout", "confirmed_zotero_exe")
+
+# The clients Client setup can write, by the core's --client names. The owner ticks them in Settings. Only these names are
+# kept. The default is the two clients the desktop has always set up, so a file that never chose keeps today's behaviour.
+CLIENT_CHOICE_NAMES = ("claude-desktop", "codex", "cursor", "claude-code")
+DEFAULT_CLIENT_CHOICES = ("claude-desktop", "codex")
+
+
+def clean_client_choices(names: Iterable[str]) -> tuple[str, ...]:
+    """The known client names in the order given, each kept once. Any name this desktop does not know is dropped."""
+    return tuple(dict.fromkeys(name for name in names if name in CLIENT_CHOICE_NAMES))
 
 
 @dataclass(frozen=True)
@@ -108,6 +132,35 @@ class Settings:
     # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
     # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
     key_names: tuple[str, ...] = ()
+    # The custom program names the process listing counts, in addition to claude.exe, codex.exe and cursor.exe. Only file
+    # names are stored; agent_processes checks each one. save() writes only the valid names, and the key only when one
+    # is left.
+    agent_process_names: tuple[str, ...] = ()
+    # The tunnel sign-in lifetime in days: one of TUNNEL_SIGNIN_DAY_CHOICES. A tunnel start passes it to the core as
+    # MERIDIAN_TUNNEL_SIGNIN_DAYS (runner_controls). save() writes the key only when it is not the default.
+    tunnel_signin_days: int = DEFAULT_TUNNEL_SIGNIN_DAYS
+    # The keys file the owner chose for the Keys block (keys_file.py). Only its path is stored, never a value. "" means no
+    # file is chosen. save() writes the key only when a path is set, so a file that never chose one keeps no such key.
+    keys_file_path: str = ""
+    # The folder the owner chose for the LaTeX engine's hidden starter (start_server_hidden.vbs). Only the text the owner
+    # picked is kept, and "" means no folder is chosen. save() writes the key only when a folder is chosen.
+    engine_folder: str = ""
+    # The same folder, once the owner has confirmed it in the Overleaf card (docs/local-trust-contract.md, Amendment G). Only
+    # a folder equal to engine_folder is used by the launch-time start. "" means not confirmed. save() writes the key only
+    # when it is set.
+    confirmed_engine_folder: str = ""
+    # Start the LaTeX engine when Meridian opens, if it is not running and its folder is confirmed. On by default, and the
+    # Overleaf card shows it as a checkbox. save() writes this key only when it is off.
+    engine_auto_start: bool = True
+    # Check the saved Overleaf session once when Meridian opens, if the engine is running. On by default, and the Overleaf
+    # card shows it as a checkbox. save() writes this key only when it is off.
+    overleaf_auto_check: bool = True
+    # How often the saved Overleaf session is checked while Home is showing, in minutes: one of OVERLEAF_CHECK_INTERVAL_CHOICES.
+    # 0 is off. The Overleaf card turns it on only after the owner says yes. save() writes the key only when it is not 0.
+    overleaf_check_interval_minutes: int = DEFAULT_OVERLEAF_CHECK_INTERVAL_MINUTES
+    # The clients the owner ticked for Client setup, in any order. A client not in this tuple is not written by Check setup,
+    # Apply or Remove. save() writes the key only when it differs from DEFAULT_CLIENT_CHOICES.
+    client_choices: tuple[str, ...] = DEFAULT_CLIENT_CHOICES
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -245,6 +298,34 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("key_names must be a list of names; using none")
 
+    # keys_file_path: an absent key means no file is chosen, with no warning. Only text is accepted, and it is kept without
+    # being checked here, so a file that is gone does not break loading. The Keys block says so when it reads the file.
+    if "keys_file_path" in data:
+        value = data["keys_file_path"]
+        if isinstance(value, str):
+            values["keys_file_path"] = value.strip()
+        else:
+            problems.append("keys_file_path must be a path as text or empty; using empty")
+
+    # agent_process_names: an absent key means none, with no warning. A list is kept as text. An entry that is not text is
+    # kept as an empty name, which agent_processes drops and counts. Anything other than a list is refused with a warning.
+    if "agent_process_names" in data:
+        value = data["agent_process_names"]
+        if isinstance(value, list):
+            values["agent_process_names"] = tuple(item if isinstance(item, str) else "" for item in value)
+        else:
+            problems.append("agent_process_names must be a list of names; using none")
+
+    # tunnel_signin_days: an absent key means the default, with no warning. Only one of the choices is accepted, as a
+    # whole number (a true, a text or a 90.0 is refused). Any other value is reported and the default is used.
+    if "tunnel_signin_days" in data:
+        value = data["tunnel_signin_days"]
+        if isinstance(value, int) and not isinstance(value, bool) and value in TUNNEL_SIGNIN_DAY_CHOICES:
+            values["tunnel_signin_days"] = value
+        else:
+            choices = ", ".join(str(days) for days in TUNNEL_SIGNIN_DAY_CHOICES)
+            problems.append(f"tunnel_signin_days must be one of {choices}; using {DEFAULT_TUNNEL_SIGNIN_DAYS}")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -260,6 +341,57 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["auto_update"] = value
         else:
             problems.append("auto_update must be true or false; using true")
+
+    # engine_folder: an absent key means no folder is chosen, with no warning. Only text is accepted, and it is kept without
+    # being checked here, so a folder that is gone does not break loading. The Overleaf card checks for the starter.
+    if "engine_folder" in data:
+        value = data["engine_folder"]
+        if isinstance(value, str):
+            values["engine_folder"] = value.strip()
+        else:
+            problems.append("engine_folder must be a path as text or empty; using empty")
+
+    # confirmed_engine_folder: handled as engine_folder is. An absent key means not confirmed, with no warning.
+    if "confirmed_engine_folder" in data:
+        value = data["confirmed_engine_folder"]
+        if isinstance(value, str):
+            values["confirmed_engine_folder"] = value.strip()
+        else:
+            problems.append("confirmed_engine_folder must be a path as text or empty; using empty")
+
+    # The two Overleaf card switches, both on by default. An absent key means on, with no warning. Only a real true or false
+    # is accepted; any other value is reported and the default (on) is used, as check_updates does.
+    for key in ENGINE_SWITCH_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, bool):
+            values[key] = value
+        else:
+            problems.append(f"{key} must be true or false; using true")
+
+    # overleaf_check_interval_minutes: an absent key means off, with no warning. Only 0 or 60, as a whole number (a true, a
+    # text or a 60.0 is refused). Any other value is reported and off is used, so a malformed value never turns the check on.
+    if "overleaf_check_interval_minutes" in data:
+        value = data["overleaf_check_interval_minutes"]
+        if isinstance(value, int) and not isinstance(value, bool) and value in OVERLEAF_CHECK_INTERVAL_CHOICES:
+            values["overleaf_check_interval_minutes"] = value
+        else:
+            problems.append(f"overleaf_check_interval_minutes must be 0 or {OVERLEAF_HOURLY_CHECK_MINUTES}; using 0")
+
+    # client_choices: an absent key means the default, with no warning. A list of text is read name by name: a name this desktop
+    # does not know is dropped with a warning, and the known names are kept, in order, once each. Anything that is not a list
+    # of text (a text, a number, an object, a list with a non-text item) is malformed: it is reported and no client is ticked,
+    # so a malformed value fails closed and never turns the default two clients back on.
+    if "client_choices" in data:
+        value = data["client_choices"]
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            values["client_choices"] = clean_client_choices(value)
+            if any(item not in CLIENT_CHOICE_NAMES for item in value):
+                problems.append("client_choices has names this desktop does not know; dropping them")
+        else:
+            values["client_choices"] = ()
+            problems.append("client_choices must be a list of known client names; using none")
 
     # The runner control switches: an absent key means its default in CONTROL_FLAG_DEFAULTS (tunnel on, the two launch
     # switches off), with no warning. Only a real true or false is accepted. Any other value is read as false, never as
@@ -389,6 +521,40 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
+        if not settings.keys_file_path:
+            # No file chosen is the default, so a file that never chose a keys file has no such key.
+            del data["keys_file_path"]
+        if not settings.engine_folder:
+            # No folder chosen is the default, so a file that never chose one has no such key.
+            del data["engine_folder"]
+        if not settings.confirmed_engine_folder:
+            # Not confirmed is the default, so a file whose folder was never confirmed has no such key.
+            del data["confirmed_engine_folder"]
+        for key in ENGINE_SWITCH_KEYS:
+            if data[key]:
+                # On is the default, so a file that keeps both Overleaf card switches on has no such key.
+                del data[key]
+        if settings.overleaf_check_interval_minutes == DEFAULT_OVERLEAF_CHECK_INTERVAL_MINUTES:
+            # Off is the default, so a file that never turned the hourly Overleaf check on has no such key.
+            del data["overleaf_check_interval_minutes"]
+        saved_names = clean_custom_names(settings.agent_process_names)[0]
+        if saved_names:
+            # Only valid custom names are written. An entry that is not valid, such as an empty or non-text one loaded
+            # from the file, is left out, so the file never holds a broken name.
+            data["agent_process_names"] = list(saved_names)
+        else:
+            # No custom program names is the default, so a file that names none has no such key.
+            del data["agent_process_names"]
+        chosen_clients = clean_client_choices(settings.client_choices)
+        if chosen_clients == DEFAULT_CLIENT_CHOICES:
+            # The default two clients are never written, so a file that keeps them has no such key.
+            del data["client_choices"]
+        else:
+            # An empty list is written as is: the owner unticked every client, and that is a choice.
+            data["client_choices"] = list(chosen_clients)
+        if settings.tunnel_signin_days == DEFAULT_TUNNEL_SIGNIN_DAYS:
+            # The default is never written, so a file that keeps it has no such key.
+            del data["tunnel_signin_days"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -433,6 +599,28 @@ class SettingsStore:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
         # The owner chose this mode, so it is explicit from now on and wins over the launch mode.
         updated = replace(self.load().settings, mode=mode, mode_explicit=True)
+        self.save(updated)
+        return updated
+
+    def save_custom_program_names(self, names: Iterable[object]) -> int:
+        """Save the custom program names, leaving out the invalid ones. Return how many entries were dropped as invalid.
+
+        Only the count is returned, never the names. A name already listed, or a built-in program, is skipped and not
+        counted, since it is repeated rather than invalid. Every other field in the saved file is kept.
+        """
+        kept, dropped = clean_custom_names(names)
+        self.save(replace(self.load().settings, agent_process_names=kept))
+        return dropped
+
+    def set_client_choices(self, names: Iterable[str]) -> Settings:
+        """Save the clients the owner ticked. Raises ValueError with fixed words when a name is not one this desktop knows.
+
+        A refused list writes nothing. Every other field in the saved file is kept. The names are kept in the order given.
+        """
+        chosen = tuple(names)
+        if any(not isinstance(name, str) or name not in CLIENT_CHOICE_NAMES for name in chosen):
+            raise ValueError("client choices must be names of clients that Client setup knows: " + ", ".join(CLIENT_CHOICE_NAMES))
+        updated = replace(self.load().settings, client_choices=clean_client_choices(chosen))
         self.save(updated)
         return updated
 

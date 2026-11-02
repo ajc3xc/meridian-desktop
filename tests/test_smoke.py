@@ -32,11 +32,11 @@ from PySide6.QtWidgets import (
 
 from _fakes import MemoryKeyring
 from meridian_desktop import __main__ as entry
-from meridian_desktop import local_client, projects_reader, settings_store
+from meridian_desktop import hosted_client, local_client, projects_reader, settings_store, token_store
 from meridian_desktop.data_source import (
-    NO_LOCAL_DATA_MESSAGE,
     NOT_SIGNED_IN_MESSAGE,
     DataSources,
+    no_local_data_message,
 )
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
@@ -50,6 +50,7 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
+from test_connection_status import FakeHostedTransport
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
     LOCAL_URL_SAVED_TEXT,
@@ -58,10 +59,12 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
+# The no-data message for a saved Settings(mode="local"): default local URL, no database file, no core folder.
+NO_LOCAL_DATA_MESSAGE = no_local_data_message(Settings(mode="local"))
 
 # The core projects table. executor_config and agent_instructions are present so a test can
 # prove the Projects tab never shows them. Inserted oldest first, so the expected order differs.
@@ -196,8 +199,11 @@ def test_home_search_and_settings_are_built_pages(qtbot, settings_path):
 
     assert isinstance(_page(window, "Home"), HomeTab)
     assert _page(window, "Home").objectName() == "home-tab"
-    assert isinstance(_page(window, "Search"), SearchTab)
-    assert _page(window, "Search").objectName() == "search-tab"
+    # The Code, Outputs and Research tabs are one search tab each, for its own kind.
+    for name, kind in (("Code", "code"), ("Outputs", "outputs"), ("Research", "research")):
+        assert isinstance(_page(window, name), SearchTab), name
+        assert _page(window, name).objectName() == f"search-tab-{kind}", name
+        assert _page(window, name).kind == kind, name
     assert _page(window, "Projects").objectName() == "projects-tab"
 
 
@@ -284,13 +290,29 @@ def test_failed_mode_save_reverts_selector(qtbot, settings_path, monkeypatch):
 
 def test_status_bar_text(qtbot, settings_path):
     window = _window(qtbot, settings_path)
-    assert window.statusBar().currentMessage() == STATUS
+    assert window.status_message() == STATUS
 
 
 def test_smoke_flag_returns_zero_and_prints_ok(settings_path, capsys):
     code = entry.main(["--smoke"], settings_path=settings_path)
     assert code == 0
     assert "smoke ok" in capsys.readouterr().out
+
+
+def test_a_smoke_run_with_a_saved_token_sends_no_hosted_request(settings_path, capsys, hosted_transport_guard):
+    # The app reads the token from the keyring it uses by default: conftest's in-memory keyring for the session.
+    # The token is removed again at the end, so no later test sees it.
+    SettingsStore(settings_path).save(Settings(mode="hosted", hosted_url="https://usemeridian.us"))
+    token_store.set_token(FAKE_TOKEN)
+    try:
+        code = entry.main(["--smoke"], settings_path=settings_path)
+        QThreadPool.globalInstance().waitForDone(5000)
+    finally:
+        token_store.delete_token()
+    assert code == 0
+    assert "smoke ok" in capsys.readouterr().out
+    # A connection check that the smoke window started would have reached the guard. None did.
+    assert hosted_transport_guard.calls == []
 
 
 # ----------------------------------------------------------- Projects tab (read-only)
@@ -810,12 +832,24 @@ def test_settings_tab_cancelled_dialog_changes_nothing(qtbot, settings_path, tmp
     assert tab.findChild(QLabel, "settings-db-message").isHidden()
 
 
-def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path):
+def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path, monkeypatch):
+    # The real transport would send the saved token to the production host. It is replaced here, so a call to it is
+    # recorded, and the assertion below fails.
+    real_calls = []
+
+    def real_transport(request, timeout):
+        real_calls.append(request.full_url)
+        return hosted_client.Reply(200, b"[]")
+
+    monkeypatch.setattr(hosted_client, "_urllib_transport", real_transport)
     backend = MemoryKeyring()
     secrets = KeyringSecretStore(backend=backend)
     secrets.set_secret(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
     SettingsStore(settings_path).save(Settings(mode="hosted"))
-    window = MainWindow(SettingsStore(settings_path), secret_store=secrets, data_sources=_sources())
+    hosted = FakeHostedTransport()
+    window = MainWindow(
+        SettingsStore(settings_path), secret_store=secrets, data_sources=_sources(), hosted_transport=hosted
+    )
     qtbot.addWidget(window)
     tab = _settings_tab(window)
 
@@ -825,6 +859,13 @@ def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path
     assert tab.findChild(QLineEdit, "settings-token-input").text() == ""
     assert FAKE_TOKEN not in _all_text(window)
     assert FAKE_TOKEN not in tab.findChild(QLabel, "settings-mode").text()
+    # The window's hosted check, started at open, is answered by the fake host only, and its line never shows the token.
+    qtbot.waitUntil(
+        lambda: window.connection_status_label.text().startswith("Hosted at usemeridian.us: connected"), timeout=5000
+    )
+    assert real_calls == []
+    assert [path for path, _auth, _timeout in hosted.requests] == ["/health", "/projects"]
+    assert FAKE_TOKEN not in _all_text(window)
 
 
 def test_settings_tab_and_top_bar_show_the_same_saved_mode(qtbot, settings_path, monkeypatch):

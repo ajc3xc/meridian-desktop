@@ -3,10 +3,16 @@
 Both transports are fakes, so no socket is opened and no keychain is read. Each fake records its calls and the
 thread it ran on, so a test can prove that a refresh runs off the UI thread, that nothing is sent before the tab is
 shown, and that a refused address sends nothing. The token is checked against every widget's visible text.
+
+Whether the local server answered is decided by data_source.local_server_answers, the Projects tab's check. The
+panel reaches it through its project provider, so build_panel gives the provider that check with a fake /health
+probe: refused for a fake local server whose error is not_running, running otherwise, and error for a non-loopback
+address, as local_client.probe_health answers.
 """
 
 import gc
 import json
+import subprocess
 import threading
 import weakref
 from datetime import datetime, timedelta, timezone
@@ -18,9 +24,15 @@ from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QLabel, QPushButton, QTableWidget, QWidget
 
 from _shared_delivery import emit, recording_deliveries, visible_state
-from meridian_desktop import hosted_client, sessions_client as sc
+from meridian_desktop import claude_processes, hosted_client, local_client, sessions_client as sc
+from meridian_desktop.claude_processes import ClaudeProcess, ClaudeProcessesResult
+from meridian_desktop.data_source import local_server_answers
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.ui.sessions_panel import (
+    CLAUDE_CHECKING_TEXT,
+    CLAUDE_COLUMNS,
+    CLAUDE_NONE_TEXT,
+    CLAUDE_TASKLIST_NOTE,
     COLUMNS,
     LOADING_TEXT,
     NO_PROJECTS_TEXT,
@@ -30,6 +42,7 @@ from meridian_desktop.ui.sessions_panel import (
     REFRESH_MS,
     SessionsPanel,
     choose_project,
+    claude_status_text,
     row_cells,
     status_text,
 )
@@ -119,18 +132,50 @@ class ScriptedLocal:
         return SimpleNamespace(status=200, body=self.bodies[index - 1])
 
 
+def no_claude_processes():
+    """A listing that read the list and found no Claude program. It starts no process."""
+    return ClaudeProcessesResult(claude_processes.LISTED, "", ())
+
+
+def fake_health(local, url):
+    """What GET /health gives for a fake local server, as local_client.probe_health names it. No socket is opened.
+
+    A non-loopback or unusable address is an error, as the real probe refuses it before sending. A fake whose error
+    is not_running refuses the connection. Any other fake answers as Meridian.
+    """
+    try:
+        local_client.assert_loopback(url)
+    except LocalClientError:
+        return local_client.HEALTH_ERROR
+    error = getattr(local, "error", None)
+    if isinstance(error, LocalClientError) and error.code == "not_running":
+        return local_client.HEALTH_NOT_RUNNING
+    return local_client.HEALTH_RUNNING
+
+
 def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, None), projects=((PID, "Alpha"),),
-                project_provider=None, hosted_provider=None, mode="local"):
+                project_provider=None, hosted_provider=None, mode="local", process_lister=None):
     """Build the panel with fake providers. Returns (panel, counts): how many times each provider was called.
 
     ``mode`` is the mode saved in Settings. The mode provider runs on the worker, so counts.mode also shows each
-    timer tick that reached the worker.
+    timer tick that reached the worker. ``process_lister`` stands in for the Claude process listing. Without one, the
+    listing finds no Claude program, so no test starts tasklist. The project provider carries the Projects tab's
+    local-server check, data_source.local_server_answers, with fake_health as its probe; counts.probes counts it.
     """
-    counts = SimpleNamespace(projects=0, hosted=0, mode=0)
+    counts = SimpleNamespace(projects=0, hosted=0, mode=0, claude=0, probes=0)
 
-    def list_projects():
-        counts.projects += 1
-        return project_provider() if project_provider is not None else list(projects)
+    class Provider:
+        """The project list, and the Projects tab's own local-server check, as the window's ProjectsProvider has."""
+
+        def __call__(self):
+            counts.projects += 1
+            return project_provider() if project_provider is not None else list(projects)
+
+        def local_server_answers(self, url):
+            counts.probes += 1
+            return local_server_answers(url, lambda probed: fake_health(local, probed))
+
+    list_projects = Provider()
 
     def hosted_pair():
         counts.hosted += 1
@@ -140,6 +185,10 @@ def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, 
         counts.mode += 1
         return mode
 
+    def claude_now():
+        counts.claude += 1
+        return (process_lister or no_claude_processes)()
+
     panel = SessionsPanel(
         lambda: local_url,
         hosted_provider if hosted_provider is not None else hosted_pair,
@@ -147,6 +196,7 @@ def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, 
         mode_value,
         local_transport=local,
         hosted_transport=hosted,
+        process_lister=claude_now,
     )
     qtbot.addWidget(panel)
     panel.hide()
@@ -154,13 +204,61 @@ def build_panel(qtbot, *, local, hosted, local_url=LOCAL, hosted_value=(HOSTED, 
 
 
 def make_panel(qtbot, *, local, hosted=None, local_url=LOCAL, hosted_value=(HOSTED, None),
-               projects=((PID, "Alpha"),), project_provider=None, mode="local"):
+               projects=((PID, "Alpha"),), project_provider=None, mode="local", process_lister=None):
     hosted = hosted if hosted is not None else FakeHosted()
     panel, _counts = build_panel(
         qtbot, local=local, hosted=hosted, local_url=local_url, hosted_value=hosted_value,
-        projects=projects, project_provider=project_provider, mode=mode,
+        projects=projects, project_provider=project_provider, mode=mode, process_lister=process_lister,
     )
     return panel, hosted
+
+
+def claude_table_of(panel):
+    return panel.findChild(QTableWidget, "sessions-claude-table")
+
+
+def claude_status_of(panel):
+    return panel.findChild(QLabel, "sessions-claude-processes").text()
+
+
+def claude_rows_of(panel):
+    """Every row of the processes table: the program label, the root count and the total count, in that order."""
+    table = claude_table_of(panel)
+    return [
+        tuple(table.item(row, column).text() for column in range(len(CLAUDE_COLUMNS)))
+        for row in range(table.rowCount())
+    ]
+
+
+def listing_of(text):
+    """A process lister that reads fixed tasklist text through the real parser, with no process started."""
+    return lambda: claude_processes.list_claude_processes(run=lambda: text)
+
+
+def listed_result(*processes):
+    """A listed result built from a fake process table, the way the listing builds one. No process is started."""
+    return claude_processes.list_claude_processes(snapshot=lambda: list(processes), custom_names=())
+
+
+CLAUDE_LISTING = (
+    "Image Name:   Claude.exe\r\n"
+    "PID:          14232\r\n"
+    "Session Name: Console\r\n"
+    "Session#:     1\r\n"
+    "Mem Usage:    245,108 K\r\n"
+    "\r\n"
+    "Image Name:   node.exe\r\n"
+    "PID:          7744\r\n"
+    "Session Name: Console\r\n"
+    "Session#:     1\r\n"
+    "Mem Usage:    60,000 K\r\n"
+    "\r\n"
+    "Image Name:   claude.exe\r\n"
+    "PID:          900\r\n"
+    "Session Name: Console\r\n"
+    "Session#:     1\r\n"
+    "Mem Usage:    31,004 K\r\n"
+)
 
 
 def settle(qtbot, panel):
@@ -185,12 +283,12 @@ def all_visible_text(panel):
     parts = [label.text() for label in panel.findChildren(QLabel)]
     combo = picker_of(panel)
     parts.extend(combo.itemText(index) for index in range(combo.count()))
-    table = table_of(panel)
-    for row in range(table.rowCount()):
-        for column in range(table.columnCount()):
-            item = table.item(row, column)
-            if item is not None:
-                parts.append(item.text())
+    for table in panel.findChildren(QTableWidget):
+        for row in range(table.rowCount()):
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                if item is not None:
+                    parts.append(item.text())
     return "\n".join(parts)
 
 
@@ -295,10 +393,14 @@ def test_unnamed_row_reads_as_unnamed(qtbot):
 
 
 def test_table_is_read_only_and_the_only_button_is_refresh(qtbot):
-    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
+    panel, _hosted = make_panel(
+        qtbot, local=FakeLocal(body=body_of([session()])), process_lister=listing_of(CLAUDE_LISTING),
+    )
     panel.show()
     settle(qtbot, panel)
     assert table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+    assert claude_table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+    assert claude_table_of(panel).selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
     assert [button.objectName() for button in panel.findChildren(QPushButton)] == ["sessions-refresh"]
 
 
@@ -319,16 +421,178 @@ def test_no_text_says_not_built_yet(qtbot):
     assert "not built yet" not in all_visible_text(panel).lower()
 
 
-def test_running_claude_processes_say_not_connected_and_list_none(qtbot):
-    # No read-only process check exists for Claude Desktop or Claude Code yet, so the tab says so plainly.
-    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
+def test_claude_processes_are_counted_by_program_next_to_the_sessions(qtbot):
+    # The sessions come from the fake local server, and the processes from fixed tasklist text.
+    panel, _hosted = make_panel(
+        qtbot,
+        local=FakeLocal(body=body_of([session(name="auth-refactor")])),
+        process_lister=listing_of(CLAUDE_LISTING),
+    )
     panel.show()
     settle(qtbot, panel)
-    line = panel.findChild(QLabel, "sessions-claude-processes").text()
-    assert "Claude Desktop and Claude Code" in line
-    assert "Not connected" in line
-    # The only table row is the one session the local server sent, never a process.
+    # One row per program: its label, its root count and its total count. node.exe is not a Claude program, so it is not
+    # counted. tasklist gives no parent id, so each claude.exe image is a root and the two counts are the same.
+    assert claude_rows_of(panel) == [("Claude", "2", "2")]
+    assert [claude_table_of(panel).horizontalHeaderItem(i).text() for i in range(3)] == list(CLAUDE_COLUMNS)
+    assert claude_status_of(panel).startswith("2 agent processes running on this computer. Checked at ")
+    # The line says the process table was not read, so tasklist was used.
+    assert CLAUDE_TASKLIST_NOTE in claude_status_of(panel)
+    assert "Not connected" not in all_visible_text(panel)
+    # The sessions table still holds the session the local server sent, and only that.
     assert table_of(panel).rowCount() == 1
+    assert table_of(panel).item(0, 0).text() == "auth-refactor"
+    assert "1 session(s) from this computer's Meridian server" in status_of(panel)
+
+
+def test_the_processes_table_has_one_row_per_program_with_root_and_total_counts(qtbot):
+    # A fake process table, so no process is read. A child of a matching process counts in the total only.
+    process_table = [
+        ClaudeProcess(image="claude.exe", pid=100, ppid=1),
+        ClaudeProcess(image="claude.exe", pid=101, ppid=100),
+        ClaudeProcess(image="Claude.exe", pid=102, ppid=1),
+        ClaudeProcess(image="codex.exe", pid=200, ppid=1),
+        ClaudeProcess(image="cursor.exe", pid=300, ppid=1),
+        ClaudeProcess(image="cursor.exe", pid=301, ppid=300),
+        ClaudeProcess(image="notepad.exe", pid=400, ppid=1),
+    ]
+    panel, _hosted = make_panel(
+        qtbot,
+        local=FakeLocal(body=b"[]"),
+        process_lister=lambda: claude_processes.list_claude_processes(snapshot=lambda: process_table, custom_names=()),
+    )
+    panel.show()
+    settle(qtbot, panel)
+    table = claude_table_of(panel)
+    assert [table.horizontalHeaderItem(i).text() for i in range(3)] == ["Program", "Root processes", "Total processes"]
+    # Claude has two roots (100 and 102) and three processes in all. Codex has one. Cursor has one root and one child.
+    assert claude_rows_of(panel) == [("Claude", "2", "3"), ("Codex", "1", "1"), ("Cursor", "1", "2")]
+    # Each cell is a label or a count: no path, command line or user name reaches the table.
+    for row in claude_rows_of(panel):
+        for cell in row:
+            assert "\\" not in cell and "/" not in cell and "Users" not in cell
+    # The snapshot was read, so the line does not say that tasklist was used.
+    assert claude_status_of(panel).startswith("6 agent processes running on this computer. Checked at ")
+    assert CLAUDE_TASKLIST_NOTE not in claude_status_of(panel)
+
+
+def test_a_single_claude_process_uses_the_singular(qtbot):
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(), process_lister=listing_of(
+        "Image Name: Claude.exe\nPID: 5\n"))
+    panel.show()
+    settle(qtbot, panel)
+    assert claude_status_of(panel).startswith("1 agent process running on this computer. Checked at ")
+
+
+def test_no_claude_process_says_so_in_one_line(qtbot):
+    panel, _hosted = make_panel(qtbot, local=FakeLocal(body=b"[]"), process_lister=listing_of(
+        "Image Name: notepad.exe\nPID: 5000\n"))
+    panel.show()
+    settle(qtbot, panel)
+    assert claude_rows_of(panel) == []
+    assert claude_status_of(panel).startswith(CLAUDE_NONE_TEXT + " Checked at ")
+    assert "\n" not in claude_status_of(panel)
+
+
+def test_a_failed_process_listing_is_one_plain_line_and_keeps_the_sessions(qtbot):
+    secret = r"C:\Users\13144\secret-prompt-text sk_meridian_LISTSENTINEL"
+
+    def failing_run():
+        raise OSError(secret)
+
+    panel, _hosted = make_panel(
+        qtbot,
+        local=FakeLocal(body=body_of([session(name="auth-refactor")])),
+        process_lister=lambda: claude_processes.list_claude_processes(run=failing_run),
+    )
+    panel.show()
+    settle(qtbot, panel)
+    line = claude_status_of(panel)
+    assert line.startswith(claude_processes.UNAVAILABLE_MESSAGE + " Checked at ")
+    assert "\n" not in line
+    assert claude_rows_of(panel) == []
+    assert "secret" not in all_visible_text(panel)
+    assert "LISTSENTINEL" not in all_visible_text(panel)
+    # The listing failing never fails the sessions read.
+    assert table_of(panel).item(0, 0).text() == "auth-refactor"
+    assert "1 session(s) from this computer's Meridian server" in status_of(panel)
+
+
+def test_a_timed_out_process_listing_says_so_and_keeps_the_sessions(qtbot):
+    def slow_run():
+        raise subprocess.TimeoutExpired(cmd="tasklist", timeout=5.0)
+
+    panel, _hosted = make_panel(
+        qtbot,
+        local=FakeLocal(body=body_of([session(name="auth-refactor")])),
+        process_lister=lambda: claude_processes.list_claude_processes(run=slow_run),
+    )
+    panel.show()
+    settle(qtbot, panel)
+    assert claude_status_of(panel).startswith(claude_processes.TIMEOUT_MESSAGE)
+    assert table_of(panel).item(0, 0).text() == "auth-refactor"
+
+
+def test_a_process_lister_that_raises_is_shown_as_unavailable_and_keeps_the_sessions(qtbot):
+    def broken():
+        raise RuntimeError("listing exploded with sk_meridian_BROKENLISTING")
+
+    panel, _hosted = make_panel(
+        qtbot, local=FakeLocal(body=body_of([session(name="auth-refactor")])), process_lister=broken,
+    )
+    panel.show()
+    settle(qtbot, panel)
+    assert claude_status_of(panel).startswith(claude_processes.UNAVAILABLE_MESSAGE)
+    assert "exploded" not in all_visible_text(panel)
+    assert "BROKENLISTING" not in all_visible_text(panel)
+    assert table_of(panel).item(0, 0).text() == "auth-refactor"
+
+
+def test_claude_processes_are_listed_again_on_each_local_tick(qtbot):
+    running = [ClaudeProcessesResult(claude_processes.LISTED, "", ())]
+    panel, counts = build_panel(
+        qtbot, local=FakeLocal(body=b"[]"), hosted=FakeHosted(), process_lister=lambda: running[0],
+    )
+    panel.show()
+    settle(qtbot, panel)
+    assert claude_rows_of(panel) == []
+    running[0] = listed_result(ClaudeProcess(image="claude.exe", pid=321))
+    panel._timer.timeout.emit()  # noqa: SLF001 - the timer's real connection
+    settle(qtbot, panel)
+    assert claude_rows_of(panel) == [("Claude", "1", "1")]
+    assert counts.claude >= 2
+
+
+def test_claude_processes_stay_live_in_hosted_mode_and_still_read_no_hosted_session(qtbot):
+    running = [ClaudeProcessesResult(claude_processes.LISTED, "", ())]
+    local = FakeLocal(error=LocalClientError("not_running", "x"))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, counts = build_panel(
+        qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN), mode="hosted",
+        process_lister=lambda: running[0],
+    )
+    panel.show()
+    settle(qtbot, panel)
+    hosted_calls = len(hosted.calls)
+    running[0] = listed_result(ClaudeProcess(image="Claude.exe", pid=8))
+    panel._timer.timeout.emit()  # noqa: SLF001
+    settle(qtbot, panel)
+    assert claude_rows_of(panel) == [("Claude", "1", "1")]
+    assert len(hosted.calls) == hosted_calls  # the tick reads the processes, never the hosted sessions
+    assert counts.hosted == 1
+
+
+def test_claude_status_text_for_each_listing_state():
+    listed = listed_result(ClaudeProcess(image="claude.exe", pid=1))
+    assert claude_status_text(listed, "12:00:00") == "1 agent process running on this computer. Checked at 12:00:00."
+    empty = ClaudeProcessesResult(claude_processes.LISTED, "", ())
+    assert claude_status_text(empty, "12:00:00") == f"{CLAUDE_NONE_TEXT} Checked at 12:00:00."
+    failed = ClaudeProcessesResult(claude_processes.UNAVAILABLE, claude_processes.UNAVAILABLE_MESSAGE)
+    assert claude_status_text(failed, "12:00:00") == f"{claude_processes.UNAVAILABLE_MESSAGE} Checked at 12:00:00."
+
+
+def test_the_claude_status_line_starts_as_checking(qtbot):
+    panel, _hosted = make_panel(qtbot, local=FakeLocal())
+    assert claude_status_of(panel) == CLAUDE_CHECKING_TEXT
 
 
 # ----------------------------------------------------------------- picker
@@ -368,11 +632,7 @@ def test_no_projects_says_so_and_sends_nothing(qtbot):
     assert local.calls == []
 
 
-class ProjectsUnavailable(Exception):
-    """Stands in for the window's exception. Its class name must never reach the status line."""
-
-
-@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), ProjectsUnavailable("/home/x/secret.db")])
+@pytest.mark.parametrize("failure", [RuntimeError("db path with secret"), OSError("/home/x/secret.db")])
 def test_a_failed_project_list_says_so_in_plain_words_and_sends_nothing(qtbot, failure):
     def broken():
         raise failure
@@ -433,16 +693,41 @@ def test_the_token_is_not_shown_when_hosted_refuses_it(qtbot):
     assert SENTINEL_TOKEN not in all_visible_text(panel)
 
 
-def test_a_non_loopback_local_address_is_refused_and_nothing_is_sent(qtbot):
+@pytest.mark.parametrize("token", [SENTINEL_TOKEN, None], ids=["token", "no-token"])
+def test_a_non_loopback_local_address_gets_nothing_and_the_next_source_is_the_one_projects_asks(qtbot, token):
+    """The real probe refuses a non-loopback address before it sends (state error), so the Projects tab's check says
+    no server answered. The Sessions tab uses that same check: nothing goes to the address, and the next source is
+    hosted with a saved token, as on Projects, or nothing at all without one."""
+    remote = "http://10.0.0.5:7878"
+    assert local_client.probe_health(remote) == local_client.HEALTH_ERROR  # refused before any request
+    assert local_server_answers(remote, local_client.probe_health) is False
     local = FakeLocal()
-    hosted = FakeHosted()
-    panel, hosted = make_panel(qtbot, local=local, hosted=hosted, local_url="http://10.0.0.5:7878",
-                               hosted_value=(HOSTED, SENTINEL_TOKEN))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, hosted = make_panel(qtbot, local=local, hosted=hosted, local_url=remote, hosted_value=(HOSTED, token))
     panel.show()
     settle(qtbot, panel)
     assert local.calls == []
+    if token:
+        assert len(hosted.calls) == 1
+        assert status_of(panel).startswith("1 session(s) from hosted Meridian.")
+    else:
+        assert hosted.calls == []
+        assert "not running on this computer" in status_of(panel)
+
+
+def test_a_local_server_that_answers_its_check_gives_the_final_answer_even_an_error(qtbot):
+    """As on Projects: once the check says the local server answered, its sessions answer is shown as it is, a timeout
+    included, and hosted is not asked over it, even with a token saved."""
+    local = FakeLocal(error=LocalClientError("timeout", "slow"))
+    hosted = FakeHosted(body=body_of([session(name="from-hosted")]))
+    panel, counts = build_panel(qtbot, local=local, hosted=hosted, hosted_value=(HOSTED, SENTINEL_TOKEN))
+    panel.show()
+    settle(qtbot, panel)
+    assert counts.probes == 1
+    assert len(local.calls) == 1
+    assert status_of(panel) == sc.LOCAL_TIMEOUT_MESSAGE
     assert hosted.calls == []
-    assert "not on this computer" in status_of(panel)
+    assert counts.hosted == 0
 
 
 def test_a_missing_route_shows_its_message_and_no_rows(qtbot):
@@ -488,7 +773,8 @@ def test_a_show_makes_one_project_read_and_one_sessions_read(qtbot):
     panel.show()
     settle(qtbot, panel)
     assert counts.projects == 1
-    assert len(local.calls) == 1  # the sessions read asks the local server first
+    assert counts.probes == 1  # the sessions read asks the Projects tab's local-server check first
+    assert local.calls == []  # which says no server answered, so its sessions route is not asked
     assert counts.hosted == 1
     assert len(hosted.calls) == 1  # and then the hosted host, once
 
@@ -529,7 +815,7 @@ def test_a_refresh_press_makes_exactly_one_project_read_and_one_sessions_read(qt
     settle(qtbot, panel)
     assert counts.projects == projects + 1
     assert counts.hosted == hosted_reads + 1
-    assert len(local.calls) == local_calls + 1
+    assert len(local.calls) == local_calls  # hosted mode reads hosted only, as the Projects tab does
     assert len(hosted.calls) == hosted_calls + 1
     assert button.isEnabled()
 
@@ -575,10 +861,11 @@ def test_a_local_tick_that_gets_no_answer_changes_nothing_and_asks_hosted_nothin
     settle(qtbot, panel)
     status_before = status_of(panel)
     local.error = LocalClientError("not_running", "x")  # the server stops answering
-    hosted_reads = counts.hosted
+    hosted_reads, probes = counts.hosted, counts.probes
     panel._timer.timeout.emit()  # noqa: SLF001
     settle(qtbot, panel)
-    assert len(local.calls) == 2
+    assert counts.probes == probes + 1  # the tick asks the same local-server check as a full read
+    assert len(local.calls) == 1  # which says no answer, so the sessions route is not asked
     assert counts.hosted == hosted_reads
     assert hosted.calls == []
     assert status_of(panel) == status_before
@@ -711,11 +998,11 @@ def test_row_cells_orders_the_four_columns_and_shows_an_age():
     assert row_cells(row, now) == ("(unnamed)", "idle", "5 min ago", "codex")
 
 
-def test_the_table_uses_single_row_selection(qtbot):
+def test_the_table_selects_whole_rows_and_several_at_once(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal())
     table = table_of(panel)
     assert table.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectRows
-    assert table.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
+    assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
     assert table.horizontalHeader().stretchLastSection()
 
 
@@ -759,6 +1046,7 @@ def test_a_read_still_running_when_its_tab_is_deleted_does_not_keep_the_tab(qtbo
             local_transport=FakeLocal(),
             hosted_transport=FakeHosted(),
             parent=container,
+            process_lister=no_claude_processes,
         )
         panel.refresh()
         assert entered.wait(5)  # the read has started and is held at the gate

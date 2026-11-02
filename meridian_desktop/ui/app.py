@@ -17,13 +17,14 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from meridian_desktop import install, token_store, updater
 from meridian_desktop.desktop_log import start_desktop_log
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tray import MeridianTray
+from meridian_desktop.ui.confirm import show_notice
 from meridian_desktop.ui.first_run import needs_first_run, run_first_run
 from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.runner_actions import LaunchStarts, RunnerActions
@@ -90,11 +91,13 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
     if first_run and needs_first_run(store, smoke=smoke):
         outcome = run_first_run(store)
         if outcome.notice:
-            QMessageBox.information(None, "Meridian Desktop", outcome.notice)
+            # A built box, not the static information box, so the owner can select and copy the notice.
+            show_notice(None, "Meridian Desktop", outcome.notice)
 
     # The update check runs at a real start and every six hours after, through the urllib transport. A --smoke run
     # passes no transport and no install folder, so it makes no request and stages nothing. The window still honours
-    # the check_updates setting.
+    # the check_updates setting. The mode bar's connection check is skipped too (skip_connection_check), so a smoke run
+    # sends nothing to the hosted host even with a token saved.
     # One set of runner controls is shared by every tab that starts or stops a runner, so one core search serves them all.
     actions = RunnerActions(store)
     window = MainWindow(
@@ -103,6 +106,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         update_root=None if smoke else install.install_dir(os.environ),
         record_apps_entry=None if smoke else install.apps_entry_recorder(os.environ),
         runner_actions=actions,
+        skip_connection_check=smoke,
     )
     tray = MeridianTray(window, app)
     window.show()
@@ -129,4 +133,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
     # by this frame, so it lives as long as the event loop runs.
     launch = LaunchStarts(actions, report=window.show_launch_notes)
     QTimer.singleShot(0, launch.start)
+    # The Overleaf card's launch-time checks (ui/home_tab.py run_launch_checks): the engine start and one session check, each
+    # only when its own switch is on. The card runs them once, after the window shows, and never on a later show.
+    QTimer.singleShot(0, window.run_home_launch_checks)
     return int(app.exec())

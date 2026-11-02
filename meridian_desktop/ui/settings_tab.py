@@ -3,20 +3,23 @@
 1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
    Save and Remove, the Test connection button, the local URL and the database file.
 2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
-   launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
+   launch-time switches, the automatic update checkbox, the tunnel sign-in lifetime, and the line that counts custom
+   program names dropped on save. Each control asks the owner first, except the update checkbox and the lifetime choice.
 3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
 4. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
 5. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
    It starts folded. The Logs view reads nothing until its Refresh is pressed.
 
-The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token is typed into
-a password field, saved to the keychain through token_store, and never written to the settings file. The tab shows only
+The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token comes from a
+browser sign-in (hosted_sign_in: the OAuth device grant) or is pasted into a password field. Either way it is saved to the
+keychain through token_store, and never written to the settings file. The tab shows only
 whether a token is set. Test connection makes one GET /projects with the saved URL and token, on a worker thread, and
 shows the result in plain words.
 
 The local URL is checked with local_client.assert_loopback before anything is written. A value that is not an http
 loopback URL is refused inline, and the settings file is not touched. The database file is picked with a file dialog, and
-only its path is saved.
+only its path is saved. With no file chosen, the line names the core folder's data/meridian.db when it is there, since
+local mode then reads that file, and the dialog starts in that data folder.
 
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the main window calls
 refresh() after each save, so both always show the same saved mode.
@@ -28,18 +31,21 @@ parent, the tab has no RunPod card, and the Keys group lists only the names the 
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+import threading
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Slot
-from PySide6.QtGui import QResizeEvent, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QUrl, Slot
+from PySide6.QtGui import QDesktopServices, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -49,12 +55,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, token_store
+from meridian_desktop import hosted_client, hosted_sign_in, latex_client, token_store
 from meridian_desktop.api_keys import ApiKeys
+from meridian_desktop.data_source import core_database_path
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
+from meridian_desktop.hosted_sign_in import DeviceSignIn, SignInResult
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.settings_store import (
+    DEFAULT_ENGINE_URL,
+    DEFAULT_HOSTED_URL,
+    DEFAULT_LOCAL_URL,
+    DEFAULT_TUNNEL_SIGNIN_DAYS,
+    TUNNEL_SIGNIN_DAY_CHOICES,
+    SettingsStore,
+)
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
@@ -66,8 +81,9 @@ from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
+from meridian_desktop.ui.tab_scroll import let_the_wheel_pass
 from meridian_desktop.ui.tools_panel import ToolsPanel
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import TextBlock, make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
 MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"), ("tunnel", "Tunnel"))
@@ -80,8 +96,20 @@ LOCAL_SERVER_TITLE = "Local server and startup"
 KEYS_TITLE = "Keys"
 CLIENT_SETUP_TITLE = "Client setup"
 DIAGNOSTICS_TITLE = "Diagnostics (logs)"
-# The one place for diagnostics. The LaTeX section label is the one main_window shows and tests look for.
-LATEX_SECTION = "LaTeX (local engine on 127.0.0.1:8471)"
+# The LaTeX section label leads with Overleaf in the browser, the normal way, and names the saved address of the local
+# backup engine (engine_url), host and port only.
+LATEX_SECTION_TEMPLATE = "LaTeX (Overleaf in the browser; local backup engine on {address})"
+LATEX_SECTION_NOT_LOCAL = "LaTeX (Overleaf in the browser; the saved backup engine address is not on this computer)"
+
+
+def latex_section_text(engine_url: object) -> str:
+    """The LaTeX section label for ``engine_url``. An address that is not loopback is not shown at all."""
+    address = latex_client.address_text(engine_url)
+    return LATEX_SECTION_NOT_LOCAL if address is None else LATEX_SECTION_TEMPLATE.format(address=address)
+
+
+# The label for the default engine address. main_window re-exports it, and tests look for it with default settings.
+LATEX_SECTION = latex_section_text(DEFAULT_ENGINE_URL)
 TOOLS_SECTION = "Tools (full table)"
 DIAGNOSTICS_INTRO = (
     "Read-only views for finding a fault: the file path, the full tools table, the LaTeX engine probe, and the desktop, "
@@ -93,9 +121,19 @@ LOAD_WARNING_TEXT = "Note from the settings file: {warning}"
 DB_DIALOG_TITLE = "Choose the Meridian database file"
 DB_FILE_FILTER = "SQLite database (*.db *.sqlite *.sqlite3);;All files (*)"
 NOT_CHOSEN_TEXT = "No database file chosen yet."
+# No file chosen, but the core folder's data/meridian.db is there, so local mode reads it.
+USING_CORE_FILE_TEXT = "Not chosen. Using {path}."
 LOCAL_URL_SAVED_TEXT = "Local URL saved."
 DB_SAVED_TEXT = "Database file saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
+# The tunnel sign-in lifetime: its caption, a short line on when a change applies, and each choice's label. The default
+# choice is marked, so the owner can see which one a file without the key gets.
+TUNNEL_SIGNIN_CAPTION = "Tunnel sign-in lifetime:"
+TUNNEL_SIGNIN_HINT = "How long a tunnel sign-in lasts. A change applies the next time the tunnel starts."
+TUNNEL_SIGNIN_OPTION = "{days} days"
+TUNNEL_SIGNIN_DEFAULT_MARK = " (default)"
+# Shown after a save that left out invalid custom program names. Only the count is shown, never the names.
+DROPPED_NAMES_TEXT = "Removed {count} invalid name(s) on save."
 HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
 TOKEN_SET_TEXT = "Hosted token: set"
 TOKEN_NOT_SET_TEXT = "Hosted token: not set"
@@ -104,6 +142,28 @@ TOKEN_SAVED_TEXT = "Hosted token saved in the keychain. The box is cleared."
 TOKEN_REMOVED_TEXT = "Hosted token removed from the keychain."
 TOKEN_NOTHING_REMOVED_TEXT = "No hosted token was saved, so nothing was removed."
 TEST_RUNNING_TEXT = "Testing the saved hosted URL and token..."
+# The browser sign-in. The button reads Stop waiting while a sign-in runs, and each step has its own line below it.
+SIGN_IN_BUTTON_TEXT = "Sign in with browser"
+SIGN_IN_STOP_TEXT = "Stop waiting"
+SIGN_IN_STARTING_TEXT = "Asking Hosted Meridian for a sign-in code..."
+SIGN_IN_CODE_TEXT = (
+    "Enter the code {code} on the page that opened. Waiting for your approval for up to {minutes} minutes. "
+    "Nothing is saved until you approve."
+)
+SIGN_IN_NOT_OPENED_TEXT = "The browser did not open, so open {url} yourself and enter the code."
+SIGN_IN_SAVED_TEXT = "Signed in. The hosted token is saved in the keychain."
+SIGN_IN_STOPPING_TEXT = "Stopping. Nothing is saved."
+SIGN_IN_FAILED = "failed"
+SIGN_IN_UNEXPECTED_TEXT = "The sign-in failed unexpectedly ({name}). Nothing was saved."
+SIGN_IN_OUTCOME_TEXT = {
+    hosted_sign_in.DENIED: "The sign-in was refused in the browser. Nothing was saved.",
+    hosted_sign_in.EXPIRED: "The code expired before it was approved. Press Sign in with browser for a new code.",
+    hosted_sign_in.STOPPED: "Stopped waiting. Nothing was saved.",
+    hosted_sign_in.UNREACHABLE: "Hosted Meridian could not be reached during the sign-in. Nothing was saved.",
+    hosted_sign_in.BAD_REPLY: "Hosted Meridian sent a sign-in reply the desktop could not read. Nothing was saved.",
+}
+SIGN_IN_FAILED_TEXT = "The sign-in did not finish. Nothing was saved."
+TOKEN_HINT_TEXT = "Signing in with the browser is the usual way. A token you already have can be pasted in the box above instead."
 TEST_CONNECTED_TEXT = "Connected to {url}. Hosted Meridian returned {count} project(s)."
 TEST_UNEXPECTED_TEXT = "Connection test failed ({name})."
 
@@ -116,6 +176,12 @@ ListHostedFn = Callable[[str, str | None], list[Any]]
 def mode_text(mode: str) -> str:
     """The saved mode as this tab shows it."""
     return f"Mode: {MODE_LABELS.get(mode, mode)} (set by the Mode selector above)"
+
+
+def signin_option_text(days: int) -> str:
+    """The label of one tunnel sign-in lifetime choice, with the default marked."""
+    text = TUNNEL_SIGNIN_OPTION.format(days=days)
+    return text + TUNNEL_SIGNIN_DEFAULT_MARK if days == DEFAULT_TUNNEL_SIGNIN_DAYS else text
 
 
 def describe_test_failure(exc: BaseException) -> str:
@@ -146,6 +212,8 @@ class _FullHeightScroll(QScrollArea):
         super().__init__(parent)
         # Never taller than the content, so the space left over in the page goes to the RunPod card, not to this box.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        # The wheel over this box goes on to the Settings page, so the page scrolls under the wheel from anywhere on it.
+        let_the_wheel_pass(self, always=True)
 
     def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt naming
         super().setWidget(widget)
@@ -248,6 +316,88 @@ class _ConnectionTestJob(QRunnable):
         self._delivery.delivered.emit(Delivered(self._owner, _TestDone(self._generation, text)))
 
 
+def _open_in_browser(url: str) -> bool:
+    """Open the page in the owner's default browser. False when the system did not open it."""
+    return QDesktopServices.openUrl(QUrl(url))
+
+
+def _sign_in_failure(exc: BaseException) -> str:
+    """Plain words for a sign-in that failed. A HostedError carries fixed text; any other error is named by its class only."""
+    if isinstance(exc, HostedError):
+        return f"{exc} Nothing was saved."
+    return SIGN_IN_UNEXPECTED_TEXT.format(name=exc.__class__.__name__)
+
+
+@dataclass(frozen=True)
+class HostedSignIn:
+    """The three steps of a browser sign-in. The defaults are the real ones; a test passes fakes for all three."""
+
+    start: Callable[[str], DeviceSignIn] = hosted_sign_in.start_sign_in
+    poll: Callable[..., SignInResult] = hosted_sign_in.poll_sign_in
+    open_page: Callable[[str], bool] = _open_in_browser
+
+
+@dataclass(frozen=True)
+class _SignInStarted:
+    """The code and the page are ready. The tab shows the code and opens the page. It holds no token."""
+
+    generation: int
+    device: DeviceSignIn
+
+
+@dataclass(frozen=True)
+class _SignInDone:
+    """The sign-in ended. ``token`` is set only for an approval, and the tab saves it to the keychain at once."""
+
+    generation: int
+    outcome: str
+    token: str | None = field(repr=False)
+    text: str
+
+
+class _SignInJob(QRunnable):
+    """Run one browser sign-in on the thread pool: ask for the code and deliver it, then wait for the answer and deliver that.
+
+    The job holds the URL, the steps, the stop event, the generation, the owner token and the shared delivery object. It
+    never holds the tab, so a sign-in still waiting when the tab is deleted never keeps the tab alive.
+    """
+
+    def __init__(
+        self,
+        generation: int,
+        url: str,
+        steps: HostedSignIn,
+        stop: threading.Event,
+        owner: object,
+        delivery: Delivery,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._generation = generation
+        self._url = url
+        self._steps = steps
+        self._stop = stop
+        self._owner = owner
+        self._delivery = delivery
+
+    def run(self) -> None:
+        try:
+            device = self._steps.start(self._url)
+        except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+            self._deliver(_SignInDone(self._generation, SIGN_IN_FAILED, None, _sign_in_failure(exc)))
+            return
+        self._deliver(_SignInStarted(self._generation, device))
+        try:
+            result = self._steps.poll(self._url, device, should_stop=self._stop.is_set, sleep=self._stop.wait)
+        except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+            self._deliver(_SignInDone(self._generation, SIGN_IN_FAILED, None, _sign_in_failure(exc)))
+            return
+        self._deliver(_SignInDone(self._generation, result.outcome, result.token, ""))
+
+    def _deliver(self, value: object) -> None:
+        self._delivery.delivered.emit(Delivered(self._owner, value))
+
+
 class SettingsTab(QWidget):
     """The five Settings groups: connection, local server and startup, keys, client setup, and diagnostics."""
 
@@ -260,6 +410,7 @@ class SettingsTab(QWidget):
         list_hosted: ListHostedFn | None = None,
         actions: RunnerActions | None = None,
         tools_status: Callable[[], ToolsStatus] | None = None,
+        hosted_sign_in_steps: HostedSignIn | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
@@ -278,6 +429,10 @@ class SettingsTab(QWidget):
         # Identifies this tab's connection tests. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._generation = 0
+        # The browser sign-in: its three steps, and the generation and stop event of the one that runs, if any.
+        self._sign_in_steps = hosted_sign_in_steps if hosted_sign_in_steps is not None else HostedSignIn()
+        self._sign_in_generation = 0
+        self._sign_in_stop: threading.Event | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
         self.refresh()
@@ -358,38 +513,50 @@ class SettingsTab(QWidget):
         self._token_message = _label(body, "settings-token-message")
         self._token_message.setVisible(False)
         grid.addWidget(self._token_message, 4, 0, 1, 4)
+        # Browser sign-in: the button runs the OAuth device grant and reads Stop waiting while it runs. The hint says the
+        # token box above is the other way in.
+        grid.addWidget(_caption(body, "Browser:"), 5, 0)
+        self._sign_in_button = QPushButton(SIGN_IN_BUTTON_TEXT, body)
+        self._sign_in_button.setObjectName("settings-sign-in")
+        grid.addWidget(self._sign_in_button, 5, 1)
+        self._sign_in_message = _label(body, "settings-sign-in-message")
+        self._sign_in_message.setVisible(False)
+        grid.addWidget(self._sign_in_message, 6, 0, 1, 4)
+        self._token_hint = _label(body, "settings-token-hint")
+        self._token_hint.setText(TOKEN_HINT_TEXT)
+        grid.addWidget(self._token_hint, 7, 0, 1, 4)
 
-        # Test connection, and its result.
+        # Test connection, and its result. Each row below the sign-in rows has its own grid row, so no two widgets share one.
         self._test_button = QPushButton("Test connection", body)
         self._test_button.setObjectName("settings-test-connection")
-        grid.addWidget(self._test_button, 5, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(self._test_button, 8, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
         self._test_result = _label(body, "settings-test-result")
         self._test_result.setVisible(False)
-        grid.addWidget(self._test_result, 6, 0, 1, 4)
+        grid.addWidget(self._test_result, 9, 0, 1, 4)
 
         # Local URL.
-        grid.addWidget(_caption(body, "Local URL:"), 7, 0)
+        grid.addWidget(_caption(body, "Local URL:"), 10, 0)
         self._local_url = QLineEdit(settings.local_url, body)
         self._local_url.setObjectName("settings-local-url")
         self._local_url.setPlaceholderText(DEFAULT_LOCAL_URL)
-        grid.addWidget(self._local_url, 7, 1)
+        grid.addWidget(self._local_url, 10, 1)
         self._save_url = QPushButton("Save local URL", body)
         self._save_url.setObjectName("settings-save-local-url")
-        grid.addWidget(self._save_url, 7, 2)
+        grid.addWidget(self._save_url, 10, 2)
         self._url_message = _label(body, "settings-local-url-message")
         self._url_message.setVisible(False)
-        grid.addWidget(self._url_message, 8, 0, 1, 4)
+        grid.addWidget(self._url_message, 11, 0, 1, 4)
 
         # Database file.
-        grid.addWidget(_caption(body, "Database file:"), 9, 0)
+        grid.addWidget(_caption(body, "Database file:"), 12, 0)
         self._db_path = _label(body, "settings-db-path")
-        grid.addWidget(self._db_path, 9, 1)
+        grid.addWidget(self._db_path, 12, 1)
         self._choose_db = QPushButton("Choose database file...", body)
         self._choose_db.setObjectName("settings-choose-db")
-        grid.addWidget(self._choose_db, 9, 2)
+        grid.addWidget(self._choose_db, 12, 2)
         self._db_message = _label(body, "settings-db-message")
         self._db_message.setVisible(False)
-        grid.addWidget(self._db_message, 10, 0, 1, 4)
+        grid.addWidget(self._db_message, 13, 0, 1, 4)
 
         group.add_layout(grid)
         return group
@@ -408,6 +575,25 @@ class SettingsTab(QWidget):
         self._auto_update.setChecked(self._store.load().settings.auto_update)
         self._auto_update.toggled.connect(self._on_auto_update_toggled)
         group.add_widget(self._auto_update)
+        # Tunnel sign-in lifetime: one choice, passed to the core at the next tunnel start.
+        signin_row = QHBoxLayout()
+        signin_row.setContentsMargins(0, 0, 0, 0)
+        signin_row.addWidget(_caption(group.body(), TUNNEL_SIGNIN_CAPTION))
+        self._signin_days = QComboBox(group.body())
+        self._signin_days.setObjectName("tunnel-signin-days")
+        for days in TUNNEL_SIGNIN_DAY_CHOICES:
+            self._signin_days.addItem(signin_option_text(days), days)
+        signin_row.addWidget(self._signin_days)
+        signin_row.addStretch(1)
+        group.add_layout(signin_row)
+        group.add_widget(_label(group.body(), "settings-signin-days-hint", TUNNEL_SIGNIN_HINT))
+        self._signin_days_message = _label(group.body(), "settings-signin-days-message")
+        self._signin_days_message.setVisible(False)
+        group.add_widget(self._signin_days_message)
+        # Custom program names: a save that left out invalid ones shows how many, and never the names.
+        self._names_message = _label(group.body(), "settings-custom-names-message")
+        self._names_message.setVisible(False)
+        group.add_widget(self._names_message)
         return group
 
     def _build_keys(self, parent: QWidget, runpod_card: QWidget | None) -> CollapsibleGroup:
@@ -429,18 +615,23 @@ class SettingsTab(QWidget):
 
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
-        group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
-        self._settings_file = _label(group.body(), "settings-file-path")
-        group.add_widget(self._settings_file)
-        self._load_warning = _label(group.body(), "settings-load-warning")
+        # The intro, the settings file and its load warning are one block, so one drag over them selects all three. The
+        # warning shows only when the settings file has one.
+        lines = TextBlock(group.body(), "diagnostics-text", spacing=group.body().layout().spacing())
+        lines.line("diagnostics-intro", DIAGNOSTICS_INTRO)
+        self._settings_file = lines.line("settings-file-path", "")
+        self._load_warning = lines.line("settings-load-warning", "")
         self._load_warning.setVisible(False)
-        group.add_widget(self._load_warning)
+        group.add_widget(lines.label)
         # The full tools table reads when it is first shown and when its Refresh is pressed.
         if self._tools_status is not None:
             group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))
             group.add_widget(ToolsPanel(self._tools_status, parent=group.body()))
-        # The LaTeX probe sits under its section label. It makes no request until shown.
-        group.add_widget(make_selectable(QLabel(LATEX_SECTION, group.body())))
+        # The LaTeX probe sits under its section label, which names the saved engine address. It makes no request until shown.
+        self._latex_section = _label(
+            group.body(), "settings-latex-section", latex_section_text(self._store.load().settings.engine_url)
+        )
+        group.add_widget(self._latex_section)
         group.add_widget(LatexPanel(self._store, parent=group.body()))
         # The Logs view reads nothing until its own Refresh is pressed, so folding this group costs nothing.
         self._logs = LogsPage(parent=group.body())
@@ -451,15 +642,19 @@ class SettingsTab(QWidget):
         self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
         self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
         self._save_token.clicked.connect(self._on_save_token_clicked)
+        self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
         self._token_input.returnPressed.connect(self._on_save_token_clicked)
         self._remove_token.clicked.connect(self._on_remove_token_clicked)
         self._test_button.clicked.connect(self._on_test_clicked)
         self._save_url.clicked.connect(self._on_save_url_clicked)
         self._local_url.returnPressed.connect(self._on_save_url_clicked)
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
+        # A core folder found or chosen later changes which file local mode reads, so the database line reads it again.
+        self._actions.coreChanged.connect(self._show_db_path)
         # A saved core path turns the launch switches off, so the runner block on this tab shows them as saved now.
         self._client_setup.coreChanged.connect(self._runner.refresh_flags)
         self._actions.coreChanged.connect(self._on_core_changed)
+        self._signin_days.currentIndexChanged.connect(self._on_signin_days_changed)
 
     def refresh(self) -> None:
         """Show the saved mode, the database file, whether a hosted token is set, and the keys.
@@ -472,7 +667,11 @@ class SettingsTab(QWidget):
         self._auto_update.blockSignals(True)  # showing the saved value must not save it again
         self._auto_update.setChecked(settings.auto_update)
         self._auto_update.blockSignals(False)
-        self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
+        self._signin_days.blockSignals(True)  # showing the saved lifetime must not save it again
+        self._signin_days.setCurrentIndex(max(0, self._signin_days.findData(settings.tunnel_signin_days)))
+        self._signin_days.blockSignals(False)
+        self._show_db_path()
+        self._latex_section.setText(latex_section_text(settings.engine_url))
         self._refresh_token_status()
         self._runner.refresh_flags()
         self._keys.refresh()
@@ -507,6 +706,30 @@ class SettingsTab(QWidget):
     @Slot(bool)
     def _on_auto_update_toggled(self, checked: bool) -> None:
         self._update(auto_update=bool(checked))
+
+    @Slot(int)
+    def _on_signin_days_changed(self, index: int) -> None:
+        days = self._signin_days.itemData(index)
+        if not isinstance(days, int):
+            return
+        try:
+            self._update(tunnel_signin_days=days)
+        except (OSError, ValueError):
+            _set_message(self._signin_days_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        _set_message(self._signin_days_message, "")
+
+    def save_custom_program_names(self, names: Iterable[object]) -> None:
+        """Save the custom program names. Invalid ones are left out, and the count of them is shown, never the names.
+
+        A save that leaves out nothing clears the count line.
+        """
+        try:
+            dropped = self._store.save_custom_program_names(names)
+        except (OSError, ValueError):
+            _set_message(self._names_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        _set_message(self._names_message, DROPPED_NAMES_TEXT.format(count=dropped) if dropped else "")
 
     def _update(self, **changes: object) -> None:
         """Save changed fields through the store. Every other field in the saved file is kept."""
@@ -559,6 +782,72 @@ class SettingsTab(QWidget):
         self._refresh_token_status()
         _set_message(self._token_message, TOKEN_REMOVED_TEXT if removed else TOKEN_NOTHING_REMOVED_TEXT)
 
+    # ----------------------------------------------------------- browser sign-in
+
+    @Slot()
+    def _on_sign_in_clicked(self) -> None:
+        """Start a browser sign-in, or stop waiting for the one that runs. Only one runs at a time."""
+        if self._sign_in_stop is not None:
+            self._sign_in_stop.set()
+            self._sign_in_button.setEnabled(False)
+            _set_message(self._sign_in_message, SIGN_IN_STOPPING_TEXT)
+            return
+        url = self._store.load().settings.hosted_url
+        self._sign_in_generation += 1
+        self._sign_in_stop = threading.Event()
+        self._sign_in_running(True)
+        # Off until the code arrives, so a second click while the code is being asked for cannot stop the new sign-in.
+        self._sign_in_button.setEnabled(False)
+        _set_message(self._sign_in_message, SIGN_IN_STARTING_TEXT)
+        job = _SignInJob(
+            self._sign_in_generation,
+            url,
+            self._sign_in_steps,
+            self._sign_in_stop,
+            self._owner,
+            shared_delivery(),
+        )
+        QThreadPool.globalInstance().start(job)
+
+    def _sign_in_running(self, running: bool) -> None:
+        """The button reads Stop waiting while a sign-in runs, and Sign in with browser when none does."""
+        self._sign_in_button.setText(SIGN_IN_STOP_TEXT if running else SIGN_IN_BUTTON_TEXT)
+        self._sign_in_button.setEnabled(True)
+
+    def _on_sign_in_started(self, started: _SignInStarted) -> None:
+        """Show the code, and open the page for it. A sign-in the owner has already stopped opens nothing."""
+        if started.generation != self._sign_in_generation or self._sign_in_stop is None or self._sign_in_stop.is_set():
+            return
+        self._sign_in_button.setEnabled(True)
+        device = started.device
+        opened = self._sign_in_steps.open_page(device.page_url)
+        minutes = max(1, round(device.expires_in / 60))
+        text = SIGN_IN_CODE_TEXT.format(code=device.user_code, minutes=minutes)
+        if not opened:
+            text += " " + SIGN_IN_NOT_OPENED_TEXT.format(url=device.page_url)
+        _set_message(self._sign_in_message, text)
+
+    def _on_sign_in_done(self, done: _SignInDone) -> None:
+        """Save an approved token to the keychain, or say why the sign-in ended without one."""
+        if done.generation != self._sign_in_generation:
+            return
+        self._sign_in_stop = None
+        self._sign_in_running(False)
+        if done.outcome == hosted_sign_in.APPROVED and done.token:
+            try:
+                token_store.set_token(done.token, store=self._secrets)
+            except TokenStoreError as exc:
+                # TokenStoreError text names the step and the error class only, never the token.
+                _set_message(self._sign_in_message, f"Not saved. {exc}")
+                return
+            self._refresh_token_status()
+            _set_message(self._sign_in_message, SIGN_IN_SAVED_TEXT)
+            return
+        _set_message(
+            self._sign_in_message,
+            done.text or SIGN_IN_OUTCOME_TEXT.get(done.outcome, SIGN_IN_FAILED_TEXT),
+        )
+
     # ----------------------------------------------------------- connection test
 
     @Slot()
@@ -572,14 +861,17 @@ class SettingsTab(QWidget):
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:
-        # Runs on the GUI thread. A result for another tab is dropped here, and so is one from an earlier test.
+        # Runs on the GUI thread. A result for another tab is dropped here, and so is one from an earlier test or sign-in.
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
-        done = item.value
-        if not isinstance(done, _TestDone) or done.generation != self._generation:
-            return
-        self._test_button.setEnabled(True)
-        _set_message(self._test_result, done.text)
+        value = item.value
+        if isinstance(value, _SignInStarted):
+            self._on_sign_in_started(value)
+        elif isinstance(value, _SignInDone):
+            self._on_sign_in_done(value)
+        elif isinstance(value, _TestDone) and value.generation == self._generation:
+            self._test_button.setEnabled(True)
+            _set_message(self._test_result, value.text)
 
     # ----------------------------------------------------------- local settings
 
@@ -600,9 +892,29 @@ class SettingsTab(QWidget):
         _set_message(self._url_message, LOCAL_URL_SAVED_TEXT)
 
     @Slot()
+    def _show_db_path(self) -> None:
+        """The chosen database file. With none chosen, the core folder's data/meridian.db when it is there."""
+        settings = self._store.load().settings
+        if settings.db_path:
+            self._db_path.setText(settings.db_path)
+            return
+        core_file = core_database_path(settings)
+        if core_file is not None and core_file.is_file():
+            self._db_path.setText(USING_CORE_FILE_TEXT.format(path=core_file))
+        else:
+            self._db_path.setText(NOT_CHOSEN_TEXT)
+
+    @Slot()
     def _on_choose_db_clicked(self) -> None:
-        current = self._store.load().settings.db_path
-        start_dir = str(Path(current).parent) if current else ""
+        settings = self._store.load().settings
+        current = settings.db_path
+        core_file = core_database_path(settings)
+        if current:
+            start_dir = str(Path(current).parent)
+        elif core_file is not None and core_file.parent.is_dir():
+            start_dir = str(core_file.parent)  # <core_checkout>/data, where the core keeps its database
+        else:
+            start_dir = ""
         chosen = self._choose_database(self, start_dir)
         if not chosen:
             return  # the dialog was cancelled, so nothing changes
@@ -618,6 +930,7 @@ class SettingsTab(QWidget):
 __all__ = [
     "DB_FILE_FILTER",
     "DB_SAVED_TEXT",
+    "DROPPED_NAMES_TEXT",
     "HOSTED_URL_SAVED_TEXT",
     "LOCAL_URL_SAVED_TEXT",
     "MODE_ITEMS",
@@ -627,6 +940,7 @@ __all__ = [
     "TEST_UNEXPECTED_TEXT",
     "TOKEN_NOT_SET_TEXT",
     "TOKEN_SET_TEXT",
+    "USING_CORE_FILE_TEXT",
     "SettingsTab",
     "describe_test_failure",
     "mode_text",

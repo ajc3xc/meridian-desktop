@@ -41,7 +41,7 @@ from meridian_desktop.log_tail import (
 from meridian_desktop.runner_client import ERR_NOT_AVAILABLE, NOT_AVAILABLE_MESSAGE, RunnerResult
 from meridian_desktop.runner_controls import read_control_log_tail
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import TextBlock, make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
 INTRO_UNREAD_TEXT = "Press Refresh to read the end of each log. Nothing is read until then."
@@ -74,8 +74,14 @@ DESKTOP_UNREADABLE_TEXT = "The desktop log exists but could not be read."
 TUNNEL_MISSING_TEXT = f"No log yet. The Meridian core's tunnel writes this file while it runs. {START_TUNNEL_TEXT}"
 EMPTY_TUNNEL_TEXT = f"The tunnel log is empty. The Meridian core's tunnel writes to it while it runs. {START_TUNNEL_TEXT}"
 TUNNEL_UNREADABLE_TEXT = "The tunnel log exists but could not be read."
-CONTROL_MISSING_TEXT = f"No log yet. The desktop adds one line here for each Start or Stop. {START_CONTROL_TEXT}"
-CONTROL_EMPTY_TEXT = f"The control log is empty. The desktop adds one line here for each Start or Stop. {START_CONTROL_TEXT}"
+CONTROL_MISSING_TEXT = (
+    f"No log yet. The desktop adds one line here for each Start or Stop, and for each refused entry in the keys file. "
+    f"{START_CONTROL_TEXT}"
+)
+CONTROL_EMPTY_TEXT = (
+    f"The control log is empty. The desktop adds one line here for each Start or Stop, and for each refused entry in the "
+    f"keys file. {START_CONTROL_TEXT}"
+)
 CONTROL_UNREADABLE_TEXT = "The control log exists but could not be read."
 RUNNER_EMPTY_TEXT = f"No log yet. The Meridian core's runner writes this log when it starts the tunnel. {START_TUNNEL_TEXT}"
 RUNNER_NOT_AVAILABLE_PREFIX = "Runner log not available."
@@ -284,11 +290,11 @@ class LogsPage(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
 
-        self._intro = _heading(self, "logs-intro", INTRO_UNREAD_TEXT)
-        layout.addWidget(self._intro)
-
-        self._desktop_heading = _heading(self, "logs-desktop-heading", f"{DESKTOP_HEADING} not read yet.")
-        layout.addWidget(self._desktop_heading)
+        # The intro and the desktop log's heading are one block, so one drag over them selects both.
+        intro = TextBlock(self, "logs-intro-text", spacing=layout.spacing())
+        self._intro = intro.line("logs-intro", INTRO_UNREAD_TEXT)
+        self._desktop_heading = intro.line("logs-desktop-heading", f"{DESKTOP_HEADING} not read yet.")
+        layout.addWidget(intro.label)
         self._desktop_text = _pane(self, "logs-desktop-text")
         layout.addWidget(self._desktop_text, 1)
 

@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from _fakes import QuietServer
+from meridian_desktop import hosted_client
 from meridian_desktop.hosted_client import (
     BAD_RESPONSE_TEXT,
     FORBIDDEN_TEXT,
@@ -41,6 +42,7 @@ from meridian_desktop.hosted_client import (
     NotFound,
     NotSignedIn,
     Reply,
+    health_status,
     list_projects,
     usable_token,
     validate_base_url,
@@ -54,6 +56,9 @@ PROJECT_ROWS = [
     {"id": "p-2", "name": "Beta", "status": "parked", "priority": "P2", "created_at": "2026-02-03 11:00:00"},
 ]
 BODY_LEAK = "BODY-SECRET-DO-NOT-SHOW"
+# The real transport, read at import time, before any test patches the module. A caller that captured it this way
+# and passes it in must be refused by the guard just like the module default.
+REAL_TRANSPORT = hosted_client._urllib_transport  # noqa: SLF001 - read before the guard replaces it
 
 
 class FakeTransport:
@@ -327,6 +332,7 @@ def stub():
         thread.join(timeout=5)
 
 
+@pytest.mark.allow_loopback_hosted_transport
 def test_default_transport_sends_the_bearer_header_to_a_loopback_stub(stub):
     stub.routes["/projects"] = (200, {"Content-Type": "application/json"}, json.dumps(PROJECT_ROWS).encode("utf-8"), 0.0)
 
@@ -336,6 +342,7 @@ def test_default_transport_sends_the_bearer_header_to_a_loopback_stub(stub):
     assert stub.hits == [("/projects", f"Bearer {FAKE_TOKEN}")]
 
 
+@pytest.mark.allow_loopback_hosted_transport
 def test_default_transport_does_not_follow_a_redirect(stub):
     stub.routes["/projects"] = (302, {"Location": "/elsewhere"}, b"", 0.0)
     stub.routes["/elsewhere"] = (200, {}, b"[]", 0.0)
@@ -350,6 +357,7 @@ def test_default_transport_does_not_follow_a_redirect(stub):
     _assert_no_token_in(info.value)
 
 
+@pytest.mark.allow_loopback_hosted_transport
 def test_default_transport_times_out_at_the_given_limit(stub):
     stub.routes["/projects"] = (200, {}, b"[]", 1.0)
 
@@ -360,6 +368,7 @@ def test_default_transport_times_out_at_the_given_limit(stub):
     _assert_no_token_in(info.value)
 
 
+@pytest.mark.allow_loopback_hosted_transport
 def test_default_transport_refuses_a_body_declared_over_the_limit(stub):
     stub.routes["/projects"] = (200, {"Content-Length": str(MAX_RESPONSE_BYTES + 1)}, b"", 0.0)
 
@@ -368,6 +377,56 @@ def test_default_transport_refuses_a_body_declared_over_the_limit(stub):
 
     assert info.value.code == "too_large"
     _assert_no_token_in(info.value)
+
+
+def test_the_test_guard_refuses_the_hosted_host_and_records_only_its_url(hosted_transport_guard):
+    # A call that reaches the guard is refused. The record keeps the method and the URL, never the token.
+    with pytest.raises(AssertionError) as info:
+        list_projects("https://usemeridian.us", FAKE_TOKEN)
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/projects"]
+    assert "GET https://usemeridian.us/projects" in str(info.value)
+    _assert_no_token_in(info.value)
+    # The refused call is what this test is for. Nothing was sent, so the record is cleared and the teardown passes.
+    hosted_transport_guard.calls.clear()
+
+
+def test_the_guard_refuses_the_real_transport_passed_in_explicitly(hosted_transport_guard):
+    # A caller that holds the real transport and passes it in is refused at the send step, and the call is recorded.
+    with pytest.raises(AssertionError) as info:
+        list_projects("https://usemeridian.us", FAKE_TOKEN, transport=REAL_TRANSPORT)
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/projects"]
+    assert "GET https://usemeridian.us/projects" in str(info.value)
+    _assert_no_token_in(info.value)
+    hosted_transport_guard.calls.clear()
+
+
+def test_the_guard_refuses_the_real_transport_passed_to_the_health_check(hosted_transport_guard):
+    with pytest.raises(AssertionError):
+        health_status("https://usemeridian.us", transport=REAL_TRANSPORT)
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/health"]
+    hosted_transport_guard.calls.clear()
+
+
+def test_the_guard_refuses_the_real_transport_after_the_attribute_is_repatched(hosted_transport_guard, monkeypatch):
+    # A test that re-patches the module attribute to the real transport gets no real request either.
+    monkeypatch.setattr(hosted_client, "_urllib_transport", hosted_transport_guard.real)
+    with pytest.raises(AssertionError) as info:
+        list_projects("https://usemeridian.us", FAKE_TOKEN)
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/projects"]
+    _assert_no_token_in(info.value)
+    hosted_transport_guard.calls.clear()
+
+
+@pytest.mark.allow_loopback_hosted_transport
+def test_an_explicit_real_transport_still_reaches_a_loopback_stub(stub):
+    # The refusal covers hosts other than loopback. A passed-in real transport still reaches the loopback stub.
+    body = json.dumps(PROJECT_ROWS).encode("utf-8")
+    stub.routes["/projects"] = (200, {"Content-Type": "application/json"}, body, 0.0)
+
+    rows = list_projects(stub.base, FAKE_TOKEN, transport=REAL_TRANSPORT)
+
+    assert rows == PROJECT_ROWS
+    assert stub.hits == [("/projects", f"Bearer {FAKE_TOKEN}")]
 
 
 def test_hosted_client_module_imports_no_qt_and_no_keyring():

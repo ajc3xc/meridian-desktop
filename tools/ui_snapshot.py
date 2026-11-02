@@ -91,6 +91,7 @@ def main(argv: list[str]) -> int:
     from meridian_desktop.secret_store import KeyringSecretStore
     from meridian_desktop.settings_store import SettingsStore
     from meridian_desktop.ui.main_window import MainWindow
+    from meridian_desktop.ui.runner_actions import RunnerActions
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     load_font(app)
@@ -99,9 +100,13 @@ def main(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="meridian-ui-snapshot-") as temp_dir:
         store = SettingsStore(Path(temp_dir) / "settings.json")
         secrets = KeyringSecretStore(backend=MemorySecrets())
-        window = MainWindow(store, secret_store=secrets, update_transport=None)
+        # The app searches for the Meridian core once, after the window shows (ui/app.py). The snapshot does the same,
+        # so the runner controls read the core as they do in the app, not as an unset one.
+        actions = RunnerActions(store)
+        window = MainWindow(store, secret_store=secrets, update_transport=None, runner_actions=actions)
         window.resize(*WINDOW_SIZE)
         window.show()
+        actions.find_core()
 
         # Home's boot checks run on the thread pool. Wait for them to finish, then let their results paint.
         QThreadPool.globalInstance().waitForDone(BOOT_WAIT_MS)

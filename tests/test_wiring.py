@@ -1,4 +1,5 @@
-"""Wiring tests for the Sessions and Tools tabs and the update notice. Offscreen Qt, pytest-qt, fakes only.
+"""Wiring tests for the Sessions and Tools tabs, the update notice and the Settings Zotero panel's bridge. Offscreen Qt,
+pytest-qt, fakes only.
 
 No test reaches the network, the OS keychain or the core. Each update check gets a fake transport that records its
 URLs, and each opener is a fake that records the URLs it is given. The Sessions reads are fakes at the module seam
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QPushButton, QTableWidg
 
 from _fakes import MemoryKeyring
 from _shared_delivery import recording_deliveries, visible_state
-from meridian_desktop import sessions_client, updater
+from meridian_desktop import claude_processes, sessions_client, updater
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.local_client import HEALTH_NOT_RUNNING
 from meridian_desktop.secret_store import KeyringSecretStore
@@ -31,9 +32,20 @@ from meridian_desktop.ui.main_window import MainWindow
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text, ready_text
+from meridian_desktop.ui.zotero_panel import BRIDGE_NOT_CHECKED_TEXT, UPDATE_BUTTON_TEXT, ZoteroPanel
 from meridian_desktop.version import APP_VERSION
+from meridian_desktop.zotero_bridge_client import STATE_UPDATE_READY, BridgeStatus
+from test_connection_status import FakeHostedTransport
+from test_zotero_panel import FakeZotero
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+@pytest.fixture(autouse=True)
+def no_real_process_listing(monkeypatch):
+    """No test here starts tasklist. The Claude process listing finds no Claude program."""
+    empty = claude_processes.ClaudeProcessesResult(claude_processes.LISTED, "", ())
+    monkeypatch.setattr(claude_processes, "list_claude_processes", lambda run=None: empty)
+
+
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "Code", "Outputs", "Research", "Settings")
 LOCAL = "http://127.0.0.1:7999"
 HOSTED = "https://usemeridian.us"
 PID = "5787cc92-ba7d-4788-b17c-28ab7938b839"
@@ -98,7 +110,20 @@ def _no_tools() -> ToolsStatus:
     return ToolsStatus(rows=())
 
 
-def _window(qtbot, settings_path, *, sources=None, secrets=None, tools=None, transport=None, shown=False, update_root=None):
+def _window(
+    qtbot,
+    settings_path,
+    *,
+    sources=None,
+    secrets=None,
+    tools=None,
+    transport=None,
+    hosted_transport=None,
+    shown=False,
+    update_root=None,
+    zotero=None,
+    zotero_bridge=None,
+):
     window = MainWindow(
         SettingsStore(settings_path),
         secret_store=secrets if secrets is not None else KeyringSecretStore(backend=MemoryKeyring()),
@@ -106,6 +131,10 @@ def _window(qtbot, settings_path, *, sources=None, secrets=None, tools=None, tra
         tools_status=tools if tools is not None else _no_tools,
         update_transport=transport,
         update_root=update_root,
+        zotero=zotero,
+        zotero_bridge=zotero_bridge,
+        # A hosted-mode window checks through a fake host unless a test passes its own, so no test here sends a request.
+        hosted_transport=hosted_transport if hosted_transport is not None else FakeHostedTransport(),
     )
     qtbot.addWidget(window)
     if shown:
@@ -165,6 +194,52 @@ def test_sessions_sits_after_projects_and_tools_is_no_longer_a_tab(qtbot, settin
     assert "Tools" not in _tab_names(window)
 
 
+# ----------------------------------------------------------- the Zotero panel in Settings
+
+
+class _RecordingBridge:
+    """The bridge the Settings panel calls. It answers one state, and records each call with the thread it ran on."""
+
+    def __init__(self, state):
+        self.state = state
+        self.calls = []
+        self.threads = []
+
+    def status(self, base_url):
+        self.calls.append(("status", base_url))
+        self.threads.append(threading.current_thread())
+        return BridgeStatus(self.state, installed="0.1.3", expected="0.1.4", zotero_running=False)
+
+    def update(self, base_url, choice):
+        self.calls.append(("update", base_url, choice))
+        raise AssertionError("this test sends no bridge update")
+
+
+def test_the_app_settings_zotero_panel_has_the_update_bridge_button_and_makes_no_request_before_show(
+    qtbot, settings_path,
+):
+    window = _window(qtbot, settings_path, zotero=FakeZotero())
+    panel = _page(window, "Settings").findChild(ZoteroPanel, "zotero-panel")
+    assert panel is not None
+    assert panel.findChild(QLabel, "zotero-bridge").text() == BRIDGE_NOT_CHECKED_TEXT
+    button = panel.findChild(QPushButton, "zotero-bridge-update")
+    assert button is not None and button.text() == UPDATE_BUTTON_TEXT
+    assert not button.isEnabled(), "the button waits for the first bridge check"
+
+
+def test_the_settings_zotero_panel_checks_the_bridge_at_the_saved_local_url_off_the_ui_thread(qtbot, settings_path):
+    SettingsStore(settings_path).save(Settings(local_url=LOCAL))
+    bridge = _RecordingBridge(STATE_UPDATE_READY)
+    window = _window(qtbot, settings_path, zotero=FakeZotero(), zotero_bridge=bridge, shown=True)
+    _select(window, "Settings")
+    panel = _page(window, "Settings").findChild(ZoteroPanel, "zotero-panel")
+    button = panel.findChild(QPushButton, "zotero-bridge-update")
+    assert button is not None, "the Settings Zotero panel has no Update bridge button"
+    qtbot.waitUntil(lambda: button.isEnabled(), timeout=5000)
+    assert bridge.calls and all(call == ("status", LOCAL) for call in bridge.calls)
+    assert all(thread is not threading.main_thread() for thread in bridge.threads)
+
+
 def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settings_path, tmp_path, monkeypatch):
     db = tmp_path / "meridian.db"
     db.write_bytes(b"")
@@ -200,10 +275,11 @@ def test_sessions_tab_uses_its_providers_and_never_shows_the_token(qtbot, settin
     table = page.findChild(QTableWidget, "sessions-table")
     qtbot.waitUntil(lambda: table.rowCount() == 1, timeout=5000)
 
-    # The local URL comes from Settings, and the project id from the Projects resolver. The hosted fallback
-    # gets the Settings URL and the token from the store. The list may refresh while the test runs, so
-    # every recorded call must match.
-    assert set(local_calls) == {(LOCAL, PID)}
+    # The one local-server check (data_source.local_server_answers) says the server did not answer, so the sessions
+    # route is never asked. With a token saved, the hosted fallback gets the project id from the Projects resolver, and
+    # the Settings URL and the token from the store. The list may refresh while the test runs, so every recorded call
+    # must match.
+    assert local_calls == []
     assert set(hosted_calls) == {(HOSTED, PID, FAKE_TOKEN)}
     picker = page.findChild(QComboBox, "sessions-project-picker")
     assert picker.itemText(0) == "Alpha"
@@ -248,7 +324,14 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
         get_token=lambda: FAKE_TOKEN,
         list_hosted=lambda url, token: [dict(PROJECT_ROW)],
     )
-    window = _window(qtbot, settings_path, sources=hosted_sources, secrets=secrets, shown=True)
+    window = _window(
+        qtbot,
+        settings_path,
+        sources=hosted_sources,
+        secrets=secrets,
+        shown=True,
+        hosted_transport=FakeHostedTransport(),
+    )
     _select(window, "Sessions")
     page = _page(window, "Sessions")
     table = page.findChild(QTableWidget, "sessions-table")
@@ -262,6 +345,30 @@ def test_sessions_timer_in_hosted_mode_makes_no_sessions_call_and_refresh_is_the
         qtbot.waitUntil(lambda: page._in_flight is None, timeout=5000)  # noqa: SLF001
     assert (len(local_calls), len(hosted_calls)) == reads  # three hosted-mode ticks read nothing
     assert table.rowCount() == 1
+
+
+def test_a_hosted_window_with_no_transport_given_sends_no_real_request(qtbot, settings_path, hosted_transport_guard):
+    # No hosted_transport is passed, so the window's check takes the module default: the real urllib transport. In a
+    # test that default is the hosted transport guard (conftest), which records each call and refuses it before any
+    # request is sent. So the window's one check is refused, and nothing leaves the computer.
+    SettingsStore(settings_path).save(Settings(mode="hosted", local_url=LOCAL, hosted_url=HOSTED))
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    secrets.set_secret(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT, FAKE_TOKEN)
+    window = MainWindow(
+        SettingsStore(settings_path),
+        secret_store=secrets,
+        data_sources=_sources(),
+        tools_status=_no_tools,
+    )
+    qtbot.addWidget(window)
+    qtbot.waitUntil(
+        lambda: window.connection_status_label.text().startswith("Hosted at usemeridian.us: not reachable."),
+        timeout=5000,
+    )
+    # The check stops at /health, which is sent with no token. The guard refused that call, so it is the only record.
+    assert hosted_transport_guard.calls == ["GET https://usemeridian.us/health"]
+    # The refused call is what this test checks. Nothing was sent, so the record is cleared and the teardown passes.
+    hosted_transport_guard.calls.clear()
 
 
 # ----------------------------------------------------------- Tools
@@ -406,7 +513,7 @@ def test_a_refused_check_hides_the_bar_and_says_why_in_the_status_bar(
     qtbot.waitUntil(lambda: bar.check_finished, timeout=5000)
 
     assert not _shown(bar)
-    assert window.statusBar().currentMessage() == "The update is not signed by the Meridian release key."
+    assert window.status_message() == "The update is not signed by the Meridian release key."
 
 
 def test_later_hides_the_staged_bar_until_the_next_launch(qtbot, settings_path, tmp_path, monkeypatch, frozen):
