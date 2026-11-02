@@ -1,25 +1,25 @@
-"""The Search tab's three kinds (code, outputs and research), each read from the local Meridian server and nowhere else.
+"""The Search tab's three kinds (code, outputs and research) as lists, read from the local Meridian server only.
 
-Pure Python: no Qt import. The base address is the Local URL the window passes in, and every request goes through
-the code and outputs clients, which refuse any address that is not on this computer.
+Pure Python: no Qt import. The tab has no search box. Each kind is a list grouped by where it comes from, or it says
+why there is no list:
 
-- code: code_client.search, one GET of the code search route.
-- outputs: outputs_client.search_outputs, one GET of the outputs search route.
-- research: outputs_client.list_research_runs, one GET of the research runs route. The server has no research
-  search route, so the runs it lists are kept when the id, state or provider contains the query.
+- code: no list route exists. The code route answers only a search, so there is nothing to list by repo yet. Nothing
+  is sent, and the kind says "No data source yet".
+- outputs: no list route exists. The outputs route answers only a search, so there is nothing to list by project yet.
+  Nothing is sent, and the kind says "No data source yet".
+- research: outputs_client.list_research_runs, one GET of the research runs route. The runs are grouped by provider. A
+  run with no provider reported is grouped under "provider not reported", which sorts last.
 
-A kind whose route the server does not have is shown as "Not connected: the local server has no <kind> search route
-yet". Nothing is invented: a kind with no answer shows its state, never a made-up row.
+A kind whose route the server does not have is shown as "Not connected". Nothing is invented: a kind with no answer
+shows its state, never a made-up row.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from meridian_desktop import code_client, outputs_client
-from meridian_desktop.code_client import MAX_QUERY_CHARS
-from meridian_desktop.local_client import LocalClientError
+from meridian_desktop import outputs_client
 
 KIND_CODE = "code"
 KIND_OUTPUTS = "outputs"
@@ -27,198 +27,160 @@ KIND_RESEARCH = "research"
 KINDS = (KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH)
 KIND_LABELS = {KIND_CODE: "Code", KIND_OUTPUTS: "Outputs", KIND_RESEARCH: "Research"}
 
-# Each state a kind's outcome can take.
+# The kinds with a list route on the local server. The others have no list yet and never send a request.
+KINDS_WITH_LIST_ROUTE = (KIND_RESEARCH,)
+
+# Each state a kind's list can take.
 STATE_RESULTS = "results"
 STATE_EMPTY = "empty"
 STATE_NOT_CONNECTED = "not_connected"
-STATE_NOT_INDEXED = "not_indexed"
-STATE_INVALID = "invalid"
+STATE_NO_SOURCE = "no_source"
+STATE_NOT_CHECKED = "not_checked"
 STATE_ERROR = "error"
 
-NOT_CONNECTED_ROUTE = "Not connected: the local server has no {} search route yet"
+NO_SOURCE_TEXT = {
+    KIND_CODE: (
+        "Code: no data source yet. The local Meridian server does not list the indexed code by repo, "
+        "so there is nothing to show here. Nothing was sent."
+    ),
+    KIND_OUTPUTS: (
+        "Outputs: no data source yet. The local Meridian server does not list the indexed outputs by project, "
+        "so there is nothing to show here. Nothing was sent."
+    ),
+}
+NOT_CHECKED_TEXT = "Research: not checked yet. Press Refresh to read the research runs."
 NOT_CONNECTED_STOPPED = (
-    "Not connected: the local Meridian server is not running at {}. Start Meridian on this computer, then search again."
+    "Research: not connected. The local Meridian server is not running at {}. "
+    "Start Meridian on this computer, then press Refresh."
 )
-BLANK_TEXT = "Type a search term first. Nothing was sent to the local Meridian server."
-TOO_LONG_TEXT = f"The search text is longer than {MAX_QUERY_CHARS} characters. Shorten it and search again. Nothing was sent."
-NOT_INDEXED_TEXT = "Code: the code index has not been built, so there is nothing to search yet."
-NO_MATCH_TEXT = '{}: nothing matches "{}".'
-MATCH_TEXT = '{}: {} match(es) for "{}".'
-RESEARCH_SCOPE_TEXT = " Research searches the {} run(s) the server lists."
-ERROR_TEXT = "{}: the search could not be completed. {}"
-NO_DETAIL = "Try again."
-UNREADABLE_TEXT = "The local server sent an answer the desktop could not read."
+NOT_CONNECTED_ROUTE = "Research: not connected. The local server has no research runs route yet. Update Meridian, then press Refresh."
+EMPTY_TEXT = "Research: no research runs yet."
+RESULTS_TEXT = "Research: {} run(s) in {} group(s), grouped by provider."
+ERROR_TEXT = "Research: the runs could not be read. {}"
+NO_DETAIL = "Press Refresh to try again."
+NOT_REPORTED_GROUP = "provider not reported"
 
-# The rows one search shows at most, so a broad query cannot fill the window. The code and outputs clients cap their
-# own answers too. Research lists the newest runs the server keeps.
-RESULT_LIMIT = 25
+# The row limit the research route is asked for. The client caps its answer too.
 RESEARCH_LIMIT = 50
-
-Transport = outputs_client.Transport
 
 
 @dataclass(frozen=True)
 class Row:
-    """One result line: its kind, where it is, and what the server said about it. All plain text."""
+    """One run: its id, state and the times the server reported. Plain text. Empty means the server did not report it."""
 
-    kind: str
-    where: str
-    details: str
+    item: str
+    state: str
+    started: str
+    updated: str
+    completed: str
 
 
 @dataclass(frozen=True)
-class KindOutcome:
-    """One kind's answer: its state, the one line that says it, and its rows (empty unless the state is results)."""
+class Group:
+    """Rows that share one source. For research, the source is the provider."""
+
+    title: str
+    rows: tuple[Row, ...]
+
+
+@dataclass(frozen=True)
+class KindList:
+    """One kind's list: its state, the one line that says it, and its groups (empty unless the state is results)."""
 
     kind: str
     state: str
     line: str
-    rows: tuple[Row, ...] = ()
+    groups: tuple[Group, ...] = ()
+
+    @property
+    def count(self) -> int:
+        return sum(len(group.rows) for group in self.groups)
 
 
 @dataclass(frozen=True)
-class SearchOutcome:
-    """One search over the chosen kinds, in the order they were asked for."""
+class ListOutcome:
+    """The lists for the chosen kinds, in the order they were asked for."""
 
-    query: str
-    outcomes: tuple[KindOutcome, ...]
-
-    @property
-    def rows(self) -> tuple[Row, ...]:
-        return tuple(row for outcome in self.outcomes for row in outcome.rows)
+    kinds: tuple[KindList, ...]
 
 
 def _label(kind: str) -> str:
     return KIND_LABELS[kind]
 
 
-def _join(*parts: str) -> str:
-    return "; ".join(part for part in parts if part)
+def no_source_list(kind: str) -> KindList:
+    """The list for a kind with no list route. It names the missing source and sends nothing."""
+    return KindList(kind, STATE_NO_SOURCE, NO_SOURCE_TEXT[kind])
 
 
-def _blank_outcome(kind: str) -> KindOutcome:
-    return KindOutcome(kind, STATE_INVALID, BLANK_TEXT)
+def not_checked_list(kind: str) -> KindList:
+    """The list for a kind that is read on Refresh and has not been read yet."""
+    if kind in KINDS_WITH_LIST_ROUTE:
+        return KindList(kind, STATE_NOT_CHECKED, NOT_CHECKED_TEXT)
+    return no_source_list(kind)
 
 
-def _no_route(kind: str) -> KindOutcome:
-    """The server answers, but it has no search route for this kind yet."""
-    return KindOutcome(kind, STATE_NOT_CONNECTED, NOT_CONNECTED_ROUTE.format(kind))
+def _group_key(provider: str) -> tuple[int, str]:
+    """Groups sort by provider name, with the group for runs that name no provider last."""
+    return (1, "") if provider == NOT_REPORTED_GROUP else (0, provider.lower())
 
 
-def _not_running(kind: str, base_url: str) -> KindOutcome:
-    """Nothing listens at the Local URL, so nothing is connected."""
-    return KindOutcome(kind, STATE_NOT_CONNECTED, NOT_CONNECTED_STOPPED.format(base_url))
-
-
-def _code(base_url: str, query: str, transport: Transport | None) -> KindOutcome:
-    result = code_client.search(base_url, query, limit=RESULT_LIMIT, transport=transport)
-    kind = KIND_CODE
-    if result.state == code_client.STATE_OK:
-        rows = tuple(
-            Row(_label(kind), f"{hit.path}:{hit.line}" if hit.line else hit.path, " ".join(hit.snippet.split()))
-            for hit in result.hits
-        )
-        if rows:
-            return KindOutcome(kind, STATE_RESULTS, MATCH_TEXT.format(_label(kind), len(rows), query), rows)
-        return KindOutcome(kind, STATE_EMPTY, NO_MATCH_TEXT.format(_label(kind), query))
-    if result.state == code_client.STATE_ROUTE_MISSING:
-        return _no_route(kind)
-    if result.state == code_client.STATE_NOT_RUNNING:
-        return _not_running(kind, base_url)
-    if result.state == code_client.STATE_NOT_INDEXED:
-        return KindOutcome(kind, STATE_NOT_INDEXED, NOT_INDEXED_TEXT)
-    if result.state == code_client.STATE_BLANK_QUERY:
-        return _blank_outcome(kind)
-    return KindOutcome(kind, STATE_ERROR, ERROR_TEXT.format(_label(kind), result.detail or NO_DETAIL))
-
-
-def _outputs(base_url: str, query: str, transport: Transport | None) -> KindOutcome:
-    result = outputs_client.search_outputs(base_url, query, limit=RESULT_LIMIT, transport=transport)
-    kind = KIND_OUTPUTS
-    if result.state == outputs_client.RESULTS:
-        rows = tuple(
+def group_runs(runs: Iterable[outputs_client.ResearchRun]) -> tuple[Group, ...]:
+    """Group runs by provider. Runs keep the order the server sent them in, within each group."""
+    buckets: dict[str, list[Row]] = {}
+    for run in runs:
+        title = run.provider or NOT_REPORTED_GROUP
+        buckets.setdefault(title, []).append(
             Row(
-                _label(kind),
-                hit.path,
-                _join(hit.kind, f"generated by {hit.generating_script}" if hit.generating_script else ""),
+                item=run.run_id,
+                state=run.state,
+                started=run.started_at,
+                updated=run.updated_at,
+                completed=run.completed_at,
             )
-            for hit in result.hits
         )
-        return KindOutcome(kind, STATE_RESULTS, MATCH_TEXT.format(_label(kind), len(rows), query), rows)
-    if result.state == outputs_client.EMPTY:
-        return KindOutcome(kind, STATE_EMPTY, NO_MATCH_TEXT.format(_label(kind), query))
-    if result.state == outputs_client.MISSING_ROUTE:
-        return _no_route(kind)
-    if result.state == outputs_client.NOT_RUNNING:
-        return _not_running(kind, base_url)
-    if result.state == outputs_client.INVALID:
-        return KindOutcome(kind, STATE_INVALID, result.message or BLANK_TEXT)
-    return KindOutcome(kind, STATE_ERROR, ERROR_TEXT.format(_label(kind), result.message or NO_DETAIL))
+    return tuple(Group(title, tuple(rows)) for title, rows in sorted(buckets.items(), key=lambda item: _group_key(item[0])))
 
 
-def _research(base_url: str, query: str, transport: Transport | None) -> KindOutcome:
+def _research(base_url: str, transport: outputs_client.Transport | None) -> KindList:
     result = outputs_client.list_research_runs(base_url, limit=RESEARCH_LIMIT, transport=transport)
     kind = KIND_RESEARCH
     if result.state == outputs_client.RESULTS:
-        needle = query.strip().lower()
-        rows = tuple(
-            Row(
-                _label(kind),
-                run.run_id,
-                _join(run.state, run.provider, f"started {run.started_at}" if run.started_at else ""),
-            )
-            for run in result.runs
-            if needle in f"{run.run_id} {run.state} {run.provider}".lower()
-        )
-        scope = RESEARCH_SCOPE_TEXT.format(len(result.runs))
-        if rows:
-            line = MATCH_TEXT.format(_label(kind), len(rows), query) + scope
-            return KindOutcome(kind, STATE_RESULTS, line, rows)
-        return KindOutcome(kind, STATE_EMPTY, NO_MATCH_TEXT.format(_label(kind), query) + scope)
+        groups = group_runs(result.runs)
+        line = RESULTS_TEXT.format(len(result.runs), len(groups))
+        return KindList(kind, STATE_RESULTS, line, groups)
     if result.state == outputs_client.EMPTY:
-        return KindOutcome(kind, STATE_EMPTY, NO_MATCH_TEXT.format(_label(kind), query))
+        return KindList(kind, STATE_EMPTY, EMPTY_TEXT)
     if result.state == outputs_client.MISSING_ROUTE:
-        return _no_route(kind)
+        return KindList(kind, STATE_NOT_CONNECTED, NOT_CONNECTED_ROUTE)
     if result.state == outputs_client.NOT_RUNNING:
-        return _not_running(kind, base_url)
-    return KindOutcome(kind, STATE_ERROR, ERROR_TEXT.format(_label(kind), result.message or NO_DETAIL))
+        return KindList(kind, STATE_NOT_CONNECTED, NOT_CONNECTED_STOPPED.format(base_url))
+    return KindList(kind, STATE_ERROR, ERROR_TEXT.format(result.message or NO_DETAIL))
 
 
-_READERS = {KIND_CODE: _code, KIND_OUTPUTS: _outputs, KIND_RESEARCH: _research}
+def read_kind(kind: str, base_url: str, *, transport: outputs_client.Transport | None = None) -> KindList:
+    """One kind's list. Only research sends a request. Code and outputs return their no-source state at once.
+
+    A kind outside KIND_LABELS is a caller error and raises ValueError. A failed research read is not raised: it becomes
+    an error list. The research read goes through outputs_client, which refuses any address that is not on this computer.
+    """
+    if kind not in KIND_LABELS:
+        raise ValueError(f"unknown kind: {kind}")
+    if kind == KIND_RESEARCH:
+        return _research(base_url, transport)
+    return no_source_list(kind)
 
 
-def search_kind(
-    kind: str,
+def read_lists(
     base_url: str,
-    query: str,
-    *,
-    transport: Transport | None = None,
-) -> KindOutcome:
-    """One kind's search. Never raises: a read that fails becomes an outcome that says so."""
-    text = " ".join(query.split())
-    if not text:
-        return _blank_outcome(kind)
-    if len(text) > MAX_QUERY_CHARS:
-        return KindOutcome(kind, STATE_INVALID, TOO_LONG_TEXT)
-    try:
-        return _READERS[kind](base_url, text, transport)
-    except LocalClientError as exc:
-        return KindOutcome(kind, STATE_ERROR, ERROR_TEXT.format(_label(kind), exc.args[0] if exc.args else NO_DETAIL))
-
-
-def run_search(
-    base_url: str,
-    query: str,
     kinds: Sequence[str] = KINDS,
     *,
-    transports: Mapping[str, Transport | None] | None = None,
-) -> SearchOutcome:
-    """Search each chosen kind, in order. Every kind gets its own outcome, even when another kind fails."""
-    text = " ".join(query.split())
-    chosen = tuple(kind for kind in kinds if kind in KIND_LABELS)
+    transports: Mapping[str, outputs_client.Transport | None] | None = None,
+) -> ListOutcome:
+    """Read each chosen kind, in order. Every kind gets its own list, even when another kind fails. Unknown kinds are skipped."""
     lookup = dict(transports or {})
-    outcomes = tuple(search_kind(kind, base_url, text, transport=lookup.get(kind)) for kind in chosen)
-    return SearchOutcome(query=text, outcomes=outcomes)
+    chosen = tuple(kind for kind in kinds if kind in KIND_LABELS)
+    return ListOutcome(tuple(read_kind(kind, base_url, transport=lookup.get(kind)) for kind in chosen))
 
 
 __all__ = [
@@ -227,15 +189,19 @@ __all__ = [
     "KIND_LABELS",
     "KIND_OUTPUTS",
     "KIND_RESEARCH",
-    "KindOutcome",
-    "Row",
     "STATE_EMPTY",
     "STATE_ERROR",
-    "STATE_INVALID",
+    "STATE_NOT_CHECKED",
     "STATE_NOT_CONNECTED",
-    "STATE_NOT_INDEXED",
+    "STATE_NO_SOURCE",
     "STATE_RESULTS",
-    "SearchOutcome",
-    "run_search",
-    "search_kind",
+    "Group",
+    "KindList",
+    "ListOutcome",
+    "Row",
+    "group_runs",
+    "no_source_list",
+    "not_checked_list",
+    "read_kind",
+    "read_lists",
 ]
