@@ -39,6 +39,8 @@ HOSTED_ROWS = [
     {"id": "h-3", "name": "Hosted three", "created_at": "2026-05-01T09:00:00"},
 ]
 CHOOSE_TEXT = "Choose projects to back up"
+ACCOUNT_EMAIL = "fake-owner@example.test"
+IDENTITY_UNKNOWN_TEXT = "Could not confirm which hosted account is signed in, so no project list was read. Try again."
 WRITE_CHECKED_TEXT = "Back up checked projects"
 
 
@@ -149,6 +151,7 @@ def _sources(*, list_hosted) -> DataSources:
         read_file=lambda path: [],
         get_token=lambda: FAKE_TOKEN,
         list_hosted=list_hosted,
+        read_account=lambda url, token: ACCOUNT_EMAIL,
     )
 
 
@@ -286,6 +289,7 @@ def _tab_with_token(qtbot, settings_path, holder, list_hosted):
         read_file=lambda path: [],
         get_token=lambda: _read_holder_token(holder),
         list_hosted=list_hosted,
+        read_account=lambda url, token: holder.get("email", ACCOUNT_EMAIL),
     )
     tab = ProjectsTab(SettingsStore(settings_path), sources)
     qtbot.addWidget(tab)
@@ -352,18 +356,61 @@ def test_a_refresh_for_a_different_hosted_url_clears_the_checklist(qtbot, settin
     assert not _write_button(tab).isEnabled()
 
 
-def test_a_refresh_for_a_different_token_clears_the_checklist(qtbot, settings_path, local_folder):
+def test_a_new_token_for_the_same_account_keeps_the_checklist_and_resets_nothing(qtbot, settings_path, local_folder):
+    """The checklist is bound to the account, not the token. A re-sign-in to the same account changes nothing."""
+    holder = {"token": FAKE_TOKEN}
+    tab = _tab_with_token(qtbot, settings_path, holder, lambda url, token: list(HOSTED_ROWS))
+    _choose(qtbot, tab)
+    status_before = tab.findChild(QLabel, "projects-backup-status").text()
+
+    holder["token"] = "sk_meridian_fake-same-account-0009"
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    assert _checklist(tab).count() == 3
+    assert _write_button(tab).isEnabled()
+    assert tab.findChild(QLabel, "projects-backup-status").text() == status_before
+
+
+def test_a_refresh_for_a_different_account_clears_the_checklist(qtbot, settings_path, local_folder):
     holder = {"token": FAKE_TOKEN}
     tab = _tab_with_token(qtbot, settings_path, holder, lambda url, token: list(HOSTED_ROWS))
     _choose(qtbot, tab)
 
-    holder["token"] = "sk_meridian_fake-other-account-0009"
+    holder["email"] = "fake-other-owner@example.test"
     tab.refresh()
     status = tab.findChild(QLabel, "projects-status")
     qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
 
     assert _checklist(tab).count() == 0
     assert not _write_button(tab).isEnabled()
+
+
+def test_a_choose_is_refused_and_says_so_when_the_account_cannot_be_read(qtbot, settings_path, local_folder):
+    reads: list[str] = []
+
+    def list_hosted(url, token):
+        reads.append(url)
+        return list(HOSTED_ROWS)
+
+    holder = {"token": FAKE_TOKEN, "email": None}
+    tab = _tab_with_token(qtbot, settings_path, holder, list_hosted)
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+    qtbot.waitUntil(lambda: backup_status.text() == IDENTITY_UNKNOWN_TEXT, timeout=5000)
+
+    assert reads == []
+    assert _checklist(tab).count() == 0
+    assert list(local_folder.glob("projects-*.json")) == []
+
+
+def test_the_account_key_is_the_normalized_url_and_identity_not_the_token():
+    same = projects_backup.account_key("https://Usemeridian.US/", ACCOUNT_EMAIL)
+    assert same == projects_backup.account_key("https://usemeridian.us", ACCOUNT_EMAIL)
+    assert same != projects_backup.account_key("https://usemeridian.us", "fake-other-owner@example.test")
+    assert same != projects_backup.account_key("https://other.test", ACCOUNT_EMAIL)
 
 
 def test_a_choose_that_finishes_after_the_token_is_removed_stays_hidden(qtbot, settings_path, local_folder):
@@ -458,7 +505,7 @@ def test_a_write_after_the_saved_account_changed_writes_nothing(qtbot, settings_
 
     tab = _tab_with_token(qtbot, settings_path, holder, list_hosted)
     _choose(qtbot, tab)
-    holder["token"] = "sk_meridian_fake-other-account-0010"
+    holder["email"] = "fake-other-owner@example.test"
     backup_status = tab.findChild(QLabel, "projects-backup-status")
 
     _write_button(tab).click()
@@ -546,7 +593,7 @@ def _trigger_choose_failed(qtbot, tab, settings_path, holder):
 
 
 def _trigger_write_refused(qtbot, tab, settings_path, holder):
-    holder["token"] = "sk_meridian_fake-other-account-0011"
+    holder["email"] = "fake-other-owner@example.test"
     tab.findChild(QPushButton, "projects-backup-write-checked").click()
     backup_status = tab.findChild(QLabel, "projects-backup-status")
     qtbot.waitUntil(lambda: backup_status.text() == projects_backup.ACCOUNT_CHANGED_TEXT, timeout=5000)
@@ -612,6 +659,7 @@ def test_every_trigger_resets_the_checklist_through_the_same_path(qtbot, setting
         read_file=lambda path: [],
         get_token=lambda: _read_holder_token(holder),
         list_hosted=list_hosted,
+        read_account=lambda url, token: holder.get("email", ACCOUNT_EMAIL),
     )
     tab = ProjectsTab(SettingsStore(settings_path), sources)
     qtbot.addWidget(tab)

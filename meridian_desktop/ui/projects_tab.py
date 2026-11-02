@@ -49,7 +49,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, local_client, project_tree, projects_backup, projects_reader, token_store
+from meridian_desktop import (
+    hosted_client,
+    hosted_session,
+    local_client,
+    project_tree,
+    projects_backup,
+    projects_reader,
+    token_store,
+)
 from meridian_desktop.data_source import (
     HOSTED_PATH_MODES,
     SOURCE_FILE,
@@ -79,6 +87,7 @@ WRITE_CHECKED_TEXT = "Back up checked projects"
 CHOOSING_TEXT = "Reading the hosted project list..."
 CHOOSE_PROMPT_TEXT = "Press Choose projects to back up to read the hosted projects."
 TOKEN_UNREADABLE_TEXT = "Could not read the saved token. Try again."
+IDENTITY_UNKNOWN_TEXT = "Could not confirm which hosted account is signed in, so no project list was read. Try again."
 # Why a checklist is cleared. _reset_choice is the one place that clears it, and each reason has the line the owner sees.
 RESET_ACCOUNT_CHANGED = "account_changed"
 RESET_TOKEN_REMOVED = "token_removed"
@@ -86,7 +95,9 @@ RESET_TOKEN_ADDED = "token_added"
 RESET_CHOOSE_ENDED = "choose_ended"
 RESET_WRITE_REFUSED = "write_refused"
 RESET_TOKEN_UNREADABLE = "token_unreadable"
+RESET_ACCOUNT_UNKNOWN = "account_unknown"
 RESET_TEXT = {
+    RESET_ACCOUNT_UNKNOWN: "The hosted account could not be confirmed, so the checklist was cleared. Choose again.",
     RESET_ACCOUNT_CHANGED: "The hosted account changed, so the checklist was cleared. Choose the projects again.",
     RESET_TOKEN_REMOVED: "No hosted token is saved, so the checklist was cleared.",
     RESET_TOKEN_ADDED: "A hosted token was saved again, so the checklist was cleared. Choose the projects again.",
@@ -133,7 +144,16 @@ def default_sources(secrets: SecretStore, *, server_transport: local_client.Tran
         read_file=projects_reader.list_projects,
         get_token=lambda: token_store.read_token(store=secrets),
         list_hosted=hosted_client.list_projects,
+        read_account=_hosted_account,
     )
+
+
+def _hosted_account(hosted_url: str, token: str) -> str | None:
+    """The account email GET /me names, read the way the connection bar reads it. None when /me does not confirm one."""
+    check = hosted_session.check_account(hosted_url, token, None)
+    if check.state != hosted_session.ACCOUNT_OK or not check.email:
+        return None
+    return check.email
 
 
 def visible_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +212,8 @@ class _Loaded:
     account_key: str | None = None
     # True when the keychain read failed. That is not a removed token, so the saved state is kept.
     token_unreadable: bool = False
+    # True when this load read the account (a checklist is shown). Then account_key is None if /me did not confirm one.
+    account_checked: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,12 +262,13 @@ def _usable_token(token: object) -> bool:
     return isinstance(token, str) and bool(token.strip())
 
 
-def _load(store: SettingsStore, sources: DataSources) -> _Loaded:
+def _load(store: SettingsStore, sources: DataSources, want_account: bool) -> _Loaded:
     """Runs on a worker: reads the saved settings, resolves the one source the mode uses, and says whether a hosted
-    token is saved, with the account fingerprint when one is.
+    token is saved.
 
     The token is read once, here. A keychain read that fails is not "no token": the load reports token_unreadable, and
-    the saved state stays as the tab had it. The generation is set by the job that runs this.
+    the saved state stays as the tab had it. When ``want_account`` is true (a checklist is shown), the account is read
+    too, so the checklist can be checked against it. The generation is set by the job that runs this.
     """
     settings = store.load().settings
     try:
@@ -259,7 +282,11 @@ def _load(store: SettingsStore, sources: DataSources) -> _Loaded:
     outcome = resolve(settings, replace(sources, get_token=lambda: token))
     if not _usable_token(token):
         return _Loaded(0, outcome, False, None)
-    return _Loaded(0, outcome, True, projects_backup.account_key(settings.hosted_url, str(token)))
+    if not want_account:
+        return _Loaded(0, outcome, True, None)
+    identity = sources.read_account(settings.hosted_url, str(token))
+    key = projects_backup.account_key(settings.hosted_url, identity) if identity else None
+    return _Loaded(0, outcome, True, key, account_checked=True)
 
 
 def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
@@ -296,6 +323,10 @@ def _choose_work(store: SettingsStore, sources: DataSources, generation: int) ->
         token = sources.get_token()
         if not _usable_token(token):
             return _Chosen(generation, None, (), projects_backup.NO_TOKEN_TEXT)
+        # The account is read before any list is, and a Choose that cannot confirm it is refused, not guessed.
+        identity = sources.read_account(settings.hosted_url, str(token))
+        if not identity:
+            return _Chosen(generation, None, (), IDENTITY_UNKNOWN_TEXT, RESET_ACCOUNT_UNKNOWN)
         rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
     except token_store.TokenReadError:
         return _Chosen(generation, None, (), TOKEN_UNREADABLE_TEXT, RESET_TOKEN_UNREADABLE)
@@ -305,7 +336,7 @@ def _choose_work(store: SettingsStore, sources: DataSources, generation: int) ->
         return _Chosen(generation, None, (), f"{BACKUP_FAILED_TEXT} ({exc.__class__.__name__}).")
     if not rows:
         return _Chosen(generation, None, (), projects_backup.NO_PROJECTS_TEXT)
-    return _Chosen(generation, projects_backup.account_key(settings.hosted_url, str(token)), tuple(rows))
+    return _Chosen(generation, projects_backup.account_key(settings.hosted_url, identity), tuple(rows))
 
 
 def _write_checked(
@@ -327,7 +358,8 @@ def _write_checked(
         return _Backed(TOKEN_UNREADABLE_TEXT, RESET_TOKEN_UNREADABLE)
     if not _usable_token(token):
         return _Backed(projects_backup.NO_TOKEN_TEXT, RESET_WRITE_REFUSED)
-    if projects_backup.account_key(settings.hosted_url, str(token)) != key:
+    identity = sources.read_account(settings.hosted_url, str(token))
+    if not identity or projects_backup.account_key(settings.hosted_url, identity) != key:
         return _Backed(projects_backup.ACCOUNT_CHANGED_TEXT, RESET_WRITE_REFUSED)
     try:
         written = projects_backup.write_backup(
@@ -480,7 +512,7 @@ class ProjectsTab(QWidget):
         self._generation += 1
         self._status.setText(LOADING_TEXT)
         # The job gets the store, the sources and the shared delivery object, not self: a worker never holds the tab.
-        work = functools.partial(_load, self._settings, self._sources)
+        work = functools.partial(_load, self._settings, self._sources, self._chosen_key is not None)
         QThreadPool.globalInstance().start(_LoadJob(self._owner, self._generation, work, shared_delivery()))
 
     @Slot(object)
@@ -502,7 +534,7 @@ class ProjectsTab(QWidget):
             self._reset_choice(RESET_TOKEN_UNREADABLE, text=TOKEN_UNREADABLE_TEXT)
         elif loaded.token_saved is not None:
             self._offer_backup(loaded.token_saved)
-            self._sync_account(loaded.account_key)
+            self._sync_account(loaded.account_checked, loaded.account_key)
         self._show(loaded.outcome)
 
     def _show(self, outcome: Resolution) -> None:
@@ -572,9 +604,16 @@ class ProjectsTab(QWidget):
         if not saved:
             row.choice.setVisible(False)
 
-    def _sync_account(self, account_key: str | None) -> None:
-        """Reset a checklist that was read for another hosted URL or token."""
-        if self._chosen_key is not None and account_key != self._chosen_key:
+    def _sync_account(self, checked: bool, account_key: str | None) -> None:
+        """Reset a checklist whose account is not the one this load found, or could not be confirmed.
+
+        ``checked`` is false when this load did not read the account, so nothing is compared.
+        """
+        if not checked or self._chosen_key is None:
+            return
+        if account_key is None:
+            self._reset_choice(RESET_ACCOUNT_UNKNOWN)
+        elif account_key != self._chosen_key:
             self._reset_choice(RESET_ACCOUNT_CHANGED)
 
     def _reset_choice(self, reason: str, text: str | None = None) -> None:

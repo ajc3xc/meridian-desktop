@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import urllib.parse
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -126,12 +127,22 @@ def backed_up_text(count: int, taken_at: datetime) -> str:
     return f"Backed up {count} {noun} on {day_text(taken_at)}."
 
 
-def account_key(hosted_url: str, token: str) -> str:
-    """A fingerprint of the hosted URL and token, so a checklist is tied to the account it was read for.
+def normalize_hosted_url(hosted_url: str) -> str:
+    """The hosted URL with its scheme and host lowercased and any trailing slash removed, so one service has one form."""
+    parts = urllib.parse.urlsplit(hosted_url.strip())
+    return urllib.parse.urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment)
+    )
 
-    It is a SHA-256 digest of both. The token itself is never kept, only the digest.
+
+def account_key(hosted_url: str, identity: str) -> str:
+    """A fingerprint of the normalized hosted URL and the account identity /me names, for one checklist.
+
+    The identity is the account's email, not the token, so a new token for the same account gives the same key. The key
+    is a SHA-256 digest, so neither the URL nor the identity is kept in the clear.
     """
-    return hashlib.sha256(f"{hosted_url}\n{token}".encode("utf-8")).hexdigest()
+    text = f"{normalize_hosted_url(hosted_url)}\n{identity}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def destination_text(folder: Path) -> str:
@@ -305,6 +316,7 @@ __all__ = [
     "day_text",
     "destination_text",
     "kept_projects",
+    "normalize_hosted_url",
     "prune_backups",
     "utc_now",
     "write_backup",

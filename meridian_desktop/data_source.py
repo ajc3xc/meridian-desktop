@@ -70,6 +70,13 @@ ReadServerFn = Callable[[str], list[Row]]  # local URL -> projects from the runn
 ReadFileFn = Callable[[Path], list[Row]]  # database path -> projects (projects_reader.list_projects)
 GetTokenFn = Callable[[], str | None]  # -> the stored hosted token, or None (token_store.get_token)
 ListHostedFn = Callable[[str, str], list[Row]]  # (hosted URL, token) -> projects from the hosted client
+# (hosted URL, token) -> the account email GET /me names, or None when /me does not confirm an account
+ReadAccountFn = Callable[[str, str], str | None]
+
+
+def _no_account(hosted_url: str, token: str) -> str | None:  # noqa: ARG001 - the default reads nothing
+    return None
+
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,9 @@ class DataSources:
     read_file: ReadFileFn
     get_token: GetTokenFn
     list_hosted: ListHostedFn
+    # Reads the account identity, so a checklist can be bound to the account. The default reads nothing, so a window
+    # built without it refuses Choose rather than guess.
+    read_account: ReadAccountFn = _no_account
 
 
 @dataclass(frozen=True)
