@@ -466,3 +466,23 @@ def test_a_write_after_the_saved_account_changed_writes_nothing(qtbot, settings_
 
     assert list(local_folder.glob("projects-*.json")) == [] and list(local_folder.glob("subset-projects-*.json")) == []
     assert reads == [HOSTED_URL]
+
+
+# ----------------------------------------------------------------- the backups folder, read defensively and pruned safely
+
+
+@pytest.mark.parametrize(("legacy_ids", "covered"), [(["h-1"], True), (["only-here"], False)])
+def test_a_legacy_backup_is_removed_only_when_a_newer_kept_backup_holds_all_its_projects(
+    tmp_path, legacy_ids, covered
+):
+    """A plain-named file from before this branch may be a subset. It goes only when newer kept files hold all its projects."""
+    folder = tmp_path / "b"
+    legacy_rows = [{"id": pid, "name": pid} for pid in legacy_ids]
+    legacy = projects_backup.write_backup(legacy_rows, folder=folder, taken_at=TAKEN - timedelta(days=30))
+    for day in range(projects_backup.BACKUPS_KEPT + 1):
+        projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=day))
+
+    names = {path.name for path in folder.iterdir()}
+
+    assert (legacy.path.name in names) is not covered
+    assert len(list(folder.glob(FULL_GLOB))) >= projects_backup.BACKUPS_KEPT

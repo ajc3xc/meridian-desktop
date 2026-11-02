@@ -234,16 +234,21 @@ def _backup_files(folder: Path, pattern: re.Pattern[str]) -> list[Path]:
     return sorted(found, key=lambda path: path.name, reverse=True)
 
 
-def _holds_projects(path: Path) -> bool:
-    """True when the backup in ``path`` parses and holds at least one project with a usable id."""
+def _project_ids(path: Path) -> set[str] | None:
+    """The project ids the backup in ``path`` holds, or None when the file cannot be read or does not parse as a backup."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         projects = document["projects"]
     except (OSError, ValueError, KeyError, TypeError):
-        return False
+        return None
     if not isinstance(projects, list):
-        return False
-    return any(_kept_row(row) is not None for row in projects)
+        return None
+    return {row["id"] for row in kept_projects(projects)}
+
+
+def _holds_projects(path: Path) -> bool:
+    """True when the backup in ``path`` parses and holds at least one project with a usable id."""
+    return bool(_project_ids(path))
 
 
 def prune_backups(folder: Path, keep: Path | None = None, *, subset: bool = False) -> None:
@@ -262,12 +267,22 @@ def prune_backups(folder: Path, keep: Path | None = None, *, subset: bool = Fals
         kept.add(newest_with_projects)
     if keep is not None:
         kept.add(keep)
+    # Files are visited newest first, so every file already seen is newer. An older file beyond the cap goes only when
+    # every project it holds is also held by a newer kept file. A file that cannot be read is kept.
+    newer_ids: set[str] = set()
     for path in files:
-        if path not in kept:
+        ids = _project_ids(path)
+        if path in kept:
+            newer_ids |= ids or set()
+            continue
+        if ids is not None and ids <= newer_ids:
             try:
                 path.unlink()
             except OSError:
                 pass
+        else:
+            kept.add(path)
+            newer_ids |= ids or set()
 
 
 __all__ = [
