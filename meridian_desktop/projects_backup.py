@@ -218,9 +218,19 @@ def backup_hosted(
 def _backup_files(folder: Path, pattern: re.Pattern[str]) -> list[Path]:
     """The backup files in ``folder`` whose names match ``pattern``, newest first. Only names this module writes match."""
     try:
-        found = [path for path in folder.iterdir() if path.is_file() and pattern.fullmatch(path.name)]
+        entries = list(folder.iterdir())
     except OSError:
         return []
+    found: list[Path] = []
+    for path in entries:
+        if not pattern.fullmatch(path.name):
+            continue
+        try:
+            if path.is_file():
+                found.append(path)
+        except OSError:
+            # One unreadable entry is skipped. The rest of the folder is still listed and pruned as usual.
+            continue
     return sorted(found, key=lambda path: path.name, reverse=True)
 
 
