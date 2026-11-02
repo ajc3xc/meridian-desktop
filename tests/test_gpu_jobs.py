@@ -118,14 +118,18 @@ def remote_stdout(
     apps_rc: int = 0,
     slurm_rc: int = 0,
     lsf_rc: int = 0,
+    finished: bool = True,
 ) -> str:
-    """What the remote script prints: each section starts with its marker and ends with its own exit status."""
+    """What the remote script prints: each section starts with its marker and ends with its own exit status. The end
+    marker comes last, from the script's EXIT trap, so it appears only when the script finished."""
     parts = [gpu_jobs.GPU_MARKER, gpu, f"---GPU-RC={gpu_rc}---"]
     parts += [gpu_jobs.APPS_MARKER, apps, f"---APPS-RC={apps_rc}---"]
     if slurm is not None:
         parts += [gpu_jobs.SLURM_MARKER, slurm, f"---SLURM-RC={slurm_rc}---"]
     if lsf is not None:
         parts += [gpu_jobs.LSF_MARKER, lsf, f"---LSF-RC={lsf_rc}---"]
+    if finished:
+        parts.append(gpu_jobs.END_MARKER)
     return "\n".join(parts)
 
 
@@ -517,14 +521,56 @@ def test_a_host_without_squeue_or_bjobs_says_not_on_this_host():
     assert texts == {PART_SLURM: "Slurm: not on this host.", PART_LSF: "LSF: not on this host."}
 
 
-def test_a_host_without_nvidia_smi_is_reported_absent_from_its_exit_status():
-    # The remote shell reports 127 when the program is not found. The stderr text is not needed.
+def test_a_started_gpu_section_with_status_127_is_failed_not_absent():
+    # The script started nvidia-smi and it exited 127. That is a failure, not a host that has no nvidia-smi.
     answer = CommandResult(returncode=0, stdout=remote_stdout(gpu="", gpu_rc=127))
     run = FakeRunner({ssh_key("cpu-only"): answer})
     snapshot = collect(run, ("cpu-only",), None, now=NOW)
     (status,) = [s for s in snapshot.statuses if s.where == "cpu-only" and s.part == PART_GPUS]
-    assert status.state == STATE_ABSENT
-    assert status.text == "nvidia-smi is not on this host, so its GPUs cannot be read."
+    assert status.state == STATE_FAILED
+    assert status.text == "nvidia-smi could not read the GPUs (exit code 127)."
+
+
+def test_a_squeue_that_exits_127_after_it_started_is_failed_not_absent():
+    answer = CommandResult(returncode=0, stdout=remote_stdout(slurm="", slurm_rc=127))
+    run = FakeRunner({ssh_key("login"): answer})
+    snapshot = collect(run, ("login",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "login" and s.part == PART_SLURM]
+    assert status.state == STATE_FAILED
+    assert status.text == "Slurm could not be read."
+
+
+@pytest.mark.parametrize("status", [127, 1])
+def test_a_shell_that_cannot_run_the_script_fails_every_section(status):
+    # No end marker and no output: the script never ran. Every part is failed, and none is called absent.
+    answer = CommandResult(returncode=status, stdout="", stderr="sh: not found")
+    run = FakeRunner({ssh_key("no-sh"): answer})
+    snapshot = collect(run, ("no-sh",), None, now=NOW)
+    host = {s.part: s for s in snapshot.statuses if s.where == "no-sh"}
+    assert {part: host[part].state for part in host} == {
+        PART_GPUS: STATE_FAILED,
+        PART_PROCESSES: STATE_FAILED,
+        PART_SLURM: STATE_FAILED,
+        PART_LSF: STATE_FAILED,
+    }
+    assert host[PART_GPUS].text == "nvidia-smi could not be read on this host."
+    assert host[PART_SLURM].text == "Slurm could not be read."
+    assert host[PART_LSF].text == "LSF could not be read."
+    assert [row for row in snapshot.gpus if row.host == "no-sh"] == []
+
+
+def test_a_host_with_the_end_marker_reads_normally():
+    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu=REAL_GPU_LINE, finished=True))
+    run = FakeRunner({ssh_key("done"): answer})
+    snapshot = collect(run, ("done",), None, now=NOW)
+    assert [row.host for row in snapshot.gpus] == ["done"]
+    assert gpu_jobs.END_MARKER in answer.stdout
+
+
+def test_the_remote_script_prints_the_end_marker_from_an_exit_trap_before_its_final_exit():
+    assert gpu_jobs.REMOTE_SCRIPT.startswith("trap 'echo " + gpu_jobs.END_MARKER + "' EXIT")
+    assert gpu_jobs.REMOTE_SCRIPT.endswith("exit 0")
+
 
 
 def test_an_nvml_error_without_the_word_nvidia_smi_is_a_failure_with_its_status():
@@ -585,7 +631,7 @@ def test_the_remote_command_starts_with_sh_c_and_the_script_is_one_quoted_argume
     assert gpu_jobs.REMOTE_COMMAND.startswith("sh -c ")
     assert words[:2] == ["sh", "-c"]
     assert len(words) == 3
-    assert words[2].startswith(f"echo {gpu_jobs.GPU_MARKER}")
+    assert words[2].startswith(f"trap 'echo {gpu_jobs.END_MARKER}' EXIT; echo {gpu_jobs.GPU_MARKER}")
     assert words[2].endswith("exit 0")
 
 

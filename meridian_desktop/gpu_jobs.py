@@ -103,10 +103,13 @@ GPU_MARKER = "---GPU---"
 APPS_MARKER = "---APPS---"
 SLURM_MARKER = "---SLURM---"
 LSF_MARKER = "---LSF---"
+# Printed by the script's EXIT trap, after its final exit 0. Its presence is how the reader knows the script finished.
+END_MARKER = "---END---"
 SECTION_MARKERS = {GPU_MARKER: "GPU", APPS_MARKER: "APPS", SLURM_MARKER: "SLURM", LSF_MARKER: "LSF"}
 _STATUS_LINE = re.compile(r"---(GPU|APPS|SLURM|LSF)-RC=(\d+)---")
 REMOTE_SCRIPT = "; ".join(
     [
+        f"trap 'echo {END_MARKER}' EXIT",
         f"echo {GPU_MARKER}",
         f"nvidia-smi --query-gpu={GPU_FIELDS} {NVIDIA_FORMAT}",
         'echo "---GPU-RC=$?---"',
@@ -678,12 +681,19 @@ class _Section:
     text: str
 
 
-def _sections(text: str) -> dict[str, _Section]:
+def _sections(text: str) -> tuple[dict[str, _Section], bool]:
+    """Split the remote reply into its sections. The second value is True only when the end marker is there, which the
+    script's EXIT trap prints after its final exit 0. Without it the script did not finish."""
     started: set[str] = set()
     statuses: dict[str, int] = {}
     lines: dict[str, list[str]] = {name: [] for name in SECTION_MARKERS.values()}
     current: str | None = None
+    finished = False
     for line in text.splitlines():
+        if line == END_MARKER:
+            finished = True
+            current = None
+            continue
         if line in SECTION_MARKERS:
             current = SECTION_MARKERS[line]
             started.add(current)
@@ -695,28 +705,28 @@ def _sections(text: str) -> dict[str, _Section]:
             continue
         if current is not None:
             lines[current].append(line)
-    return {
+    sections = {
         name: _Section(name in started, statuses.get(name), "\n".join(lines[name])) for name in SECTION_MARKERS.values()
     }
-
-
-def _as_result(section: _Section) -> CommandResult:
-    """A section's status as the local path sees it. 127 is the shell's "not found", so the program is missing."""
-    if section.status == 127:
-        return CommandResult(returncode=None, missing=True)
-    return CommandResult(returncode=section.status, stdout=section.text)
+    return sections, finished
 
 
 def _remote_gpus(alias: str, section: _Section) -> tuple[tuple[GpuRow, ...], SourceStatus]:
+    # A section that never started, after a script that finished, means nvidia-smi is not on the host. A started one
+    # that did not report a status failed, and so does a non-zero status, 127 included.
+    if not section.started:
+        return (), SourceStatus(alias, PART_GPUS, STATE_ABSENT, "nvidia-smi is not on this host, so its GPUs cannot be read.")
     if section.status is None:
         return (), SourceStatus(alias, PART_GPUS, STATE_FAILED, "nvidia-smi could not be read on this host.")
-    return _nvidia_gpu_status(alias, _as_result(section), remote=True)
+    return _nvidia_gpu_status(alias, CommandResult(returncode=section.status, stdout=section.text), remote=True)
 
 
 def _remote_apps(alias: str, section: _Section, gpus: Sequence[GpuRow]) -> tuple[tuple[GpuJob, ...], SourceStatus]:
+    if not section.started:
+        return (), SourceStatus(alias, PART_PROCESSES, STATE_ABSENT, "GPU processes are not on this host.")
     if section.status is None:
         return (), SourceStatus(alias, PART_PROCESSES, STATE_FAILED, "GPU processes could not be read.")
-    return _apps_status(alias, _as_result(section), gpus)
+    return _apps_status(alias, CommandResult(returncode=section.status, stdout=section.text), gpus)
 
 
 def _remote_scheduler(
@@ -725,10 +735,13 @@ def _remote_scheduler(
     section: _Section,
     parser: Callable[[str, str], tuple[tuple[GpuJob, ...], int]],
 ) -> tuple[tuple[GpuJob, ...], SourceStatus]:
-    # A section that never started means the tool is not on the host. One that started but never reported its status
-    # is read as failed, through the same "could not be read" text the local path uses.
-    result = _as_result(section) if section.started else None
-    return _scheduler_status(alias, part, result, parser)
+    """Slurm or LSF on one host. Not started after a finished script means the tool is not there. Started and failed,
+    127 included, means it could not be read."""
+    if not section.started:
+        return (), SourceStatus(alias, part, STATE_ABSENT, f"{part}: not on this host.")
+    if section.status is None:
+        return (), SourceStatus(alias, part, STATE_FAILED, f"{part} could not be read.")
+    return _scheduler_status(alias, part, CommandResult(returncode=section.status, stdout=section.text), parser)
 
 
 def _login_failed(result: CommandResult) -> bool:
@@ -757,7 +770,17 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Readin
         return Reading(statuses=(_ssh_failure(alias, result),))
     if backoff is not None:
         backoff.succeeded(alias)
-    sections = _sections(result.stdout)
+    sections, finished = _sections(result.stdout)
+    if not finished:
+        # The script never reached its end: the shell could not run it, or it was cut off. No part is called absent.
+        return Reading(
+            statuses=(
+                SourceStatus(alias, PART_GPUS, STATE_FAILED, "nvidia-smi could not be read on this host."),
+                SourceStatus(alias, PART_PROCESSES, STATE_FAILED, "GPU processes could not be read."),
+                SourceStatus(alias, PART_SLURM, STATE_FAILED, "Slurm could not be read."),
+                SourceStatus(alias, PART_LSF, STATE_FAILED, "LSF could not be read."),
+            ),
+        )
     gpus, gpu_status = _remote_gpus(alias, sections["GPU"])
     apps, apps_status = _remote_apps(alias, sections["APPS"], gpus)
     slurm, slurm_status = _remote_scheduler(alias, PART_SLURM, sections["SLURM"], parse_squeue)
@@ -767,9 +790,6 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Readin
         jobs=apps + slurm + lsf,
         statuses=(gpu_status, apps_status, slurm_status, lsf_status),
     )
-
-
-# ----------------------------------------------------------------- collect
 
 
 def _runpod_failure(exc: Exception) -> SourceStatus:
