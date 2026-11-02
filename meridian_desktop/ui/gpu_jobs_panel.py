@@ -4,10 +4,10 @@ This is Qt code and sits in ui/, so the boundary check allows it. The panel has 
 Refresh button. Every table is read-only. There is no start, stop, kill, submit or edit control, and nothing is read
 until the tab is first shown or Refresh is pressed.
 
-Every read runs on the thread pool, never on the UI thread. A read hands its snapshot back through the shared delivery
-object, tagged with this panel's owner token, so a result that belongs to another tab is dropped. A read that is still
-running stops the timer from starting another one. While the tab is visible, a 5-second timer starts a read on each tick.
-Saved SSH hosts are read on each one, so a slow host can only skip ticks, never block the window.
+Every read runs on the thread pool, never on the UI thread. The reads come back as parts, each one a separate delivery:
+this computer's part (GPUs, processes, Slurm, LSF and RunPod) and one part per saved SSH host. A part is shown as soon as
+it arrives, so one slow host never holds back the local tables. Each delivery is tagged with this panel's owner token, so a
+result that belongs to another tab is dropped. While the tab is visible, a timer starts a local read on each tick.
 
 The panel takes three injected callables. The window passes the real ones, and tests pass fakes:
 - hosts_provider() -> sequence of SSH host names, from Settings. It runs on the worker thread.
@@ -18,6 +18,8 @@ The panel takes three injected callables. The window passes the real ones, and t
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Slot
@@ -34,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop import gpu_jobs
-from meridian_desktop.gpu_jobs import GpuSnapshot, Runner
+from meridian_desktop.gpu_jobs import GpuSnapshot, HostBackoff, Reading, Runner
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
@@ -59,23 +61,41 @@ JOBS_HEADING = "GPU jobs and processes"
 STATUS_HEADING = "Where each part was read"
 
 
+@dataclass(frozen=True)
+class LocalPart:
+    """This computer's part, with the time it was read and the saved hosts it was read with."""
+
+    checked_at: datetime
+    hosts: tuple[str, ...]
+    reading: Reading
+
+
+@dataclass(frozen=True)
+class RemotePart:
+    """One saved host's part."""
+
+    alias: str
+    reading: Reading
+
+
 class _ReadJob(QRunnable):
-    """Run one read on the thread pool and deliver its snapshot. A failure becomes a fixed failed snapshot, so no raw
+    """Run one read on the thread pool and deliver its part. A failure becomes the fixed failure part, so no raw
     exception reaches the UI thread."""
 
-    def __init__(self, work: Callable[[], GpuSnapshot], deliver: Callable[[GpuSnapshot], None]) -> None:
+    def __init__(self, work: Callable[[], object], deliver: Callable[[object], None], failure: Callable[[], object]) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._work = work
         self._deliver = deliver
+        self._failure = failure
 
     def run(self) -> None:
         try:
-            snapshot = self._work()
+            part = self._work()
         except Exception:  # noqa: BLE001 - a worker must never raise into the pool
-            snapshot = gpu_jobs.failed_snapshot()
+            part = self._failure()
         try:
-            self._deliver(snapshot)
+            self._deliver(part)
         except RuntimeError:
             pass  # the panel was deleted while the read ran
 
@@ -129,8 +149,15 @@ class GpuJobsPanel(QWidget):
         self._run: Runner = run if run is not None else gpu_jobs.run_command
         # Identifies this tab's reads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
-        self._in_flight = False
+        self._backoff = HostBackoff()
+        self._local_in_flight = False
+        self._remote_in_flight: set[str] = set()
         self._read_once = False
+        # The last local part, and the last part for each saved host. The tables are the sum of these.
+        self._checked_at: datetime | None = None
+        self._hosts: tuple[str, ...] = ()
+        self._local: Reading | None = None
+        self._remote: dict[str, Reading] = {}
         shared_delivery().delivered.connect(self._on_delivered)
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -174,13 +201,13 @@ class GpuJobsPanel(QWidget):
     # ----------------------------------------------------------- reads
 
     def refresh(self) -> None:
-        """A read now. It does nothing while another read is running, and the Refresh button is off until it ends."""
-        if self._in_flight:
+        """A read now. It does nothing while the local read runs, and the Refresh button is off until it ends."""
+        if self._local_in_flight:
             return
-        self._start()
+        self._start_local()
 
-    def _start(self) -> None:
-        self._in_flight = True
+    def _start_local(self) -> None:
+        self._local_in_flight = True
         self._refresh.setEnabled(False)
         self._status.setText(LOADING_TEXT)
         # The job holds the providers, the runner, the owner token and the shared delivery object. It never holds this tab.
@@ -190,25 +217,75 @@ class GpuJobsPanel(QWidget):
         runpod_provider = self._runpod_provider
         run = self._run
 
-        def work() -> GpuSnapshot:
+        def work() -> LocalPart:
             hosts = tuple(hosts_provider())
-            return gpu_jobs.collect(run, hosts, runpod_provider)
+            reading = gpu_jobs.read_local(run, runpod_provider)
+            return LocalPart(datetime.now(timezone.utc), hosts, reading)
 
-        def deliver(snapshot: GpuSnapshot) -> None:
-            delivery.delivered.emit(Delivered(owner, snapshot))
+        def failure() -> LocalPart:
+            return LocalPart(datetime.now(timezone.utc), (), gpu_jobs.failed_local())
 
-        QThreadPool.globalInstance().start(_ReadJob(work, deliver))
+        def deliver(part: object) -> None:
+            delivery.delivered.emit(Delivered(owner, part))
+
+        QThreadPool.globalInstance().start(_ReadJob(work, deliver, failure))
+
+    def _start_remote(self, alias: str) -> None:
+        if alias in self._remote_in_flight:
+            return
+        self._remote_in_flight.add(alias)
+        owner = self._owner
+        delivery = shared_delivery()
+        run = self._run
+        backoff = self._backoff
+
+        def work() -> RemotePart:
+            return RemotePart(alias, gpu_jobs.read_host(run, alias, backoff))
+
+        def failure() -> RemotePart:
+            return RemotePart(alias, gpu_jobs.failed_host(alias))
+
+        def deliver(part: object) -> None:
+            delivery.delivered.emit(Delivered(owner, part))
+
+        QThreadPool.globalInstance().start(_ReadJob(work, deliver, failure))
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:
-        # Runs on the GUI thread. A result for another tab, or anything that is not a snapshot, is dropped here.
+        # Runs on the GUI thread. A result for another tab, or anything that is not one of this tab's parts, is dropped.
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
-        if not isinstance(item.value, GpuSnapshot):
-            return
-        self._in_flight = False
+        if isinstance(item.value, LocalPart):
+            self._on_local(item.value)
+        elif isinstance(item.value, RemotePart):
+            self._on_remote(item.value)
+
+    def _on_local(self, part: LocalPart) -> None:
+        self._local_in_flight = False
         self._refresh.setEnabled(True)
-        self._show(item.value)
+        self._checked_at = part.checked_at
+        self._hosts = part.hosts
+        self._local = part.reading
+        for alias in list(self._remote):
+            if alias not in part.hosts:
+                del self._remote[alias]
+        for alias in part.hosts:
+            self._start_remote(alias)
+        self._render()
+
+    def _on_remote(self, part: RemotePart) -> None:
+        self._remote_in_flight.discard(part.alias)
+        # A host removed in Settings while its read ran is not shown.
+        if part.alias in self._hosts:
+            self._remote[part.alias] = part.reading
+            self._render()
+
+    def _render(self) -> None:
+        if self._checked_at is None:
+            return
+        readings = [self._local or Reading()]
+        readings.extend(self._remote[alias] for alias in self._hosts if alias in self._remote)
+        self._show(gpu_jobs.assemble(self._checked_at, readings))
 
     def _show(self, snapshot: GpuSnapshot) -> None:
         checked = snapshot.checked_at.astimezone().strftime("%H:%M:%S")
@@ -223,8 +300,8 @@ class GpuJobsPanel(QWidget):
     # ----------------------------------------------------------- timer
 
     def _on_tick(self) -> None:
-        if not self._in_flight:
-            self._start()
+        if not self._local_in_flight:
+            self._start_local()
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
@@ -242,7 +319,9 @@ __all__ = [
     "GPU_COLUMNS",
     "JOB_COLUMNS",
     "REFRESH_MS",
-    "TABLE_MAX_HEIGHT",
     "STATUS_COLUMNS",
+    "TABLE_MAX_HEIGHT",
     "GpuJobsPanel",
+    "LocalPart",
+    "RemotePart",
 ]

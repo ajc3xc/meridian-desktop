@@ -26,7 +26,10 @@ from PySide6.QtWidgets import (
 
 from _shared_delivery import emit, recording_deliveries
 from meridian_desktop import gpu_jobs
+from meridian_desktop.ui import gpu_jobs_panel
+from meridian_desktop.ui.gpu_jobs_panel import LocalPart
 from meridian_desktop.gpu_jobs import (
+    Reading,
     BJOBS_ARGV,
     NVIDIA_APPS_ARGV,
     NVIDIA_GPU_ARGV,
@@ -56,7 +59,7 @@ class RecordingRunner:
     """A fake runner. ``gate`` is an optional Event the runner waits on, so a test can hold a read in progress."""
 
     def __init__(self, answers=None, gate=None, error=None):
-        self._answers = answers if answers is not None else {
+        self.answers = answers if answers is not None else {
             NVIDIA_GPU_ARGV: CommandResult(0, REAL_GPU_LINE),
             NVIDIA_APPS_ARGV: CommandResult(0, REAL_APPS_LINE),
             SQUEUE_ARGV: CommandResult(None, missing=True),
@@ -77,7 +80,7 @@ class RecordingRunner:
             self._gate.wait(5)
         if self._error is not None:
             raise self._error
-        return self._answers.get(tuple(argv), CommandResult(None, missing=True))
+        return self.answers.get(tuple(argv), CommandResult(None, missing=True))
 
 
 def make_panel(qtbot, *, run=None, runpod=lambda: RUNPOD, hosts=lambda: ()):
@@ -304,15 +307,14 @@ def test_a_non_delivery_object_is_ignored(qtbot):
     assert table(panel, "gpu-statuses").rowCount() > 0
 
 
-def test_a_snapshot_for_this_tab_fills_the_tables_from_its_own_rows(qtbot):
+def test_a_local_part_for_this_tab_fills_the_tables_from_its_own_rows(qtbot):
     panel = make_panel(qtbot)
     owner = panel_owner(qtbot, panel)
-    snapshot = GpuSnapshot(
-        checked_at=NOW,
+    reading = Reading(
         gpus=gpu_jobs.parse_gpus(REAL_GPU_LINE, "gpu-box")[0],
         statuses=(gpu_jobs.SourceStatus("gpu-box", "GPUs", "ok", "1 GPU read."),),
     )
-    emit(Delivered(owner, snapshot))
+    emit(Delivered(owner, LocalPart(checked_at=NOW, hosts=(), reading=reading)))
     assert table(panel, "gpu-gpus").item(0, 0).text() == "gpu-box"
     assert label(panel, "gpu-status").text().startswith(CHECKED_PREFIX)
 
@@ -342,6 +344,49 @@ def test_every_table_is_read_only_and_its_cells_are_not_editable(qtbot):
                 item = widget.item(row, column)
                 assert item is not None, (name, row, column)
                 assert not (item.flags() & Qt.ItemFlag.ItemIsEditable), (name, row, column)
+
+
+class SlowRemoteRunner(RecordingRunner):
+    """The local reads run as usual. The ssh call to the host waits on ``gate`` and records that it started."""
+
+    def __init__(self, gate):
+        super().__init__()
+        self.gate = gate
+        self.ssh_started = threading.Event()
+        self.ssh_calls = 0
+
+    def __call__(self, argv, timeout):
+        if argv[0] == "ssh":
+            with self._lock:
+                self.ssh_calls += 1
+            self.ssh_started.set()
+            self.gate.wait(10)
+            return CommandResult(returncode=255, stderr="Could not resolve hostname gpu-box")
+        return super().__call__(argv, timeout)
+
+
+def test_the_local_tables_show_while_a_slow_host_is_still_being_read(qtbot):
+    gate = threading.Event()
+    run = SlowRemoteRunner(gate)
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run)
+    qtbot.addWidget(panel)
+    try:
+        panel.show()
+        qtbot.waitUntil(lambda: table(panel, "gpu-gpus").rowCount() == 1, timeout=5000)
+        assert run.ssh_started.wait(5)
+        # The local part is on screen, and the host has not reported yet.
+        statuses = table(panel, "gpu-statuses")
+        texts = [statuses.item(row, 0).text() for row in range(statuses.rowCount())]
+        assert "gpu-box" not in texts
+    finally:
+        gate.set()
+    qtbot.waitUntil(
+        lambda: any(
+            table(panel, "gpu-statuses").item(row, 0).text() == "gpu-box"
+            for row in range(table(panel, "gpu-statuses").rowCount())
+        ),
+        timeout=5000,
+    )
 
 
 def test_the_tab_opens_no_socket_and_starts_no_process_with_fakes(qtbot, monkeypatch):

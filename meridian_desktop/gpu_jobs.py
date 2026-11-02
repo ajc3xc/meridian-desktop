@@ -115,6 +115,7 @@ UNREPORTED_VALUES = frozenset({"", "[N/A]", "N/A", "[Not Supported]", "[Unknown 
 NAME_HIDDEN_PREFIX = "["  # nvidia-smi writes a process name in brackets when it cannot read it, for example [Insufficient Permissions]
 
 RUNPOD_NOT_CONNECTED_TEXT = "Not connected. The local Meridian server is not answering, so RunPod pods are not listed."
+FAILED_READ_TEXT = "The GPU read failed. Press Refresh to try again."
 RUNPOD_NOT_LISTED_TEXT = "Not connected. The local Meridian server did not list RunPod pods."
 RUNPOD_NO_ROUTE_TEXT = "The local Meridian server has no RunPod pods route yet (HTTP 404). Update Meridian to a build that includes it."
 RUNPOD_REFUSED_TEXT = "The local Meridian server refused the RunPod request (HTTP 403)."
@@ -196,7 +197,7 @@ class GpuSnapshot:
 
 
 @dataclass(frozen=True)
-class _Reading:
+class Reading:
     gpus: tuple[GpuRow, ...] = ()
     jobs: tuple[GpuJob, ...] = ()
     statuses: tuple[SourceStatus, ...] = ()
@@ -580,7 +581,7 @@ def _scheduler_status(
     return jobs, SourceStatus(where, part, STATE_OK, f"{len(jobs)} GPU {noun}.")
 
 
-def _read_local(run: Runner) -> _Reading:
+def _read_local(run: Runner) -> Reading:
     gpu_result = run(NVIDIA_GPU_ARGV, LOCAL_TIMEOUT_SECONDS)
     gpus, gpu_status = _nvidia_gpu_status(LOCAL_HOST, gpu_result, remote=False)
     apps_result = run(NVIDIA_APPS_ARGV, LOCAL_TIMEOUT_SECONDS)
@@ -591,7 +592,7 @@ def _read_local(run: Runner) -> _Reading:
     )
     lsf_result = run(BJOBS_ARGV, LOCAL_TIMEOUT_SECONDS)
     lsf, lsf_status = _scheduler_status(LOCAL_HOST, PART_LSF, lsf_result, lambda text, host: parse_bjobs(text, host))
-    return _Reading(
+    return Reading(
         gpus=gpus,
         jobs=apps + slurm + lsf,
         statuses=(gpu_status, apps_status, slurm_status, lsf_status),
@@ -697,19 +698,19 @@ def _login_failed(result: CommandResult) -> bool:
     return any(word in stderr for word in LOGIN_FAILURE_WORDS)
 
 
-def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Reading:
+def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Reading:
     if backoff is not None:
         wait = backoff.remaining(alias)
         if wait > 0:
             minutes = max(1, math.ceil(wait / 60))
             text = f"Skipped for {minutes} min after a failed login."
-            return _Reading(statuses=(SourceStatus(alias, PART_GPUS, STATE_FAILED, text),))
+            return Reading(statuses=(SourceStatus(alias, PART_GPUS, STATE_FAILED, text),))
     result = run(ssh_argv(alias), SSH_TIMEOUT_SECONDS)
     # 255 is ssh's own failure. It is read before any section, so it is never mistaken for a remote command's status.
     if result.missing or result.timed_out or result.failed_to_start or result.returncode == 255:
         if backoff is not None and _login_failed(result):
             backoff.failed(alias)
-        return _Reading(statuses=(_ssh_failure(alias, result),))
+        return Reading(statuses=(_ssh_failure(alias, result),))
     if backoff is not None:
         backoff.succeeded(alias)
     sections = _sections(result.stdout)
@@ -717,7 +718,7 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Readi
     apps, apps_status = _remote_apps(alias, sections["APPS"], gpus)
     slurm, slurm_status = _remote_scheduler(alias, PART_SLURM, sections["SLURM"], parse_squeue)
     lsf, lsf_status = _remote_scheduler(alias, PART_LSF, sections["LSF"], parse_bjobs)
-    return _Reading(
+    return Reading(
         gpus=gpus,
         jobs=apps + slurm + lsf,
         statuses=(gpu_status, apps_status, slurm_status, lsf_status),
@@ -738,24 +739,52 @@ def _runpod_failure(exc: Exception) -> SourceStatus:
     return SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, state, text)
 
 
-def _runpod_reading(runpod: Callable[[], Mapping[str, Any]] | None) -> _Reading:
+def _runpod_reading(runpod: Callable[[], Mapping[str, Any]] | None) -> Reading:
     if runpod is None:
-        return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_ABSENT, RUNPOD_NOT_CONNECTED_TEXT),))
+        return Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_ABSENT, RUNPOD_NOT_CONNECTED_TEXT),))
     try:
         payload = runpod()
     except Exception as exc:  # noqa: BLE001 - the failure is named in plain words, never by class or raw value
-        return _Reading(statuses=(_runpod_failure(exc),))
+        return Reading(statuses=(_runpod_failure(exc),))
     if not isinstance(payload, Mapping) or payload.get("ok") is False:
-        return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_FAILED, RUNPOD_NOT_LISTED_TEXT),))
+        return Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_FAILED, RUNPOD_NOT_LISTED_TEXT),))
     pods = parse_runpod_pods(payload)
     if not pods:
-        return _Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_EMPTY, "No RunPod pods."),))
+        return Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_EMPTY, "No RunPod pods."),))
     noun = "pod" if len(pods) == 1 else "pods"
-    return _Reading(jobs=pods, statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_OK, f"{len(pods)} RunPod {noun}."),))
+    return Reading(jobs=pods, statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_OK, f"{len(pods)} RunPod {noun}."),))
 
 
-def _failed_reading(where: str) -> _Reading:
-    return _Reading(statuses=(SourceStatus(where, PART_GPUS, STATE_FAILED, "This could not be read."),))
+def _failed_reading(where: str) -> Reading:
+    return Reading(statuses=(SourceStatus(where, PART_GPUS, STATE_FAILED, "This could not be read."),))
+
+
+def read_local(run: Runner, runpod: Callable[[], Mapping[str, Any]] | None = None) -> Reading:
+    """This computer's part: its GPUs, processes and schedulers, and the RunPod pods from the local server. Never raises."""
+    local = _read_local(run)
+    pods = _runpod_reading(runpod)
+    return Reading(
+        gpus=local.gpus,
+        jobs=local.jobs + pods.jobs,
+        statuses=local.statuses + pods.statuses,
+    )
+
+
+def read_host(run: Runner, alias: str, backoff: HostBackoff | None = None) -> Reading:
+    """One saved host's part. It never raises, and a skipped host says so in its status line."""
+    return _guarded_remote(run, alias, backoff)
+
+
+def assemble(checked_at: datetime, readings: Sequence[Reading]) -> GpuSnapshot:
+    """One snapshot from the parts, in the order given."""
+    gpus: list[GpuRow] = []
+    jobs: list[GpuJob] = []
+    statuses: list[SourceStatus] = []
+    for reading in readings:
+        gpus.extend(reading.gpus)
+        jobs.extend(reading.jobs)
+        statuses.extend(reading.statuses)
+    return GpuSnapshot(checked_at=checked_at, gpus=tuple(gpus), jobs=tuple(jobs), statuses=tuple(statuses))
 
 
 def collect(
@@ -774,20 +803,11 @@ def collect(
     """
     checked_at = now if now is not None else datetime.now(timezone.utc)
     names = [name for name in hosts[:MAX_HOSTS] if check_alias(name)]
-    readings: list[_Reading] = [_read_local(run)]
+    readings = [read_local(run, runpod)]
     if names:
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(names))) as pool:
-            remote = list(pool.map(lambda alias: _guarded_remote(run, alias, backoff), names))
-        readings.extend(remote)
-    readings.append(_runpod_reading(runpod))
-    gpus: list[GpuRow] = []
-    jobs: list[GpuJob] = []
-    statuses: list[SourceStatus] = []
-    for reading in readings:
-        gpus.extend(reading.gpus)
-        jobs.extend(reading.jobs)
-        statuses.extend(reading.statuses)
-    return GpuSnapshot(checked_at=checked_at, gpus=tuple(gpus), jobs=tuple(jobs), statuses=tuple(statuses))
+            readings.extend(pool.map(lambda alias: read_host(run, alias, backoff), names))
+    return assemble(checked_at, readings)
 
 
 class HostBackoff:
@@ -824,11 +844,21 @@ class HostBackoff:
             self._retry_at.pop(alias, None)
 
 
-def _guarded_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Reading:
+def _guarded_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Reading:
     try:
         return _read_remote(run, alias, backoff)
     except Exception:  # noqa: BLE001 - one bad host never stops the others
         return _failed_reading(alias)
+
+
+def failed_local() -> Reading:
+    """The local part when its whole read failed before any part could answer."""
+    return Reading(statuses=(SourceStatus(LOCAL_HOST, PART_GPUS, STATE_FAILED, FAILED_READ_TEXT),))
+
+
+def failed_host(alias: str) -> Reading:
+    """The part for one saved host when its read failed. The text names no class and no value."""
+    return _failed_reading(alias)
 
 
 def failed_snapshot(now: datetime | None = None) -> GpuSnapshot:
@@ -836,7 +866,7 @@ def failed_snapshot(now: datetime | None = None) -> GpuSnapshot:
     checked_at = now if now is not None else datetime.now(timezone.utc)
     return GpuSnapshot(
         checked_at=checked_at,
-        statuses=(SourceStatus(LOCAL_HOST, PART_GPUS, STATE_FAILED, "The GPU read failed. Press Refresh to try again."),),
+        statuses=(SourceStatus(LOCAL_HOST, PART_GPUS, STATE_FAILED, FAILED_READ_TEXT),),
     )
 
 
