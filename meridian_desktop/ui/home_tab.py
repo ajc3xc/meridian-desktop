@@ -1,12 +1,27 @@
 """Home tab: one status card for each part of Meridian, each checked on its own. Qt code, so it sits in ui/.
 
 The cards are the local Meridian server, the tunnel, the services (the LaTeX engine and the slot ports), Zotero, the
-AI clients and their tools, and the updates. Each card runs its check when the window first shows, again every five
-minutes while Home is showing, and when Check now is pressed. No button starts the first check.
+AI clients and their tools, the updates, and the Overleaf (LaTeX) card. Each card runs its check when the window first shows, again every five
+minutes while Home is showing, and when Check now is pressed. No button starts the first check. Each later show reads
+the quick cards (local, tunnel, services, Zotero) again, after SHOW_DEBOUNCE_MS. A runner action or a start check
+(RunnerActions.runnerStateChanged), from Home or Settings, reads the Local, Tunnel and Tools cards again, and a client
+setup change (RunnerActions.clientSetupChanged) reads the Tools card again: at once while Home shows, or on its next
+show. A check asked while a card's read runs waits for that read and then runs.
 
-The checks read only, with two exceptions the owner confirms first. The tunnel's Start, Stop and Restart use the
-runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero panel uses.
-The Settings buttons only switch to the Settings tab.
+The checks read only, with two exceptions the owner confirms first. The tunnel's and the local server's Start, Stop and
+Restart use the runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero
+panel uses. The Settings buttons only switch to the Settings tab.
+
+The Overleaf (LaTeX) card reads only the LaTeX engine's port: when Home is shown, and on Check now. It asks the engine
+about the Overleaf session only on a press of its Check button, once per press, or on the hourly check the owner has turned
+on (docs/local-trust-contract.md, Amendment I, off by default). The hourly check has its own timer, which runs only while
+Home is showing. Neither the five-minute timer nor a show asks Overleaf. Log in
+asks the engine to open a login window. Start engine asks first (No is the default), then starts the engine's starter.
+Once per app launch, run_launch_checks (called by app.py after the window shows) does two things when the owner's
+switches allow it: it starts the engine when the engine is down and the owner has confirmed its folder, and it checks the
+saved session once when the engine is running. Choose engine folder asks first, and saves the folder only on a yes. Turning
+the launch start on asks first too (No is the default). Its two switches and Choose engine folder sit on this card. Every
+start from this card is written to the control log (overleaf_engine.log_engine_start). Nothing in this card stops a process.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -16,20 +31,25 @@ is not cancelled, and if it finishes, its answer still shows unless a newer chec
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QHideEvent, QShowEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QHideEvent, QShowEvent, QTextDocument
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -37,19 +57,64 @@ from PySide6.QtWidgets import (
     QGridLayout,
 )
 
-from meridian_desktop import local_client, zotero_client
+from meridian_desktop import local_client, overleaf_client, overleaf_engine, runner_client, zotero_client
+from meridian_desktop.client_setup_runner import COMMAND_TIMEOUT_SECONDS
 from meridian_desktop.home_status import (
     ACTION_CHECK_TOOLS,
     ACTION_LAUNCH_ZOTERO,
     ACTION_RELEASE_PAGE,
     ACTION_SETTINGS,
+    AUTO_CHECK_LABEL,
+    AUTO_CHECK_TOOLTIP,
+    AUTO_START_CONFIRM_TITLE,
+    AUTO_START_LABEL,
+    AUTO_START_NOT_TURNED_ON_TEXT,
+    AUTO_START_TOOLTIP,
+    CHECKING_HEADLINE,
+    CHOOSE_FOLDER_TEXT,
+    CHOOSE_FOLDER_TOOLTIP,
+    ENGINE_FOLDER_CONFIRM_CANCELLED_TEXT,
+    ENGINE_FOLDER_CONFIRM_TITLE,
+    ENGINE_FOLDER_DIALOG_TITLE,
+    ENGINE_FOLDER_NOT_CONFIRMED_TEXT,
+    ENGINE_FOLDER_NOT_SET_TEXT,
+    ENGINE_FOLDER_SAVED_TEXT,
+    HOURLY_CHECK_CONFIRM_QUESTION,
+    HOURLY_CHECK_CONFIRM_TITLE,
+    HOURLY_CHECK_LABEL,
+    HOURLY_CHECK_NOT_TURNED_ON_TEXT,
+    HOURLY_CHECK_TOOLTIP,
+    LAUNCH_STARTING_TEXT,
+    LOGIN_FAILED_TEXT,
+    NO_STARTER_CHOSEN_TEXT,
+    OPTION_NOT_SAVED_TEXT,
+    OVERLEAF_ENGINE_DOWN,
+    OVERLEAF_ENGINE_FAILED,
+    OVERLEAF_ENGINE_RUNNING,
+    OVERLEAF_ENGINE_UNCHECKED,
+    OVERLEAF_TITLE,
+    SESSION_CHECK_FAILED_TEMPLATE,
+    START_CANCELLED_TEXT,
+    START_FAILED_TEMPLATE,
+    START_TITLE,
+    START_WORKING_TEXT,
+    TIME_FORMAT,
     CardView,
     LocalFacts,
+    OverleafFacts,
+    RowView,
     ServiceFacts,
+    auto_start_question,
     checked_text,
     checking_view,
+    engine_folder_question,
+    engine_start_question,
     failed_view,
+    launch_start_text,
     local_view,
+    overleaf_login_text,
+    overleaf_start_text,
+    overleaf_view,
     services_view,
     stalled_view,
     tools_view,
@@ -57,26 +122,44 @@ from meridian_desktop.home_status import (
     updates_view,
     zotero_view,
 )
-from meridian_desktop.latex_client import EngineStatus
+from meridian_desktop.latex_client import EngineStatus, address_text, port_text
 from meridian_desktop.runner_client import RunnerResult
-from meridian_desktop.runner_controls import SCOPE_TUNNEL
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.runner_controls import SCOPE_LOCAL, SCOPE_TUNNEL
+from meridian_desktop.settings_store import OVERLEAF_HOURLY_CHECK_MINUTES, Settings, SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
+from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
-from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
+from meridian_desktop.ui.scope_controls import ScopeControls, local_gate, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import (
+    BlockLine,
+    block_html,
+    enable_widget_copy,
+    hidden_on_purpose,
+    make_selectable,
+    paragraph_tops,
+    set_label_text,
+    text_bottom,
+)
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, open_release_page
 from meridian_desktop.ui.zotero_panel import ask_start
 
 # Every card checks again this often while Home is showing (seconds, for the monotonic clock).
 CHECK_INTERVAL_SECONDS = 5 * 60
 CHECK_INTERVAL_MS = CHECK_INTERVAL_SECONDS * 1000
-# A check that has not finished after this many seconds stops blocking its card (see the module docstring).
-STALL_SECONDS = 60
+# A check that has not finished after this many seconds stops blocking its card (see the module docstring). The Tools
+# read is the longest: the core's client setup plan, then the local server probe (which can take up to twice its
+# timeout, see local_client._get), then the tunnel status call, one after the other. The stall comes only after all of
+# them could have run to their timeouts, with a margin, so a slow read still within its timeouts never shows Still checking.
+STALL_MARGIN_SECONDS = 15
+STALL_SECONDS = int(
+    COMMAND_TIMEOUT_SECONDS + 2 * local_client.DEFAULT_TIMEOUT + runner_client.DEFAULT_TIMEOUT + STALL_MARGIN_SECONDS
+)
+# Showing Home again reads the quick cards after this pause, so a few quick tab switches run one read, not several.
+SHOW_DEBOUNCE_MS = 300
 INTRO_TEXT = (
     "Each card checks its part of Meridian on its own: when this window opens, and again every five minutes while "
     "Home is showing. The checks only read. Launch Zotero and the tunnel buttons ask before they act."
@@ -89,16 +172,33 @@ LAUNCHING_TEXT = "Launching Zotero..."
 LAUNCH_FAILED_TEXT = "Zotero did not launch ({}). Press Check now to see its state."
 API_READY_TEXT = "The local API answers now."
 API_NOT_READY_TEXT = "The local API is not answering yet. Zotero can take a little while to open. Press Check now in a moment."
+# Start engine waits this long for the engine's port after the starter runs, and looks again this often.
+START_WAIT_SECONDS = 8.0
+START_POLL_SECONDS = 0.25
+OVERLEAF_CHECK_TOOLTIP = "Sends your saved session to Overleaf once, to see if you are signed in."
+OVERLEAF_LOGIN_TOOLTIP = "Opens a login window in Chrome. Sign in there, then press Check."
+OVERLEAF_START_TOOLTIP = "Starts the LaTeX engine in the background. It asks first."
+# The hourly Overleaf session check, in milliseconds (Amendment I). It runs only while Home is showing and the owner has turned it on.
+OVERLEAF_HOURLY_CHECK_MS = OVERLEAF_HOURLY_CHECK_MINUTES * 60 * 1000
 
-# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state.
+# Card colours: a left border per tone. The tone is a property, so the colour follows the card's state. A card that has
+# focus (for Ctrl+C) shows it on its other three sides.
 CARD_STYLE = """
 QFrame[homeCard="true"] { border: 1px solid palette(mid); border-left-width: 4px; border-radius: 6px; }
+QFrame[homeCard="true"]:focus {
+    border-top-color: palette(highlight); border-right-color: palette(highlight); border-bottom-color: palette(highlight);
+}
 QFrame[homeCard="true"][tone="ok"] { border-left-color: #2e7d32; }
 QFrame[homeCard="true"][tone="attention"] { border-left-color: #b26a00; }
 QFrame[homeCard="true"][tone="checking"] { border-left-color: #1565c0; }
 QFrame[homeCard="true"][tone="off"] { border-left-color: palette(mid); }
 QFrame[homeCard="true"][tone="idle"] { border-left-color: palette(mid); }
 """
+# The gaps a card's rows had when each line was a label of its own: between a row and its detail line, between one row
+# and the next, and between a row and its button (pixels).
+ROW_DETAIL_GAP = 2
+ROW_GAP = 6
+ROW_BUTTON_GAP = 6
 
 
 # ----------------------------------------------------------------- the reads (run on the thread pool)
@@ -158,15 +258,74 @@ def _launch_zotero(client: Any, exe: str) -> tuple[str, bool]:
     return line, check.state == zotero_client.API_ON
 
 
+@dataclass(frozen=True)
+class OverleafProbe:
+    """What the Overleaf card learns from the engine's port: its address, whether it accepts a connection, and where its
+    starter is (None when that is not known). No Overleaf request is made for this."""
+
+    url: str
+    listening: bool
+    folder: Path | None
+
+
+def _overleaf_probe(store: SettingsStore, deps: OverleafDeps) -> OverleafProbe:
+    """The engine's port and the folder the owner chose. Runs on the thread pool. It never sends a request to Overleaf."""
+    settings = store.load().settings
+    url = settings.engine_url
+    return OverleafProbe(url=url, listening=bool(deps.listening(url)), folder=deps.folder(settings))
+
+
+def _overleaf_session_read(store: SettingsStore, deps: OverleafDeps) -> Any:
+    """Ask the engine once about the saved Overleaf session. Runs on the thread pool: on a Check press, at launch, or on the
+    hourly check the owner has turned on. It never runs on a show."""
+    return deps.session(store.load().settings.engine_url)
+
+
+def _overleaf_login_read(store: SettingsStore, deps: OverleafDeps) -> Any:
+    """Ask the engine to open its login window. Runs on the thread pool, and only on a Log in press."""
+    return deps.login(store.load().settings.engine_url)
+
+
+def _wait_for_port(url: str, deps: OverleafDeps) -> bool:
+    """True when the engine's port answers within deps.wait_seconds. It looks again every START_POLL_SECONDS."""
+    deadline = time.monotonic() + deps.wait_seconds
+    while True:
+        if deps.listening(url):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(START_POLL_SECONDS)
+
+
+def _overleaf_start_read(store: SettingsStore, deps: OverleafDeps, folder: Path) -> tuple[bool, str]:
+    """Start the engine's starter, then wait up to deps.wait_seconds for its port. Returns (running, reason). The reason is
+    fixed text, set only when the starter did not run. Runs on the thread pool, and only after the owner says yes, or at
+    launch for the confirmed folder. Every call that reaches the starter writes one line to the control log, whatever the
+    outcome, and that write never raises (overleaf_engine.log_engine_start)."""
+    url = store.load().settings.engine_url
+    started = deps.start(folder)
+    running, reason = False, started.reason
+    try:
+        if started.started:
+            running = _wait_for_port(url, deps)
+            reason = ""
+    finally:
+        overleaf_engine.log_engine_start(store.path, started, running)
+    return running, reason
+
+
+def _default_overleaf_deps() -> OverleafDeps:
+    """The real LaTeX engine calls. Looked up when called, so a test can replace this function."""
+    return OverleafDeps(
+        listening=lambda url: overleaf_engine.engine_listening(url),
+        folder=lambda settings: overleaf_engine.engine_folder(settings),
+        start=lambda folder: overleaf_engine.start_engine(folder),
+        session=lambda url: overleaf_client.session_status(url),
+        login=lambda url: overleaf_client.start_login(url),
+    )
+
+
 # ----------------------------------------------------------------- one card
-
-def _clear(layout: QVBoxLayout) -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        if widget is not None:
-            widget.deleteLater()
-
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     label = QLabel(text, parent)
@@ -176,11 +335,171 @@ def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
     return make_selectable(label)
 
 
+def _headline_point_size(font: QFont) -> float:
+    return font.pointSizeF() * 1.15 if font.pointSizeF() > 0 else 11.0
+
+
+def _line_height(text: str, font: QFont) -> int:
+    """The height ``text`` takes on lines of its own with no wrapping, as a label of its own showed it."""
+    document = QTextDocument()
+    document.setDocumentMargin(0)
+    document.setDefaultFont(font)
+    document.setPlainText(text)
+    return math.ceil(document.size().height())
+
+
+class _ButtonFlow(QLayout):
+    """Buttons in rows that wrap: left to right, and the ones that do not fit go on the next row.
+
+    When the width allows, the buttons sit in one row, as ScopeControls' own row showed them. A narrower card puts them on
+    two rows or more instead of growing wider than its column, so the row never makes Home scroll sideways. Each button
+    keeps its own size, so its whole text shows. A button hidden on purpose (the fix button while the gate is on) takes no
+    room. The sizes are read from the buttons themselves, so they are right before the card is first shown too.
+    """
+
+    def __init__(self, spacing: int) -> None:
+        super().__init__()
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt naming
+        self._items.append(item)
+        self.invalidate()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt naming
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt naming
+        if not 0 <= index < len(self._items):
+            return None
+        item = self._items.pop(index)
+        self.invalidate()
+        return item
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802 - Qt naming
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt naming
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt naming
+        return self._arrange(QRect(0, 0, width, 0), place=False)
+
+    def isEmpty(self) -> bool:  # noqa: N802 - Qt naming
+        return not self._shown()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        """Every button on one row."""
+        sizes = [widget.sizeHint() for widget in self._shown()]
+        width = sum(size.width() for size in sizes) + self.spacing() * max(len(sizes) - 1, 0)
+        return QSize(width, max((size.height() for size in sizes), default=0))
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt naming
+        """As wide as the widest button, with each button on a row of its own."""
+        widest = self.widest()
+        return QSize(widest, self.heightForWidth(widest))
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt naming
+        super().setGeometry(rect)
+        self._arrange(rect, place=True)
+
+    def widest(self) -> int:
+        return max((widget.sizeHint().width() for widget in self._shown()), default=0)
+
+    def _shown(self) -> list[QWidget]:
+        widgets = (item.widget() for item in self._items)
+        return [widget for widget in widgets if widget is not None and not hidden_on_purpose(widget)]
+
+    def _arrange(self, rect: QRect, *, place: bool) -> int:
+        """Lay the buttons out in ``rect``'s width, from its top left, and return the height they take."""
+        spacing = max(self.spacing(), 0)
+        x, y, row_height = rect.x(), rect.y(), 0
+        for widget in self._shown():
+            size = widget.sizeHint()
+            if x > rect.x() and x + size.width() > rect.x() + rect.width():
+                x, y, row_height = rect.x(), y + row_height + spacing, 0
+            if place:
+                widget.setGeometry(QRect(QPoint(x, y), size))
+            x += size.width() + spacing
+            row_height = max(row_height, size.height())
+        return y + row_height - rect.y()
+
+
+class _CardControls(ScopeControls):
+    """A runner's Start, Stop and Restart on a Home card (ScopeControls), whose note and result lines are the card's.
+
+    ScopeControls shows its gate note and its last result in labels of its own, under its buttons. A drag cannot cross
+    from the card's text block into another label, so here those two labels are never shown. They keep their text under
+    their names (tunnel-control-result, home-local-control-note and so on) for code that reads it, and the card draws
+    the same lines into its one text block, under the buttons (_Card.add_controls). ``linesChanged`` is emitted each
+    time either line may have changed. The buttons, the questions they ask and the calls they run are ScopeControls'
+    own, unchanged.
+
+    ScopeControls keeps its buttons on one row, which would make the card as wide as all of them. Here the same buttons,
+    in the same order, sit in a row that wraps (_ButtonFlow), so the card keeps its share of Home's width.
+    """
+
+    linesChanged = Signal()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        outer = self.layout()
+        row = outer.itemAt(0).layout()
+        self._flow = _ButtonFlow(max(row.spacing(), 0))
+        outer.insertLayout(0, self._flow)
+        for button in (self._start, self._stop, self._restart, self._fix):
+            row.removeWidget(button)
+            self._flow.addWidget(button)
+        outer.removeItem(row)
+        row.deleteLater()
+
+    def height_for(self, width: int) -> int:
+        """How tall the buttons are when they wrap at ``width``."""
+        return self._flow.heightForWidth(width)
+
+    def widest(self) -> int:
+        """The width of the widest button shown, the least width at which every button shows whole."""
+        return self._flow.widest()
+
+    def lines(self) -> tuple[str, ...]:
+        """The lines ScopeControls shows under its buttons: the gate note, then the last result, each when it is set."""
+        return tuple(label.text() for label in (self._note, self._result) if label.text())
+
+    def refresh_enabled(self) -> None:
+        super().refresh_enabled()
+        self._note.hide()
+        self.linesChanged.emit()
+
+    def _show(self, text: str) -> None:
+        super()._show(text)
+        self._result.hide()
+        self.linesChanged.emit()
+
+
 class _Card(QFrame):
-    """One status card: a title, a headline, a detail sentence, the time checked, rows, one action and a note.
+    """One status card: a title, a headline, a detail sentence, the time checked, a note, rows, and one action.
 
     ``work`` runs off the UI thread and returns the card's value. ``render`` turns that value and the time checked
     into a CardView. A card with no ``work`` is drawn by its owner (the Updates card reads a bar, and reads no thread).
+
+    A drag cannot cross from one label to the next, so every line of the card (title, headline, detail, checked line,
+    note, rows, and the note and result lines under a runner's buttons) is one selectable text block, home-<key>-text.
+    Each line is a paragraph with the font and the gaps it had as a label of its own, so one drag from the first line to
+    the last selects them all and Ctrl+C copies them. A row's button sits at the block's right edge, level with the
+    row's first line, and the row's text keeps that room free. A runner's Start, Stop and Restart (add_controls) sit in
+    a gap of the block under the card's own lines, where they sat before, and their note and result lines follow them
+    in the block. The buttons wrap onto more rows when the block is narrower than their row, and the gap follows the
+    rows they take, so they never make the card wider than its column. The card is only ever as wide as its widest
+    button needs. Widgets put under the text (the tunnel's Open Settings) and the action button are not part of it.
+
+    Each line also keeps a label of its own under its old name (home-<key>-headline and so on), never shown, for code
+    that reads one line. The card has a Copy action of its own too: in its right-click menu, and on Ctrl+C while the card
+    has focus. It copies the text the card shows, never a hidden line or a button's text. A redraw keeps a selection
+    whose text is still there (set_label_text).
     """
 
     def __init__(
@@ -202,6 +521,8 @@ class _Card(QFrame):
         self._render = render
         self._on_action = on_action
         self._busy = False
+        # A check asked while a read runs. It runs once that read has answered.
+        self._queued = False
         self._generation = 0
         self._owner = object()
         self._action_key = ""
@@ -209,6 +530,18 @@ class _Card(QFrame):
         self._action_generation = 0
         self._action_owner = object()
         self._action_done: Callable[[Any, str], None] | None = None
+        # True once the card shows a check's answer. A new check then keeps that answer on screen until the next one.
+        self._has_answer = False
+        self._shown_rows: tuple[RowView, ...] = ()
+        # Each row's button by row number, and the paragraph of the text block where each row starts.
+        self._row_buttons: dict[int, QPushButton] = {}
+        self._row_paragraphs: list[int] = []
+        # A runner's buttons (add_controls), and the paragraph of the text block where their first line starts (-1: none).
+        self._controls: _CardControls | None = None
+        self._control_paragraph = -1
+        # The height of the gap the text block keeps for a runner's buttons, and their widest button, at the last draw.
+        self._controls_height = 0
+        self._controls_widest = 0
 
         self._stall = QTimer(self)
         self._stall.setSingleShot(True)
@@ -217,59 +550,86 @@ class _Card(QFrame):
         shared_delivery().delivered.connect(self._on_delivered)
         shared_delivery().delivered.connect(self._on_action_delivered)
 
+        enable_widget_copy(self)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        heading = QLabel(title, self)
-        heading.setObjectName(f"home-{key}-title")
-        heading.setTextFormat(Qt.TextFormat.PlainText)
-        font = heading.font()
-        font.setBold(True)
-        heading.setFont(font)
-        layout.addWidget(make_selectable(heading))
-        self._headline = _label(self, f"home-{key}-headline")
-        headline_font = self._headline.font()
-        headline_font.setBold(True)
-        headline_font.setPointSizeF(headline_font.pointSizeF() * 1.15 if headline_font.pointSizeF() > 0 else 11.0)
-        self._headline.setFont(headline_font)
-        self._detail = _label(self, f"home-{key}-detail")
-        self._checked = _label(self, f"home-{key}-checked")
-        self._note = _label(self, f"home-{key}-note")
-        self._note.hide()
-        layout.addWidget(self._headline)
-        layout.addWidget(self._detail)
-        layout.addWidget(self._checked)
-        layout.addWidget(self._note)
+        # The one text block. A right-click on it opens the card's own menu, whose Copy copies the whole card.
+        self._text = make_selectable(QLabel(self))
+        self._text.setObjectName(f"home-{key}-text")
+        self._text.setTextFormat(Qt.TextFormat.RichText)
+        self._text.setWordWrap(True)
+        self._text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._text.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._text.installEventFilter(self)
+        layout.addWidget(self._text)
+        self._title = self._line("title", title)
+        self._headline = self._line("headline")
+        self._detail = self._line("detail")
+        self._checked = self._line("checked")
+        self._note = self._line("note")
         self._body = QVBoxLayout()
         layout.addLayout(self._body)
-        self._rows = QVBoxLayout()
-        self._rows.setSpacing(6)
-        layout.addLayout(self._rows)
         self._action = QPushButton(self)
         self._action.setObjectName(f"home-{key}-action")
         self._action.hide()
         self._action.clicked.connect(lambda _checked=False: self._on_action(self._action_key))
         layout.addWidget(self._action, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
+        self._draw_text()
+
+    def _line(self, name: str, text: str = "") -> QLabel:
+        """One line's own label, under its old name. It is never shown: the text block shows the line."""
+        label = _label(self, f"home-{self._key}-{name}", text)
+        label.hide()
+        return label
 
     # ------------------------------------------------------------ public
 
     def add_body(self, widget: QWidget) -> None:
-        """Put a widget (the tunnel's control buttons) under the card's text."""
+        """Put a widget (the tunnel's Open Settings) under the card's text."""
         self._body.addWidget(widget)
+
+    def add_controls(self, controls: _CardControls) -> None:
+        """Put a runner's Start, Stop and Restart under the card's own lines, and their note and result lines under the
+        buttons, in the card's one text block. The buttons are the card's child, placed over a gap in the block."""
+        if controls.parentWidget() is not self:
+            controls.setParent(self)
+            controls.show()
+        self._controls = controls
+        controls.linesChanged.connect(self._draw_text)
+        self._draw_text()
+
+    @property
+    def busy(self) -> bool:
+        """True while this card's read runs and has not stalled."""
+        return self._busy
 
     def check(self, *, replace: bool = False) -> None:
         """Run this card's read on the thread pool. A read already running is not doubled, and a stalled one is replaced.
 
-        ``replace`` starts a new read even when one is running. The older answer is then dropped when it arrives, because
-        the generation has moved on, so a read that began before the core was found cannot show after the newer one.
+        A check asked while a read runs is queued, not dropped: it runs once that read has answered. ``replace`` starts a
+        new read even when one is running. The older answer is then dropped when it arrives, because the generation has
+        moved on, so a read that began before the core was found, or before a start or stop, cannot show after the newer one.
+
+        A card that already shows an answer keeps it, and its checked line says Checking until the new answer arrives, so
+        a selection in the card stays. A card with no answer yet shows Checking as its headline.
         """
-        if self._work is None or (self._busy and not replace):
+        if self._work is None:
             return
+        if self._busy and not replace:
+            self._queued = True
+            return
+        self._queued = False
         self._busy = True
         self._generation += 1
         generation = self._generation
         self._stall.start()
-        self.show_view(checking_view())
+        if self._has_answer:
+            set_label_text(self._checked, CHECKING_HEADLINE)
+            self._draw_text()
+        else:
+            self.show_view(checking_view())
         submit(self._owner, generation, self._work)
 
     def run_action(self, work: Callable[[], Any], done: Callable[[Any, str], None]) -> None:
@@ -283,40 +643,172 @@ class _Card(QFrame):
         submit(self._action_owner, self._action_generation, work)
 
     def set_note(self, text: str) -> None:
-        self._note.setText(text)
-        self._note.setVisible(bool(text))
+        set_label_text(self._note, text)
+        self._draw_text()
 
     def show_view(self, view: CardView) -> None:
-        """Draw a CardView. Every field is plain text."""
-        self._headline.setText(view.headline)
-        self._detail.setText(view.detail)
-        self._detail.setVisible(bool(view.detail))
-        self._checked.setText(view.checked)
-        self._checked.setVisible(bool(view.checked))
-        self.setProperty("tone", view.tone)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        _clear(self._rows)
-        for index, row in enumerate(view.rows):
-            self._rows.addLayout(self._row(index, row.text, row.detail, row.action, row.action_label))
+        """Draw a CardView. Every field is plain text.
+
+        The text block is set again only when a line changed, and the row buttons are rebuilt only when the rows
+        changed, so a redraw that changes nothing keeps a selection, and one that changes a line keeps it when its text
+        is still there.
+        """
+        set_label_text(self._headline, view.headline)
+        set_label_text(self._detail, view.detail)
+        set_label_text(self._checked, view.checked)
+        if self.property("tone") != view.tone:
+            self.setProperty("tone", view.tone)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        if view.rows != self._shown_rows:
+            self._set_rows(view.rows)
+        self._draw_text()
         self._action_key = view.action
-        self._action.setText(view.action_label)
+        if self._action.text() != view.action_label:
+            self._action.setText(view.action_label)
         self._action.setVisible(bool(view.action))
 
-    def _row(self, index: int, text: str, detail: str, action: str, action_label: str) -> QHBoxLayout:
-        line = QHBoxLayout()
-        block = QVBoxLayout()
-        block.setSpacing(2)
-        block.addWidget(_label(self, f"home-{self._key}-row-{index}", text))
-        if detail:
-            block.addWidget(_label(self, f"home-{self._key}-row-{index}-detail", detail))
-        line.addLayout(block, 1)
-        if action:
-            button = QPushButton(action_label, self)
+    def _set_rows(self, rows: tuple[RowView, ...]) -> None:
+        """Replace the row buttons. An old button is hidden at once, so nothing presses it before it is deleted."""
+        for button in self._row_buttons.values():
+            button.hide()
+            button.deleteLater()
+        self._row_buttons = {}
+        for index, row in enumerate(rows):
+            if not row.action:
+                continue
+            button = QPushButton(row.action_label, self)
             button.setObjectName(f"home-{self._key}-row-{index}-action")
-            button.clicked.connect(lambda _checked=False, key=action: self._on_action(key))
-            line.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
-        return line
+            button.clicked.connect(lambda _checked=False, key=row.action: self._on_action(key))
+            button.resize(button.sizeHint())
+            button.show()
+            self._row_buttons[index] = button
+        self._shown_rows = rows
+
+    def _draw_text(self) -> None:
+        """Draw every line the card shows into its one text block, then put each row's button beside its row.
+
+        The gaps are the ones the lines had as labels of their own: the card's spacing between its lines, ROW_DETAIL_GAP
+        between a row and its detail, and ROW_GAP between rows. A row with a button keeps the button's width and
+        ROW_BUTTON_GAP free at its right, and is at least as tall as its button. A runner's buttons get the card's
+        spacing and the height their rows take at the block's width under the card's own lines, and their note and
+        result lines follow with the spacing they had in the runner's own layout. The block has no minimum width of its
+        own: the buttons wrap instead (_ButtonFlow), and the card keeps room for the widest one (minimumSizeHint).
+        """
+        font = self._text.font()
+        spacing = max(self.layout().spacing(), 0)
+        lines = [
+            BlockLine(text, bold=bold, point_size=size, wrap=wrap)
+            for text, bold, size, wrap in (
+                (self._title.text(), True, 0.0, False),
+                (self._headline.text(), True, _headline_point_size(font), True),
+                (self._detail.text(), False, 0.0, True),
+                (self._checked.text(), False, 0.0, True),
+                (self._note.text(), False, 0.0, True),
+            )
+            if text
+        ]
+        lines = [replace(line, space_after=spacing) for line in lines]
+        if lines and not self._shown_rows:
+            lines[-1] = replace(lines[-1], space_after=0)
+        self._row_paragraphs = []
+        for index, row in enumerate(self._shown_rows):
+            button = self._row_buttons.get(index)
+            right = 0
+            pad = 0
+            if button is not None:
+                hint = button.sizeHint()
+                right = hint.width() + ROW_BUTTON_GAP
+                height = _line_height(row.text, font)
+                if row.detail:
+                    height += ROW_DETAIL_GAP + _line_height(row.detail, font)
+                pad = max(hint.height() - height, 0)
+            after = (ROW_GAP if index < len(self._shown_rows) - 1 else 0) + pad
+            self._row_paragraphs.append(len(lines))
+            if row.detail:
+                lines.append(BlockLine(row.text, space_after=ROW_DETAIL_GAP, right_margin=right))
+                lines.append(BlockLine(row.detail, space_after=after, right_margin=right))
+            else:
+                lines.append(BlockLine(row.text, space_after=after, right_margin=right))
+        controls = self._controls
+        self._control_paragraph = -1
+        if controls is not None:
+            # The gap for the buttons, under the card's own lines, then the lines the buttons' own layout showed under them.
+            # The gap is as tall as the rows the buttons wrap onto at the block's width. A button just shown or hidden
+            # counts, because the rows are read from the buttons themselves.
+            control_lines = controls.lines()
+            inner = max(controls.layout().spacing(), 0)
+            self._controls_height = controls.height_for(self._text.width())
+            gap = spacing + self._controls_height + (inner if control_lines else 0)
+            lines[-1] = replace(lines[-1], space_after=lines[-1].space_after + gap)
+            if control_lines:
+                self._control_paragraph = len(lines)
+            for number, text in enumerate(control_lines):
+                lines.append(BlockLine(text, space_after=inner if number < len(control_lines) - 1 else 0))
+        # A label leaves out its last paragraph's bottom margin, so the room under the last line (for a row's button or
+        # a runner's buttons) is the block's bottom contents margin instead.
+        tail = math.ceil(lines[-1].space_after)
+        lines[-1] = replace(lines[-1], space_after=0)
+        if self._text.contentsMargins().bottom() != tail:
+            self._text.setContentsMargins(0, 0, 0, tail)
+        set_label_text(self._text, block_html(lines, font))
+        if controls is not None and controls.widest() != self._controls_widest:
+            # The widest button shown changed (the fix button came or went), so the card's least width did too.
+            self._controls_widest = controls.widest()
+            self.updateGeometry()
+        self._place_buttons()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        """At least as wide as a runner's widest button and the room the card keeps round its text block.
+
+        The buttons wrap, so they never ask for more than that, and every button still shows whole on the card.
+        """
+        hint = super().minimumSizeHint()
+        controls = self._controls
+        if controls is None:
+            return hint
+        frame = self.contentsMargins()
+        inner = self.layout().contentsMargins()
+        room = frame.left() + frame.right() + inner.left() + inner.right()
+        return hint.expandedTo(QSize(controls.widest() + room, 0))
+
+    def _place_buttons(self) -> None:
+        """Put each row's button at the right edge of the text block, level with the first line of its row, and a
+        runner's buttons across the block, in the gap above their note and result lines (or at the block's foot)."""
+        if not self._row_buttons and self._controls is None:
+            return
+        tops = paragraph_tops(self._text)
+        area = self._text.geometry()
+        for index, button in self._row_buttons.items():
+            if index >= len(self._row_paragraphs) or self._row_paragraphs[index] >= len(tops):
+                continue
+            size = button.sizeHint()
+            top = area.top() + tops[self._row_paragraphs[index]]
+            button.setGeometry(area.right() + 1 - size.width(), top, size.width(), size.height())
+            button.raise_()
+        controls = self._controls
+        if controls is not None:
+            # The gap _draw_text kept for the buttons' rows.
+            height = self._controls_height
+            if 0 <= self._control_paragraph < len(tops):
+                top = tops[self._control_paragraph] - max(controls.layout().spacing(), 0) - height
+            else:
+                top = text_bottom(self._text) + self._text.contentsMargins().bottom() - height
+            controls.setGeometry(area.left(), area.top() + top, area.width(), height)
+            # A button shown or hidden at the same size moves the others without a resize, so the rows are laid out now.
+            controls.layout().activate()
+            controls.raise_()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+        # The text block moved or changed size, so its rows moved: the row buttons and a runner's buttons follow them.
+        # At a new width a runner's buttons can wrap onto another number of rows, and then the gap for them is drawn again.
+        if watched is self._text and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            controls = self._controls
+            if controls is not None and controls.height_for(self._text.width()) != self._controls_height:
+                self._draw_text()
+            else:
+                self._place_buttons()
+        return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------ results (GUI thread)
 
@@ -332,12 +824,16 @@ class _Card(QFrame):
             return
         self._stall.stop()
         self._busy = False
+        self._has_answer = True
         value, failure = payload
         checked = checked_text(datetime.now())
         if failure is not None or self._render is None:
             self.show_view(failed_view(failure or "NoResult", checked))
-            return
-        self.show_view(self._render(value, checked))
+        else:
+            self.show_view(self._render(value, checked))
+        if self._queued:
+            # A check was asked while this read ran, so it runs now and reads after the answer it waited for.
+            self.check()
 
     @Slot(object)
     def _on_action_delivered(self, item: object) -> None:
@@ -357,10 +853,40 @@ class _Card(QFrame):
         if not self._busy:
             return
         self._busy = False
+        # The stalled line is not an answer, so the next check shows Checking as its headline again.
+        self._has_answer = False
         self.show_view(stalled_view(STALL_SECONDS))
 
 
 # ----------------------------------------------------------------- the tab
+
+def _choose_engine_folder(parent: QWidget | None, start_dir: str) -> str:
+    """Ask for the LaTeX engine's folder. Return its path, or "" when the dialog is cancelled. Nothing is started here."""
+    return QFileDialog.getExistingDirectory(parent, ENGINE_FOLDER_DIALOG_TITLE, start_dir)
+
+
+@dataclass(frozen=True)
+class OverleafDeps:
+    """The LaTeX engine calls the Overleaf card makes. The window passes the real ones, and tests pass fakes.
+
+    ``listening(url)`` is whether the engine's port accepts a connection (overleaf_engine.engine_listening). ``folder(settings)``
+    is the folder the owner chose, or None (overleaf_engine.engine_folder). ``start(folder)`` runs the starter
+    (overleaf_engine.start_engine). ``session(url)`` asks the engine once about the Overleaf session, and ``login(url)``
+    opens its login window (overleaf_client.session_status and start_login). ``confirm(parent, title, text)`` asks the
+    owner yes or no (ask_yes_no, where No is the default and Escape is No). The card asks it before Start engine, before
+    a chosen engine folder is saved, and before the launch-time start is turned on. ``wait_seconds`` is how long a start
+    waits for the port. ``choose_folder(parent, start_dir)`` opens the folder picker and returns the folder, or "" when cancelled.
+    """
+
+    listening: Callable[[str], bool]
+    folder: Callable[[Settings], Path | None]
+    start: Callable[[Path], Any]
+    session: Callable[[str], Any]
+    login: Callable[[str], Any]
+    confirm: Callable[[QWidget, str, str], bool] = ask_yes_no
+    wait_seconds: float = START_WAIT_SECONDS
+    choose_folder: Callable[[QWidget | None, str], str] = _choose_engine_folder
+
 
 @dataclass(frozen=True)
 class HomeDeps:
@@ -369,7 +895,8 @@ class HomeDeps:
     ``probe`` is the local server's health probe (DataSources.probe). ``engine`` and ``ports`` are the LaTeX engine
     and slot port reads. ``tunnel`` is the runner's status call. ``actions`` holds the tunnel controls and the Zotero
     dialog's settings. ``zotero`` is the Zotero client module, or a fake with the same three calls. ``tools`` is the
-    one tools read. ``updates`` is the status bar's update notice, which holds the one startup check.
+    one tools read. ``updates`` is the status bar's update notice, which holds the one startup check. ``overleaf`` holds
+    the Overleaf card's LaTeX engine calls (None: the real ones).
     """
 
     store: SettingsStore
@@ -382,6 +909,7 @@ class HomeDeps:
     tools: Callable[[], ToolsStatus] | None = None
     updates: UpdateNoticeBar | None = None
     current_version: str = ""
+    overleaf: OverleafDeps | None = None
 
 
 class HomeTab(QWidget):
@@ -404,6 +932,32 @@ class HomeTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(CHECK_INTERVAL_MS)
         self._timer.timeout.connect(self.check_all)
+        # The hourly Overleaf session check (Amendment I). It runs only while Home is showing and the owner has turned it on.
+        self._showing = False
+        self._overleaf_hourly_timer = QTimer(self)
+        self._overleaf_hourly_timer.setInterval(OVERLEAF_HOURLY_CHECK_MS)
+        self._overleaf_hourly_timer.timeout.connect(self._on_overleaf_hourly_tick)
+        # Each later show reads the quick cards again once this short pause has passed (SHOW_DEBOUNCE_MS).
+        self._show_timer = QTimer(self)
+        self._show_timer.setSingleShot(True)
+        self._show_timer.setInterval(SHOW_DEBOUNCE_MS)
+        self._show_timer.timeout.connect(self._recheck_on_show)
+        # Cards a runner action or a client setup change touched while Home was hidden. They read again on the next show.
+        self._stale: set[_Card] = set()
+        # The Overleaf (LaTeX) card. Its jobs deliver to the shared object under this owner, and one job of each kind runs at
+        # a time (the kind is the job's generation). Nothing is read from the engine until the owner presses a button.
+        self._overleaf_deps = deps.overleaf if deps.overleaf is not None else _default_overleaf_deps()
+        self._overleaf_owner = object()
+        self._overleaf_engine = OVERLEAF_ENGINE_UNCHECKED
+        self._overleaf_url = ""
+        self._overleaf_folder: Path | None = None
+        self._overleaf_session: overleaf_client.SessionStatus | None = None
+        self._overleaf_checked = ""
+        self._overleaf_busy: set[str] = set()
+        self._overleaf_done: dict[str, Callable[[Any, str], None]] = {}
+        # The launch-time checks run once per app launch (run_launch_checks). This flag is set on that one run.
+        self._launch_checks_ran = False
+        shared_delivery().delivered.connect(self._on_overleaf_delivered)
 
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -416,7 +970,7 @@ class HomeTab(QWidget):
         header.addStretch(1)
         self._check_now = QPushButton(CHECK_NOW_TEXT, self)
         self._check_now.setObjectName("home-check-now")
-        self._check_now.clicked.connect(lambda _checked=False: self.check_all())
+        self._check_now.clicked.connect(lambda _checked=False: self._check_now_pressed())
         header.addWidget(self._check_now)
         layout.addLayout(header)
         layout.addWidget(_label(self, "home-intro", INTRO_TEXT))
@@ -493,6 +1047,7 @@ class HomeTab(QWidget):
             on_action=self._on_action,
             parent=container,
         )
+        self._overleaf = self._build_overleaf_card(container)
         for card, row, column in (
             (self._local, 0, 0),
             (self._tunnel, 0, 1),
@@ -500,27 +1055,113 @@ class HomeTab(QWidget):
             (self._zotero, 1, 1),
             (self._updates, 2, 0),
             (self._tools, 2, 1),
+            (self._overleaf, 3, 0),
         ):
             grid.addWidget(card, row, column)
-        grid.setRowStretch(3, 1)
+        grid.setRowStretch(4, 1)
         if deps.updates is not None:
             deps.updates.resultChanged.connect(self._refresh_updates)
         self._refresh_updates()
+        self._refresh_overleaf()
+
+    def _build_overleaf_card(self, container: QWidget) -> _Card:
+        """The Overleaf (LaTeX) card: its status lines, then Check, Log in, Start engine and Choose engine folder in one row
+        under them, then the two switches.
+
+        The buttons are made here, and Start engine is hidden until it is offered, so the widget count does not depend on the
+        engine's state or on whether its folder is known. The switches start checked, the defaults, and showing Home sets them
+        to the saved values. Nothing is read here.
+        """
+        card = _Card("overleaf", OVERLEAF_TITLE, work=None, render=None, on_action=self._on_action, parent=container)
+        row = QWidget(card)
+        row.setObjectName("home-overleaf-buttons")
+        flow = _ButtonFlow(ROW_GAP)
+        row.setLayout(flow)
+        self._overleaf_check_button = self._overleaf_button(
+            row, "home-overleaf-check", "Check", OVERLEAF_CHECK_TOOLTIP, self._on_overleaf_check
+        )
+        self._overleaf_login_button = self._overleaf_button(
+            row, "home-overleaf-login", "Log in", OVERLEAF_LOGIN_TOOLTIP, self._on_overleaf_login
+        )
+        self._overleaf_start_button = self._overleaf_button(
+            row, "home-overleaf-start-engine", "Start engine", OVERLEAF_START_TOOLTIP, self._on_overleaf_start
+        )
+        self._overleaf_choose_button = self._overleaf_button(
+            row, "home-overleaf-choose-folder", CHOOSE_FOLDER_TEXT, CHOOSE_FOLDER_TOOLTIP, self._on_overleaf_choose_folder
+        )
+        for button in (
+            self._overleaf_check_button,
+            self._overleaf_login_button,
+            self._overleaf_start_button,
+            self._overleaf_choose_button,
+        ):
+            flow.addWidget(button)
+        self._overleaf_start_button.setVisible(False)
+        card.add_body(row)
+        card.add_body(self._build_overleaf_switches(card))
+        return card
+
+    def _build_overleaf_switches(self, card: QWidget) -> QWidget:
+        """The two Overleaf card switches: start the engine when Meridian opens, and check the session when it opens."""
+        box = QWidget(card)
+        box.setObjectName("home-overleaf-switches")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._overleaf_auto_start_box = self._overleaf_switch(
+            box, "home-overleaf-auto-start", AUTO_START_LABEL, AUTO_START_TOOLTIP, "engine_auto_start"
+        )
+        self._overleaf_auto_check_box = self._overleaf_switch(
+            box, "home-overleaf-auto-check", AUTO_CHECK_LABEL, AUTO_CHECK_TOOLTIP, "overleaf_auto_check"
+        )
+        # The hourly check is off by default. Its box is connected here, and showing Home sets it to the saved value.
+        self._overleaf_hourly_box = QCheckBox(HOURLY_CHECK_LABEL, box)
+        self._overleaf_hourly_box.setObjectName("home-overleaf-hourly")
+        self._overleaf_hourly_box.setToolTip(HOURLY_CHECK_TOOLTIP)
+        self._overleaf_hourly_box.toggled.connect(self._on_overleaf_hourly)
+        layout.addWidget(self._overleaf_auto_start_box)
+        layout.addWidget(self._overleaf_auto_check_box)
+        layout.addWidget(self._overleaf_hourly_box)
+        return box
+
+    def _overleaf_switch(self, parent: QWidget, name: str, text: str, tooltip: str, key: str) -> QCheckBox:
+        box = QCheckBox(text, parent)
+        box.setObjectName(name)
+        box.setToolTip(tooltip)
+        # Checked is the default. The signal is connected after that, so setting the default writes nothing.
+        box.setChecked(True)
+        box.toggled.connect(lambda checked, key=key: self._on_overleaf_switch(key, checked))
+        return box
+
+    @staticmethod
+    def _overleaf_button(parent: QWidget, name: str, text: str, tooltip: str, on_click: Callable[[], None]) -> QPushButton:
+        button = QPushButton(text, parent)
+        button.setObjectName(name)
+        button.setToolTip(tooltip)
+        button.clicked.connect(lambda _checked=False: on_click())
+        return button
 
     def _controls_row(self) -> None:
-        """The tunnel's Start, Stop and Restart (ScopeControls, which asks first) and an Open Settings button when they are off."""
+        """The tunnel's and the local server's Start, Stop and Restart (ScopeControls, which asks first), and an Open
+        Settings button on the Tunnel card when its buttons are off."""
         deps = self._deps
         if deps.actions is None:
             return
-        self._tunnel_controls = ScopeControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
-        self._tunnel_controls.actionFinished.connect(self._tunnel.check)
-        self._tunnel.add_body(self._tunnel_controls)
+        # Their note and result lines are lines of the card's own text block (_CardControls), so one drag copies them too.
+        self._tunnel_controls = _CardControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
+        self._tunnel.add_controls(self._tunnel_controls)
         self._tunnel_settings = QPushButton(OPEN_SETTINGS_TEXT, self._tunnel)
         self._tunnel_settings.setObjectName("home-tunnel-settings")
         self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
         self._tunnel.add_body(self._tunnel_settings)
+        # The same local controls Settings has, with the same confirmation. Settings keeps its own.
+        self._local_controls = _CardControls(SCOPE_LOCAL, deps.actions, local_gate, prefix="home-local", parent=self._local)
+        self._local.add_controls(self._local_controls)
         # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
         deps.actions.coreChanged.connect(self._on_core_changed)
+        # A Start, Stop or Restart here or in Settings, each check after a start, and a client setup change. Home only
+        # reads on these. It never emits coreChanged back, so nothing loops.
+        deps.actions.runnerStateChanged.connect(self._on_runner_state_changed)
+        deps.actions.clientSetupChanged.connect(self._on_client_setup_changed)
 
     def _on_core_changed(self) -> None:
         """The core search finished, or the core setup was saved: the tunnel buttons and the Tunnel and Tools cards read again.
@@ -535,23 +1176,74 @@ class HomeTab(QWidget):
         self._tunnel.check(replace=True)
         self._tools.check(replace=True)
 
+    @Slot()
+    def _on_runner_state_changed(self) -> None:
+        """A runner action or a start check finished, here or in Settings: Local, Tunnel and Tools read again."""
+        self._mark_changed((self._local, self._tunnel, self._tools))
+
+    @Slot()
+    def _on_client_setup_changed(self) -> None:
+        """A client setup Apply or Remove finished in Settings: Tools reads again."""
+        self._mark_changed((self._tools,))
+
+    def _mark_changed(self, cards: Sequence[_Card]) -> None:
+        """Read these cards again, replacing any read that began before the change. While Home is hidden, they wait for
+        the next show, which reads them the same way."""
+        self._stale.update(cards)
+        if self.isVisible():
+            self._read_stale()
+
+    def _read_stale(self) -> None:
+        stale, self._stale = self._stale, set()
+        for card in self._cards():
+            if card in stale:
+                card.check(replace=True)
+
+    def _cards(self) -> tuple[_Card, ...]:
+        """The cards that run a read, in their order on the tab."""
+        return (self._local, self._tunnel, self._services, self._zotero, self._tools)
+
     def refresh_tunnel_gate(self) -> None:
-        """Read the saved core setup again. The tunnel buttons are on only when the gate allows, and Open Settings shows when they are off."""
+        """Read the saved core setup again. The tunnel and local buttons are on only when their gate allows, and Open
+        Settings shows when the tunnel buttons are off."""
         deps = self._deps
         if deps.actions is None:
             return
         self._tunnel_controls.refresh_enabled()
+        self._local_controls.refresh_enabled()
         enabled, _note = tunnel_gate(deps.actions.core())
         self._tunnel_settings.setVisible(not enabled)
 
     # ------------------------------------------------------------ checks
 
     def check_all(self) -> None:
-        """Run every card's check now. The Updates card reads the one startup check, so it makes no request."""
+        """Run every card's check now. The Updates card reads the one startup check, so it makes no request.
+
+        A card a change touched replaces its running read. Any other card that is still reading queues this check.
+        """
         self._last_run = time.monotonic()
-        for card in (self._local, self._tunnel, self._services, self._zotero, self._tools):
-            card.check()
+        stale, self._stale = self._stale, set()
+        for card in self._cards():
+            card.check(replace=card in stale)
         self._refresh_updates()
+
+    @Slot()
+    def _recheck_on_show(self) -> None:
+        """Home was shown again within five minutes. The quick cards read again, and Tools only after a change.
+
+        A quick card that is still reading keeps that read, because it began moments ago. A card a change touched
+        replaces its read.
+        """
+        if not self.isVisible():
+            return
+        stale, self._stale = self._stale, set()
+        for card in (self._local, self._tunnel, self._services, self._zotero):
+            if card in stale:
+                card.check(replace=True)
+            elif not card.busy:
+                card.check()
+        if self._tools in stale:
+            self._tools.check(replace=True)
 
     def _refresh_updates(self) -> None:
         deps = self._deps
@@ -609,26 +1301,341 @@ class HomeTab(QWidget):
             self._zotero.set_note(f"{line}\n{API_READY_TEXT if ready else API_NOT_READY_TEXT}")
         self._zotero.check()
 
+    def _check_now_pressed(self) -> None:
+        """Check now runs every card's check, and looks at the LaTeX engine's port again. It sends no Overleaf request."""
+        self.check_all()
+        self._check_overleaf_engine()
+
+    # ------------------------------------------------------------ the Overleaf (LaTeX) card
+
+    def _run_overleaf(self, kind: str, work: Callable[[], Any], done: Callable[[Any, str], None]) -> bool:
+        """Run one Overleaf job on the thread pool. One job of each kind runs at a time; a second one is not started.
+
+        ``done`` receives (value, failure) on the GUI thread, where failure is a class name or "".
+        """
+        if kind in self._overleaf_busy:
+            return False
+        self._overleaf_busy.add(kind)
+        self._overleaf_done[kind] = done
+        submit(self._overleaf_owner, kind, work)
+        self._refresh_overleaf()
+        return True
+
+    @Slot(object)
+    def _on_overleaf_delivered(self, item: object) -> None:
+        # Only this card's own jobs are kept. The kind names the job, so each answer reaches its own handler.
+        if not isinstance(item, Delivered) or item.owner is not self._overleaf_owner:
+            return
+        kind, (value, failure) = item.value
+        self._overleaf_busy.discard(kind)
+        done = self._overleaf_done.pop(kind, None)
+        if done is not None:
+            done(value, failure or "")
+        self._refresh_overleaf()
+
+    def _refresh_overleaf(self) -> None:
+        """Draw the card's status from what it holds, and show or enable its buttons to match. A launch-time check reads
+        as Checking while it runs, and Start engine is held while a start runs, by hand or at launch."""
+        busy = self._overleaf_busy
+        launching = "launch" in busy or "launch_start" in busy
+        facts = OverleafFacts(
+            engine=self._overleaf_engine,
+            session=self._overleaf_session,
+            checked=self._overleaf_checked,
+            checking="session" in busy or launching,
+            port=port_text(self._overleaf_url),
+        )
+        self._overleaf.show_view(overleaf_view(facts))
+        self._overleaf_check_button.setEnabled("session" not in busy)
+        self._overleaf_login_button.setEnabled("login" not in busy)
+        starting = "start" in busy or "launch_start" in busy
+        self._overleaf_start_button.setEnabled(not starting)
+        offered = self._overleaf_engine == OVERLEAF_ENGINE_DOWN and self._overleaf_folder is not None
+        self._overleaf_start_button.setVisible(offered)
+
+    def _check_overleaf_engine(self) -> None:
+        """Look at the engine's port, and whether its starter folder is known. No request goes to the engine or to Overleaf."""
+        self._run_overleaf(
+            "engine",
+            partial(_overleaf_probe, self._deps.store, self._overleaf_deps),
+            self._overleaf_engine_done,
+        )
+
+    def _overleaf_engine_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, OverleafProbe):
+            self._overleaf_engine = OVERLEAF_ENGINE_FAILED
+            self._overleaf_folder = None
+            return
+        self._overleaf_url = value.url
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if value.listening else OVERLEAF_ENGINE_DOWN
+        self._overleaf_folder = value.folder
+
+    def _on_overleaf_check(self) -> None:
+        """Check: asks the engine once about the saved session. A press is one of the card's Overleaf requests. The hourly
+        check (Amendment I) makes the same request on its own timer, and only when the owner has turned it on."""
+        self._run_overleaf(
+            "session",
+            partial(_overleaf_session_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_session_done,
+        )
+
+    def _overleaf_session_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, overleaf_client.SessionStatus):
+            self._overleaf_session = overleaf_client.SessionStatus(
+                overleaf_client.STATE_ERROR,
+                error=SESSION_CHECK_FAILED_TEMPLATE.format(failure or "unknown error"),
+            )
+        else:
+            self._overleaf_session = value
+        self._overleaf_checked = datetime.now().strftime(TIME_FORMAT)
+        if self._overleaf_session.state == overleaf_client.STATE_ENGINE_NOT_RUNNING:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+        elif failure == "":
+            # The engine answered, so it is running. A failed job says nothing about the engine, so the state stays.
+            self._overleaf_engine = OVERLEAF_ENGINE_RUNNING
+
+    def _on_overleaf_login(self) -> None:
+        """Log in: asks the engine to open its login window. The owner signs in there, then presses Check."""
+        self._run_overleaf(
+            "login",
+            partial(_overleaf_login_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_login_done,
+        )
+
+    def _overleaf_login_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, overleaf_client.LoginStatus):
+            self._overleaf.set_note(LOGIN_FAILED_TEXT)
+            return
+        if value.reason == overleaf_client.REASON_ENGINE_NOT_RUNNING:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+        elif value.started or value.reason in overleaf_client.LOGIN_REASONS:
+            self._overleaf_engine = OVERLEAF_ENGINE_RUNNING
+        self._overleaf.set_note(overleaf_login_text(value))
+
+    def _on_overleaf_start(self) -> None:
+        """Start engine: asks first, and No is the default. Only a yes runs the engine's starter, which then runs in the
+        background, and the card waits a few seconds for the engine's port."""
+        folder = self._overleaf_folder
+        if folder is None:
+            return
+        question = engine_start_question(address_text(self._overleaf_url) or "the engine address", str(folder))
+        if not self._overleaf_deps.confirm(self, START_TITLE, question):
+            self._overleaf.set_note(START_CANCELLED_TEXT)
+            return
+        self._overleaf.set_note(START_WORKING_TEXT)
+        self._run_overleaf(
+            "start",
+            partial(_overleaf_start_read, self._deps.store, self._overleaf_deps, folder),
+            self._overleaf_start_done,
+        )
+
+    def _overleaf_start_done(self, value: Any, failure: str) -> None:
+        if failure or not isinstance(value, tuple) or len(value) != 2:
+            self._overleaf_engine = OVERLEAF_ENGINE_DOWN
+            self._overleaf.set_note(START_FAILED_TEMPLATE.format(failure or "no result"))
+            return
+        running, reason = value
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
+        self._overleaf.set_note(overleaf_start_text(bool(running), str(reason), self._overleaf_deps.wait_seconds))
+
+    # ------------------------------------------------------------ the Overleaf (LaTeX) card: launch, switches and folder
+
+    def run_launch_checks(self) -> None:
+        """The launch-time checks. app.py calls this once, after the window shows. The first call runs them; a later call,
+        a show or the Home timer does nothing, so they never repeat within a launch.
+
+        Each step runs only when its own switch is on, and nothing here asks the owner. The engine is started when it is
+        down, and the folder the owner saved is the folder the owner confirmed (engine_auto_start, Amendment G). The saved
+        session is checked once when the engine is running (overleaf_auto_check). With both switches off, nothing runs.
+        """
+        if self._launch_checks_ran:
+            return
+        self._launch_checks_ran = True
+        settings = self._deps.store.load().settings
+        if not (settings.engine_auto_start or settings.overleaf_auto_check):
+            return
+        self._run_overleaf(
+            "launch",
+            partial(_overleaf_probe, self._deps.store, self._overleaf_deps),
+            self._overleaf_launch_probed,
+        )
+
+    def _overleaf_launch_probed(self, value: Any, failure: str) -> None:
+        """The engine's port and folder, read at launch. Then the one session check if the engine is up, or else the start."""
+        self._overleaf_engine_done(value, failure)
+        if failure or not isinstance(value, OverleafProbe):
+            return
+        settings = self._deps.store.load().settings
+        if value.listening:
+            self._check_session_at_launch()
+            return
+        if not settings.engine_auto_start:
+            return
+        # The launch start uses only the folder the owner confirmed in this card (Amendment G, rule 3). No folder saved, or a
+        # saved one that no longer holds the starter, is the line the card has always shown. A folder saved without the
+        # confirmation is not used, and the card says why.
+        if value.folder is None or not settings.engine_folder:
+            self._overleaf.set_note(ENGINE_FOLDER_NOT_SET_TEXT)
+            return
+        if settings.engine_folder != settings.confirmed_engine_folder:
+            self._overleaf.set_note(ENGINE_FOLDER_NOT_CONFIRMED_TEXT)
+            return
+        self._overleaf.set_note(LAUNCH_STARTING_TEXT)
+        self._run_overleaf(
+            "launch_start",
+            partial(_overleaf_start_read, self._deps.store, self._overleaf_deps, value.folder),
+            self._overleaf_launch_started,
+        )
+
+    def _overleaf_launch_started(self, value: Any, failure: str) -> None:
+        """The launch-time start has run and waited for the port. The engine's state and the line follow, and the session is
+        checked once when the engine is up."""
+        running, reason = False, failure
+        if not failure and isinstance(value, tuple) and len(value) == 2:
+            running, reason = bool(value[0]), str(value[1])
+        self._overleaf_engine = OVERLEAF_ENGINE_RUNNING if running else OVERLEAF_ENGINE_DOWN
+        self._overleaf.set_note(launch_start_text(running, reason))
+        if running:
+            self._check_session_at_launch()
+
+    def _check_session_at_launch(self) -> None:
+        """The launch-time session check, when its switch is on. It is the one Overleaf request the launch makes."""
+        if not self._deps.store.load().settings.overleaf_auto_check:
+            return
+        self._run_overleaf(
+            "session",
+            partial(_overleaf_session_read, self._deps.store, self._overleaf_deps),
+            self._overleaf_session_done,
+        )
+
+    def _sync_overleaf_options(self) -> None:
+        """Set the two switches to the saved values. Their signals are blocked meanwhile, so nothing is written."""
+        settings = self._deps.store.load().settings
+        pairs = (
+            (self._overleaf_auto_start_box, settings.engine_auto_start),
+            (self._overleaf_auto_check_box, settings.overleaf_auto_check),
+            (self._overleaf_hourly_box, settings.overleaf_check_interval_minutes == OVERLEAF_HOURLY_CHECK_MINUTES),
+        )
+        for box, value in pairs:
+            box.blockSignals(True)
+            box.setChecked(value)
+            box.blockSignals(False)
+
+    def _on_overleaf_switch(self, key: str, checked: bool) -> None:
+        """A switch was clicked. Turning the launch-time start on asks first, and No leaves it off and saves nothing. Any other
+        click is saved at once, and every other field is kept. A write that fails says so, and the switch goes back to the
+        saved value."""
+        store = self._deps.store
+        if key == "engine_auto_start" and checked:
+            settings = store.load().settings
+            question = auto_start_question(settings.engine_folder, settings.confirmed_engine_folder)
+            if not self._overleaf_deps.confirm(self, AUTO_START_CONFIRM_TITLE, question):
+                self._overleaf.set_note(AUTO_START_NOT_TURNED_ON_TEXT)
+                self._sync_overleaf_options()
+                return
+        try:
+            store.save(replace(store.load().settings, **{key: checked}))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            self._sync_overleaf_options()
+
+    def _sync_overleaf_timer(self) -> None:
+        """Run the hourly Overleaf check only while Home is showing and the saved setting is on (Amendment I). The timer
+        starts nothing. It stops when Home hides, or when the setting goes off."""
+        on = self._deps.store.load().settings.overleaf_check_interval_minutes == OVERLEAF_HOURLY_CHECK_MINUTES
+        if on and self._showing:
+            if not self._overleaf_hourly_timer.isActive():
+                self._overleaf_hourly_timer.start()
+        else:
+            self._overleaf_hourly_timer.stop()
+
+    def _on_overleaf_hourly_tick(self) -> None:
+        """One hourly check. It is the same single request as a Check press. It runs only while Home is showing and the saved
+        setting is still on, so a setting changed by hand stops it. Nothing is started, and when the engine is not running
+        nothing is sent to Overleaf."""
+        if not self._showing:
+            return
+        if self._deps.store.load().settings.overleaf_check_interval_minutes != OVERLEAF_HOURLY_CHECK_MINUTES:
+            self._overleaf_hourly_timer.stop()
+            return
+        self._on_overleaf_check()
+
+    def _on_overleaf_hourly(self, checked: bool) -> None:
+        """The hourly check box. Turning it on asks first, and No (the default) leaves it off and saves nothing. Turning it off
+        needs no dialog. A write that fails says so, and the box goes back to the saved value."""
+        store = self._deps.store
+        if checked and not self._overleaf_deps.confirm(self, HOURLY_CHECK_CONFIRM_TITLE, HOURLY_CHECK_CONFIRM_QUESTION):
+            self._overleaf.set_note(HOURLY_CHECK_NOT_TURNED_ON_TEXT)
+            self._sync_overleaf_options()
+            return
+        interval = OVERLEAF_HOURLY_CHECK_MINUTES if checked else 0
+        try:
+            store.save(replace(store.load().settings, overleaf_check_interval_minutes=interval))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            self._sync_overleaf_options()
+            return
+        self._sync_overleaf_timer()
+
+    def _on_overleaf_choose_folder(self) -> None:
+        """Choose engine folder: the folder is saved only when it holds the engine's starter and the owner confirms it. A yes
+        saves it as both the engine folder and the confirmed folder. No, or no starter, saves nothing. Choosing starts nothing."""
+        settings = self._deps.store.load().settings
+        chosen = self._overleaf_deps.choose_folder(self, settings.engine_folder)
+        if not chosen:
+            return
+        if not overleaf_engine.has_starter(Path(chosen)):
+            self._overleaf.set_note(NO_STARTER_CHOSEN_TEXT)
+            return
+        starter = str(Path(chosen) / overleaf_engine.STARTER_NAME)
+        if not self._overleaf_deps.confirm(self, ENGINE_FOLDER_CONFIRM_TITLE, engine_folder_question(starter)):
+            self._overleaf.set_note(ENGINE_FOLDER_CONFIRM_CANCELLED_TEXT)
+            return
+        try:
+            store = self._deps.store
+            store.save(replace(store.load().settings, engine_folder=chosen, confirmed_engine_folder=chosen))
+        except (OSError, ValueError):
+            self._overleaf.set_note(OPTION_NOT_SAVED_TEXT)
+            return
+        self._overleaf_folder = Path(chosen)
+        self._overleaf.set_note(ENGINE_FOLDER_SAVED_TEXT)
+        self._refresh_overleaf()
+
     # ------------------------------------------------------------ events
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
+        self._showing = True
         self._timer.start()
         self.refresh_tunnel_gate()
+        self._sync_overleaf_options()
         stale = self._last_run is None or time.monotonic() - self._last_run >= CHECK_INTERVAL_SECONDS
         if stale:
+            self._show_timer.stop()
             self.check_all()
+        else:
+            self._show_timer.start()
+        # The engine's port is looked at each time Home is shown. The Overleaf session is not read here.
+        self._check_overleaf_engine()
+        # The hourly check waits for its own interval. A show never runs it.
+        self._sync_overleaf_timer()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt naming
         super().hideEvent(event)
+        self._showing = False
         self._timer.stop()
+        self._show_timer.stop()
+        self._overleaf_hourly_timer.stop()
 
 
 __all__ = [
     "CHECK_INTERVAL_MS",
     "CHECK_INTERVAL_SECONDS",
     "CHECK_NOW_TEXT",
+    "SHOW_DEBOUNCE_MS",
+    "START_WAIT_SECONDS",
     "STALL_SECONDS",
     "HomeDeps",
     "HomeTab",
+    "OverleafDeps",
 ]

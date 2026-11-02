@@ -1,19 +1,28 @@
-"""LaTeX engine panel for the Writing tab: one probe of the local engine, with both versions shown.
+"""LaTeX panel: Overleaf in the browser first, then one probe of the local backup engine, with both versions shown.
+
+The normal way to use LaTeX is Overleaf in the browser, so the panel leads with that. The local
+engine is an optional backup copy for raw .tex files and local projects, off unless the owner
+turns it on, and the rest of the panel is about that backup.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The panel makes no
-request when it is built. It probes when it is first shown and again when Check again
+request when it is built. It probes each time it is shown, so an engine started while the
+panel was hidden reads as running when the panel comes back, and again when Check again
 is pressed. The probe runs on the thread pool, and the engine address comes from the
-settings file, so the UI thread never blocks. Results are plain text (PlainText labels),
+settings file, so the UI thread never blocks. Results are plain text (a PlainText label),
 so engine text is never read as HTML.
 
 The panel shows running or not running, the engine and extension versions when the engine
-answers, what the probe found, and one sentence on how to start the engine.
+answers, what the probe found, and how to start the engine. The panel never starts it.
+
+All of that text is one TextBlock: one selectable label that holds every line. A drag cannot
+cross from one QLabel to the next, so a left-button drag across the block highlights all of it,
+and Ctrl+C copies all of it. The Services page uses the same TextBlock for its rows.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,15 +35,13 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
-UNCHECKED_TEXT = "LaTeX engine: not checked yet"
-CHECKING_TEXT = "LaTeX engine: checking..."
-CONNECTED_TEXT = "LaTeX engine: running."
-NOT_CONNECTED_TEXT = "LaTeX engine: not running."
+UNCHECKED_TEXT = "Local backup engine: not checked yet"
+CHECKING_TEXT = "Local backup engine: checking..."
+CONNECTED_TEXT = "Local backup engine: running."
+NOT_CONNECTED_TEXT = "Local backup engine: not running."
 VERSION_UNAVAILABLE = "not available"
 FAILED_TEXT = "The check failed unexpectedly ({})."
-UNCHECKED_START = (
-    "start the LaTeX engine you installed on this computer if it is not running, then press Check again."
-)
+UNCHECKED_START = f"{latex_client.BACKUP_START} Then press Check again."
 
 
 @dataclass(frozen=True)
@@ -45,12 +52,44 @@ class _Probe:
     status: EngineStatus | None
 
 
-def _label(parent: QWidget, name: str, text: str) -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return make_selectable(label)
+class TextBlock(QLabel):
+    """Lines of plain text that belong together, in one selectable label.
+
+    A mouse drag cannot cross from one QLabel to the next, so a block built from one label per line can only be
+    copied a line at a time. One label holds every line instead: a left-button drag across it highlights the whole
+    block, and Ctrl+C copies all of it, one line per line. Each line has a key, and an empty line is left out. The
+    label's text is set only when it changes, so a redraw that changes nothing keeps a selection.
+    """
+
+    def __init__(self, parent: QWidget | None, name: str, lines: Iterable[tuple[str, str]]) -> None:
+        super().__init__(parent)
+        self.setObjectName(name)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        make_selectable(self)
+        self._lines: dict[str, str] = dict(lines)
+        self._render()
+
+    def keys(self) -> tuple[str, ...]:
+        """The keys of the block's lines, in the order they are shown."""
+        return tuple(self._lines)
+
+    def line(self, key: str) -> str:
+        """The text of one line. Empty when that line is not shown."""
+        return self._lines[key]
+
+    def set_lines(self, lines: Mapping[str, str]) -> None:
+        """Set some of the lines at once. Every key must be one the block was built with."""
+        unknown = sorted(set(lines) - set(self._lines))
+        if unknown:
+            raise KeyError(f"no such line in {self.objectName()}: {', '.join(unknown)}")
+        self._lines.update(lines)
+        self._render()
+
+    def _render(self) -> None:
+        text = "\n".join(line for line in self._lines.values() if line)
+        if self.text() != text:
+            self.setText(text)
 
 
 def _probe(settings: SettingsStore, client: Any) -> _Probe:
@@ -78,30 +117,25 @@ def extension_version_text(status: EngineStatus | None) -> str:
 
 
 def engine_start_text(status: EngineStatus | None, port: str) -> str:
-    """One plain sentence on how to start the engine, for what the probe found.
+    """How to start the local backup engine, for what the probe found.
 
-    ``port`` is the port the probe checked. It is used only for the states that name it.
+    The backup is off unless the owner turns it on, so not running is offered as a choice, not as a fault. ``port`` is
+    the port the probe checked. It is used only for the states that name it.
     """
     if status is None:
-        return "start the LaTeX engine you installed on this computer, then press Check again."
+        return f"{latex_client.BACKUP_START} Then press Check again."
     if status.connected:
         return "it is already running, so there is nothing to start."
     if status.state == latex_client.ENGINE_NOT_RUNNING:
-        return (
-            f"start the LaTeX engine you installed on this computer so it listens on port {port}, "
-            "then press Check again."
-        )
+        return f"{latex_client.BACKUP_START} Then press Check again to check port {port}."
     if status.state == latex_client.ENGINE_NOT_ANSWERING:
-        return (
-            f"stop the other program on port {port}, then start the LaTeX engine you installed "
-            "and press Check again."
-        )
+        return f"stop the other program on port {port}, then {latex_client.START_HELP} Then press Check again."
     if status.message == latex_client.NOT_LOOPBACK_MESSAGE:
         return (
             "change the engine address in the desktop settings to one on this computer, "
             "such as http://127.0.0.1:8471, then press Check again."
         )
-    return "check that the LaTeX engine you installed is running on this computer, then press Check again."
+    return "check that the local backup engine is running on this computer, then press Check again."
 
 
 class _ProbeJob(QRunnable):
@@ -131,7 +165,8 @@ class _ProbeJob(QRunnable):
 
 
 class LatexPanel(QWidget):
-    """The LaTeX section of the Writing tab: running or not, with both versions side by side."""
+    """The LaTeX section: Overleaf in the browser first, then the local backup engine (running or not, both versions),
+    all in one selectable block of text."""
 
     def __init__(
         self,
@@ -143,7 +178,6 @@ class LatexPanel(QWidget):
         self.setObjectName("latex-panel")
         self._settings = settings_store
         self._client = client
-        self._probed_on_show = False
         self._probing = False
         # Identifies this panel's probes. A plain object, so a job can hold it without holding the panel.
         self._owner = object()
@@ -157,22 +191,22 @@ class LatexPanel(QWidget):
     def _build(self) -> None:
         layout = QVBoxLayout(self)
 
-        self._status = _label(self, "latex-status", UNCHECKED_TEXT)
-        layout.addWidget(self._status)
-
-        self._detail = _label(self, "latex-detail", "")
-        layout.addWidget(self._detail)
-
-        self._start = _label(self, "latex-start", f"How to start: {UNCHECKED_START}")
-        layout.addWidget(self._start)
-
-        versions = QHBoxLayout()
-        self._engine_version = _label(self, "latex-engine-version", engine_version_text(None))
-        self._extension_version = _label(self, "latex-extension-version", extension_version_text(None))
-        versions.addWidget(self._engine_version)
-        versions.addWidget(self._extension_version)
-        versions.addStretch(1)
-        layout.addLayout(versions)
+        # Every line is in one label, so one drag selects them all. The keys name the lines for set_lines and tests.
+        # Overleaf in the browser comes first, because that is the normal way. The rest is about the local backup.
+        self._text = TextBlock(
+            self,
+            "latex-text",
+            (
+                ("latex-lead", latex_client.OVERLEAF_LEAD),
+                ("latex-backup", latex_client.BACKUP_NOTE),
+                ("latex-status", UNCHECKED_TEXT),
+                ("latex-detail", ""),
+                ("latex-engine-version", engine_version_text(None)),
+                ("latex-extension-version", extension_version_text(None)),
+                ("latex-start", f"How to start: {UNCHECKED_START}"),
+            ),
+        )
+        layout.addWidget(self._text)
 
         action_row = QHBoxLayout()
         self._check_button = QPushButton("Check again", self)
@@ -187,9 +221,8 @@ class LatexPanel(QWidget):
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
-        if not self._probed_on_show:
-            self._probed_on_show = True
-            self._start_probe()
+        # Every show checks again. A probe already running is not started twice (see _start_probe).
+        self._start_probe()
 
     @Slot()
     def _on_check_clicked(self) -> None:
@@ -202,8 +235,7 @@ class LatexPanel(QWidget):
         self._generation += 1
         generation = self._generation
         self._check_button.setEnabled(False)
-        self._status.setText(CHECKING_TEXT)
-        self._detail.setText("")
+        self._text.set_lines({"latex-status": CHECKING_TEXT, "latex-detail": ""})
         # The job holds the probe's inputs (the settings store and the client), this panel's owner token and the
         # shared delivery object. It never holds the panel, and the deliver closure captures no widget.
         work = functools.partial(_probe, self._settings, self._client)
@@ -236,11 +268,15 @@ class LatexPanel(QWidget):
 
     def _show_result(self, status: EngineStatus | None, detail: str, port: str) -> None:
         connected = status is not None and status.connected
-        self._status.setText(CONNECTED_TEXT if connected else NOT_CONNECTED_TEXT)
-        self._detail.setText(detail)
-        self._start.setText(f"How to start: {engine_start_text(status, port)}")
-        self._engine_version.setText(engine_version_text(status))
-        self._extension_version.setText(extension_version_text(status))
+        self._text.set_lines(
+            {
+                "latex-status": CONNECTED_TEXT if connected else NOT_CONNECTED_TEXT,
+                "latex-detail": detail,
+                "latex-engine-version": engine_version_text(status),
+                "latex-extension-version": extension_version_text(status),
+                "latex-start": f"How to start: {engine_start_text(status, port)}",
+            }
+        )
 
 
 __all__ = [
@@ -248,6 +284,7 @@ __all__ = [
     "NOT_CONNECTED_TEXT",
     "UNCHECKED_TEXT",
     "LatexPanel",
+    "TextBlock",
     "engine_start_text",
     "engine_version_text",
     "extension_version_text",

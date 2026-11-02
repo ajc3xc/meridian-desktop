@@ -2,14 +2,18 @@
 
 Status: CONFIRMED by the owner in chat on 2026-10-22, with Amendments A to E at the end of this file.
 Amendment F, also at the end, was accepted by the owner in chat on 2026-10-23.
+Amendment G, also at the end, was accepted by the owner in chat on 2026-10-26.
+Amendment H, also at the end, was accepted by the owner in chat on 2026-10-26.
+Amendment I, also at the end, was accepted by the owner in chat on 2026-10-26, as an optional setting that is off by default.
 Written by the desktop maintainer at the owner's request (sprint item 84d8fd28 is not in the
 repository).
 
 ## Rules
 
-1. Start and stop are user actions only, except the three launch-time starts in the Amendment
-   (Zotero and the local server, amendments A and B, and the hosted tunnel, amendment G), each off by
-   default. Nothing starts on a timer or from any request that arrives over the network.
+1. Start and stop are user actions only, except the launch-time starts in the Amendments: A and B
+   (Zotero and the local server, each off by default), the hosted tunnel (Amendment G, requested
+   2026-10-31, off by default), and the LaTeX engine start (Amendment G, accepted 2026-10-26, on by
+   default). Nothing starts on a timer or from any request that arrives over the network.
 2. Each action shows a confirmation dialog that names the exact command, the scope and the
    working folder. Cancel changes nothing.
 3. The command is fixed: `python -m meridian.local_runner` with the subcommands `start`,
@@ -36,6 +40,9 @@ repository).
 - [x] Read this contract and agree to it, with Amendments A to E.
 - Confirmed by the owner in chat on: 2026-10-22
 - Amendment F accepted by the owner in chat on: 2026-10-23
+- Amendment G accepted by the owner in chat on: 2026-10-26
+- Amendment H accepted by the owner in chat on: 2026-10-26
+- [x] Amendment I, proposed on 2026-10-26, accepted by the owner in chat on: 2026-10-26, as an optional setting, off by default
 
 Once confirmed, the owner's sprint item 84d8fd28 is recorded done, and the start, stop and
 restart controls may be built to this contract.
@@ -90,3 +97,98 @@ G. Hosted tunnel at launch. The setting `tunnel_autostart` (default false) turns
    off. Turning it off saves at once and asks nothing. Saving a core checkout or Python path later turns
    this switch off, as it does the two in Amendments A and B, and the owner must confirm it again.
    Every launch start in G is logged as rule E says.
+
+## Amendment G (accepted by the owner in chat on 2026-10-26)
+
+G. The LaTeX (Overleaf) engine has its own launch-time start. It is a third launch-time start, separate
+   from A and B, and rule 1 allows it on the terms below.
+   1. `engine_auto_start` defaults to `true`, by owner decision. When the desktop launches with it on, the
+      engine's port is not answering, and the owner has confirmed an engine folder under 3, the desktop
+      runs that folder's `start_server_hidden.vbs` once. It runs as an argument list through
+      `wscript.exe //B //nologo`, with no shell, and waits for the port for at most the 30 seconds that
+      rule 5 allows. The desktop never stops or restarts the engine.
+   2. With no confirmed folder, the launch start is skipped and the card says so. With the switch off,
+      nothing starts at launch.
+   3. Choosing the engine folder in the Overleaf card shows the confirmation dialog from rule 2, which
+      names the exact `start_server_hidden.vbs` path and the command. Confirming saves the folder and
+      records it as `confirmed_engine_folder`. Cancel saves nothing. The launch start uses only the
+      confirmed folder. A folder that is saved without that confirmation, for example by editing the
+      settings file by hand, is not used at launch, and the card says why.
+   4. Turning `engine_auto_start` on, in Settings or on the card, shows the confirmation dialog from
+      rule 2 first. If the owner cancels, the switch stays off. Turning it off needs no dialog.
+   5. Every start from this card, manual or at launch, is logged to the same local file as rule 6, with
+      the time, the program, the outcome and the pid if reported. The log holds no secrets. The desktop
+      never reads, shows or logs the engine's session cookie.
+   6. The launch-time session check (`overleaf_auto_check`, default true) reads the engine's session
+      status once per launch, and only when the engine is listening. It starts and stops nothing and
+      changes nothing, so rules 1 to 9 do not govern it. The owner was told that Overleaf's terms restrict
+      automated access, and kept this check on by default.
+
+## Amendment H (accepted by the owner in chat on 2026-10-26)
+
+H. Chat requests and sub-tool runs. This amendment covers three things: a chat asking the desktop to
+   start, the desktop running a Meridian sub-tool, and a chat's project binding. It records the owner's
+   answers of 2026-10-26. Where those answers left a detail open, the detail is written as the default
+   below, and the owner can change it by amendment.
+   1. Starting the desktop. A chat may ask the desktop to start. The request does nothing until the owner
+      answers the rule 2 dialog, which names "Start Meridian Desktop" and the program path. Cancel changes
+      nothing. If the desktop is not running and the core runs on this computer, the core shows its own
+      Yes/No dialog, default No, before it launches the desktop. If the core is hosted, the request waits
+      until the desktop starts. Nothing starts from a network request on its own (rule 1 stands).
+   2. Reading requests, rule 4. The desktop does not open a listener. While it runs, it reads pending chat
+      requests from the core over the loopback connection it already uses. Reading starts nothing. A
+      request that would act needs a yes in its own dialog. This amends rule 4 to that extent and no more.
+   3. Sub-tool runs. The desktop may run any core sub-tool in its registry, through the core's tools/call
+      over the loopback connection, with no shell. A read-only tool runs without a dialog. Any other tool
+      shows a rule 2 dialog for each call, naming the tool, the project and a plain summary of the
+      arguments. Cancel changes nothing. Argument values are never logged.
+   4. Excluded tools. A tool that starts a process or an agent is not in the registry. This covers the
+      core's enqueue_claude_task and any future tool that spawns a process. Adding one needs an amendment.
+      The Zotero bridge update is in the registry as a write tool. It keeps its existing confirmations.
+   5. Project binding. A chat has one current project, and the binding can be changed at any time,
+      including moving between a project and its subprojects or switching back and forth. A change starts
+      nothing, so it needs no dialog. Each change is logged to the rule 6 control log with the time, the
+      chat's session id, and the old and new project ids. The desktop passes a project id explicitly on
+      every call. It never falls back to a meridian.toml or CLAUDE.local.md file.
+   6. Routing. Requests are routed by a fixed keyword table generated from the registry. No model chooses a
+      tool. A request that matches no tool, or more than one, shows the matches and does nothing until the
+      owner picks one. Every registry entry needs trigger words, and a test fails if one does not.
+   7. Hosted tier. Under this amendment the desktop does not read or store an account token, and it makes
+      no call to the hosted service. Hosted per-tool calls need a later amendment.
+   8. Logging. Each sub-tool run and each start requested by a chat writes one line to the rule 6 control
+      log: the time, the tool name or action, the project id, and the outcome. No arguments, tokens or
+      tool output are written.
+   9. Switch. Chat requests have their own switch, chat_requests_enabled, which defaults to off. Turning it
+      on shows the rule 2 dialog first, as G.4 does. While it is off, chat requests are refused and nothing
+      is read from the core.
+
+## Amendment I (accepted by the owner in chat on 2026-10-26)
+
+Status: accepted, as an optional setting. The owner asked for an opt-in setting rather than a fixed schedule, so the check
+is off by default and runs only after the owner turns it on in the dialog in item 3. The launch-time check in G.6 is
+unchanged, and so are rules 1 to 10 and Amendments A to H.
+
+I. Hourly Overleaf session check. Accepting this amendment means the owner agrees to these terms.
+   1. What the check does. While the Home tab is showing, the desktop asks the LaTeX engine once an hour about the saved
+      Overleaf session. That is the same one request as a press of the Overleaf card's Check button. The engine sends the
+      owner's saved session to Overleaf once. The desktop never reads, shows or logs the session cookie.
+   2. Off by default. The setting is overleaf_check_interval_minutes. Its default is 0, which is off. The only other value
+      is 60, one hour, and a different interval needs another amendment. A file that holds any other value, or a value
+      that is not a whole number, is read as 0, and the settings warning says so.
+   3. Turning it on asks first. The hourly check box on the Overleaf card shows a confirmation dialog. The dialog says that
+      each check sends the saved session to Overleaf once through the engine, that the check starts nothing, that nothing
+      is sent when the engine is not running, and that Overleaf's terms restrict automated access. No, the default, leaves
+      the check off and saves nothing. A yes saves 60.
+   4. Turning it off needs no dialog. The timer stops at once.
+   5. Only while Home is showing. The timer runs only while the Home tab is showing, and it stops when Home is hidden. A
+      show does not run a check, and the first check comes an hour after the timer starts.
+   6. Nothing else starts. The timer never starts, stops or restarts the engine, never sends a login request and never
+      opens a window. Rule 1 still holds.
+   7. Engine not running. If the engine is not answering, the check sends nothing to Overleaf, and the card says that the
+      engine is not running.
+   8. Logging. The hourly check starts nothing, so it writes no line to the control log, as the launch-time check in G.6
+      does not.
+   9. Unchanged. The Check button, the launch-time check in G.6 and the five-minute Home timer are unchanged. The
+      five-minute timer still reads only the cards and the engine's port, and never asks Overleaf.
+   10. Terms. The owner accepts that an hourly check is automated access to Overleaf, that Overleaf's terms restrict such
+      access, and that turning the check on is the owner's own choice, made in the dialog in item 3.

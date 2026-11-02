@@ -135,9 +135,16 @@ class RunnerActions(QObject):
 
     ``coreChanged`` is emitted on the GUI thread when a core search starts and when it finishes, when the owner chooses
     a core folder, and when the tunnel switch is turned on. The controls connect to it, so each one reads the setup again.
+
+    ``runnerStateChanged`` is emitted on the GUI thread after a Start, Stop or Restart finishes, and after each status
+    check that follows a confirmed start, wherever the control sits. ``clientSetupChanged`` is emitted after a client
+    setup Apply or Remove finishes. Home listens to both and reads its cards again. A listener never emits coreChanged
+    back, so these never loop.
     """
 
     coreChanged = Signal()
+    runnerStateChanged = Signal()
+    clientSetupChanged = Signal()
 
     def __init__(
         self,
@@ -170,6 +177,9 @@ class RunnerActions(QObject):
         # Identifies this object's searches. A plain object, so a job can hold it without holding the object.
         self._locate_owner = object()
         self._locate_generation = 0
+        # The number of Start, Stop and Restart steps begun for each scope, from any control. A status check after a start
+        # is dropped when a newer step on its scope has begun, so a stop is never reported as a crash.
+        self._action_serial: dict[str, int] = {}
         shared_delivery().delivered.connect(self._on_located)
 
     def _log(self) -> Path:
@@ -248,6 +258,23 @@ class RunnerActions(QObject):
     def notify_core_changed(self) -> None:
         """Tell the controls that the core setup was saved, so each one reads it again."""
         self.coreChanged.emit()
+
+    def notify_runner_state_changed(self) -> None:
+        """Tell the views that a runner action or a start check finished, so each one reads the state again."""
+        self.runnerStateChanged.emit()
+
+    def notify_client_setup_changed(self) -> None:
+        """Tell the views that a client setup change finished, so the tools are read again."""
+        self.clientSetupChanged.emit()
+
+    def begin_action(self, scope: str) -> int:
+        """Count one Start or Stop step for ``scope``, from any control, and return its number."""
+        self._action_serial[scope] = self._action_serial.get(scope, 0) + 1
+        return self._action_serial[scope]
+
+    def action_serial(self, scope: str) -> int:
+        """The number of the newest Start or Stop step begun for ``scope``. 0 when none has begun."""
+        return self._action_serial.get(scope, 0)
 
     def choose_core_folder(self, parent: QWidget | None = None) -> str:
         """Ask for the Meridian core folder, save it when it is one, then look for its Python. Returns the line to show.
@@ -420,6 +447,8 @@ class LaunchStarts(QObject):
             text = "\n".join(note.message for note in notes if isinstance(note, LaunchNote))
         if text and self._report is not None:
             self._report(text)
+        # A launch-time start may have started the local server, so Home reads its cards again.
+        self._actions.notify_runner_state_changed()
 
 
 __all__ = [

@@ -3,6 +3,9 @@
 The runner is always a fake, so no test starts the real core command. The confirmation dialog is an injected
 fake that records its text and returns a chosen answer, so no test opens a real dialog or changes a file
 outside pytest's temp directory. Offscreen Qt, from conftest.
+
+Each client has a box the owner ticks. Check, Apply and Remove act only on the ticked clients. The tests that
+are about one client tick only that client, so each responder answers for every client the command asked for.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from pathlib import Path
 import pytest
 import shiboken6
 from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop.client_setup_runner import (
@@ -26,10 +29,13 @@ from meridian_desktop.client_setup_runner import (
     IN_PLACE,
     MISSING,
     NOT_CHECKED,
-    NOT_COVERED,
+    NOT_INSTALLED_TEXT,
     NOT_READABLE,
+    NOT_SELECTED,
+    NOT_SELECTED_TEXT,
     NOT_SET_CHECKOUT_TEXT,
     NOT_SET_PYTHON_TEXT,
+    NOT_COVERED_TEXT,
     STATE_TEXT,
     WOULD_CHANGE,
     ClientSetupRunner,
@@ -42,9 +48,13 @@ from meridian_desktop.ui.client_setup_section import (
     CANCELLED_TEXT,
     CHECKOUT_SAVED_TEXT,
     DEFAULT_STATUS_TEXT,
+    NO_TICK_STATUS_TEXT,
     PYTHON_SAVED_TEXT,
+    REASON_NOT_COVERED,
+    REASON_NOT_TICKED,
     REMOVE_DIALOG_TITLE,
     ClientSetupSection,
+    confirmation_text,
 )
 from meridian_desktop.ui.settings_tab import SettingsTab
 
@@ -75,6 +85,13 @@ def make_python(tmp_path: Path) -> str:
 def configured_store(tmp_path: Path, settings_path: Path) -> SettingsStore:
     store = SettingsStore(settings_path)
     store.save(Settings(core_checkout=str(make_core(tmp_path)), core_python=make_python(tmp_path)))
+    return store
+
+
+def store_with_choices(tmp_path: Path, settings_path: Path, *clients: str) -> SettingsStore:
+    """A configured store whose ticked clients are exactly the ones given."""
+    store = configured_store(tmp_path, settings_path)
+    store.set_client_choices(list(clients))
     return store
 
 
@@ -109,8 +126,8 @@ def out(payload, returncode: int = 0, stderr: str = "") -> CommandOutput:
     return CommandOutput(returncode, json.dumps(payload), stderr)
 
 
-def entry(client, path, action, *, added=(), changed=(), removed=(), backup=None, restart=False) -> dict:
-    return {
+def entry(client, path, action, *, added=(), changed=(), removed=(), backup=None, restart=False, message=None) -> dict:
+    item = {
         "client": client,
         "path": str(path),
         "action": action,
@@ -119,14 +136,22 @@ def entry(client, path, action, *, added=(), changed=(), removed=(), backup=None
         "backup": backup,
         "restart_required": restart,
     }
+    if message is not None:
+        item["message"] = message
+    return item
 
 
 def results(*entries, wrote: bool = False) -> dict:
     return {"results": list(entries), "wrote": wrote}
 
 
-def is_plan_all(argv: list[str]) -> bool:
-    return argv[-1] == "all"
+def is_plan(argv: list[str]) -> bool:
+    return "plan" in argv
+
+
+def clients_in(argv: list[str]) -> set[str]:
+    """The clients one command asked for, from its --client comma list."""
+    return set(argv[argv.index("--client") + 1].split(","))
 
 
 def _section(qtbot, store, *, run=None, runner=None, confirm=None, choose_folder=None, choose_python=None):
@@ -156,6 +181,22 @@ def _button(section, name) -> QPushButton:
     return section.findChild(QPushButton, name)
 
 
+def _apply(section) -> QPushButton:
+    return _button(section, "client-setup-apply")
+
+
+def _remove(section) -> QPushButton:
+    return _button(section, "client-setup-remove")
+
+
+def _choice(section, client) -> QCheckBox:
+    return section.findChild(QCheckBox, f"client-setup-{client}-choice")
+
+
+def _tick(section, client, on: bool = True) -> None:
+    _choice(section, client).setChecked(on)
+
+
 def _all_text(section) -> str:
     texts = [label.text() for label in section.findChildren(QLabel)]
     texts += [button.text() for button in section.findChildren(QPushButton)]
@@ -175,6 +216,12 @@ def _wait_for_result(qtbot, section, fragment):
     qtbot.waitUntil(lambda: fragment in _text(section, "client-setup-result"), timeout=5000)
 
 
+def _existing(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    path.write_text("{}", encoding="utf-8")
+    return path
+
+
 # ----------------------------------------------------------- not set
 
 
@@ -183,9 +230,8 @@ def test_unset_core_says_so_and_no_command_is_offered(qtbot, settings_path):
     section = _section(qtbot, SettingsStore(settings_path), run=run)
 
     assert _text(section, "client-setup-status") == NOT_SET_CHECKOUT_TEXT
-    assert _button(section, "client-setup-codex-apply").isEnabled() is False
-    assert _button(section, "client-setup-codex-remove").isEnabled() is False
-    assert _button(section, "client-setup-claude-desktop-apply").isEnabled() is False
+    assert _apply(section).isEnabled() is False
+    assert _remove(section).isEnabled() is False
     assert run.argvs == [], "no process may start while the core is not set"
 
 
@@ -247,8 +293,8 @@ def test_saving_both_paths_makes_the_section_ready(qtbot, settings_path, tmp_pat
     assert _text(section, "client-setup-status") == DEFAULT_STATUS_TEXT
     saved = SettingsStore(settings_path).load().settings
     assert saved.core_checkout and saved.core_python
-    assert _button(section, "client-setup-codex-apply").isEnabled() is True
-    assert _button(section, "client-setup-claude-code-apply").isEnabled() is False
+    assert _apply(section).isEnabled() is True
+    assert _remove(section).isEnabled() is True
 
 
 def test_saving_one_path_keeps_what_was_typed_in_the_other_box(qtbot, settings_path, tmp_path):
@@ -281,6 +327,95 @@ def test_a_cancelled_browse_changes_nothing(qtbot, settings_path):
     assert section.findChild(QLineEdit, "client-setup-python").text() == "keep-this"
 
 
+# ----------------------------------------------------------- the boxes: one per client, saved at once
+
+
+def test_there_is_one_box_per_client_in_order_with_the_default_two_ticked(qtbot, settings_path, tmp_path):
+    section = _section(qtbot, configured_store(tmp_path, settings_path))
+
+    assert [_choice(section, client).text() for client in ("claude-desktop", "codex", "cursor", "claude-code")] == [
+        "Claude Desktop",
+        "Codex",
+        "Cursor",
+        "Claude Code",
+    ]
+    assert _choice(section, "claude-desktop").isChecked() is True
+    assert _choice(section, "codex").isChecked() is True
+    assert _choice(section, "cursor").isChecked() is False
+    assert _choice(section, "claude-code").isChecked() is False
+    assert _text(section, "client-setup-cursor-state") == STATE_TEXT[NOT_SELECTED]
+    assert _text(section, "client-setup-claude-code-state") == STATE_TEXT[NOT_SELECTED]
+
+
+def test_a_box_saves_at_once_and_the_choice_reads_back_in_a_new_section(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    section = _section(qtbot, store)
+
+    _tick(section, "cursor")
+    _tick(section, "codex", False)
+
+    assert SettingsStore(settings_path).load().settings.client_choices == ("claude-desktop", "cursor")
+    again = _section(qtbot, SettingsStore(settings_path))
+    assert _choice(again, "cursor").isChecked() is True
+    assert _choice(again, "codex").isChecked() is False
+
+
+def test_a_ticked_cursor_is_sent_to_the_core_with_the_other_ticked_clients(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    run = FakeRun(
+        lambda argv: out(
+            results(
+                entry("claude-desktop", _existing(tmp_path, "desktop.json"), "unchanged"),
+                entry("codex", _existing(tmp_path, "config.toml"), "unchanged"),
+                entry("cursor", _existing(tmp_path, "mcp.json"), "unchanged"),
+            )
+        )
+    )
+    section = _section(qtbot, store, run=run)
+
+    _tick(section, "cursor")
+
+    assert _text(section, "client-setup-cursor-state") == STATE_TEXT[NOT_CHECKED]
+    _button(section, "client-setup-check").click()
+    _wait_for_state(qtbot, section, "cursor", IN_PLACE)
+    python = store.load().settings.core_python
+    assert run.argvs == [[python, "-m", CORE_MODULE, "plan", "--client", "claude-desktop,codex,cursor"]]
+
+
+def test_an_unticked_client_shows_not_selected_and_is_not_sent(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    run = FakeRun(lambda argv: out(results(entry("codex", _existing(tmp_path, "config.toml"), "unchanged"))))
+    section = _section(qtbot, store, run=run)
+
+    _tick(section, "claude-desktop", False)
+    _button(section, "client-setup-check").click()
+
+    _wait_for_state(qtbot, section, "codex", IN_PLACE)
+    assert _text(section, "client-setup-claude-desktop-state") == STATE_TEXT[NOT_SELECTED]
+    assert _text(section, "client-setup-claude-desktop-detail") == NOT_SELECTED_TEXT
+    assert all("claude-desktop" not in argv[-1] for argv in run.argvs)
+    assert run.argvs == [[store.load().settings.core_python, "-m", CORE_MODULE, "plan", "--client", "codex"]]
+
+
+def test_check_sends_the_ticked_clients_as_one_comma_list(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    python = store.load().settings.core_python
+    run = FakeRun(
+        lambda argv: out(
+            results(
+                entry("claude-desktop", _existing(tmp_path, "desktop.json"), "unchanged"),
+                entry("codex", _existing(tmp_path, "config.toml"), "unchanged"),
+            )
+        )
+    )
+    section = _section(qtbot, store, run=run)
+
+    _button(section, "client-setup-check").click()
+
+    _wait_for_state(qtbot, section, "codex", IN_PLACE)
+    assert run.argvs == [[python, "-m", CORE_MODULE, "plan", "--client", "claude-desktop,codex"]]
+
+
 # ----------------------------------------------------------- check renders each state
 
 
@@ -293,10 +428,10 @@ SCENARIOS = {
                     entry("codex", tmp_path / "codex" / "config.toml", "would_write", added=["meridian-outputs"]),
                 )
             )
-            if is_plan_all(argv)
+            if is_plan(argv)
             else out(results())
         ),
-        {"claude-desktop": WOULD_CHANGE, "codex": MISSING, "claude-code": NOT_COVERED},
+        {"claude-desktop": WOULD_CHANGE, "codex": MISSING},
     ),
     "in place": (
         lambda tmp_path: (
@@ -306,28 +441,22 @@ SCENARIOS = {
                     entry("codex", _existing(tmp_path, "config.toml"), "unchanged"),
                 )
             )
-            if is_plan_all(argv)
+            if is_plan(argv)
             else out(results())
         ),
-        {"claude-desktop": IN_PLACE, "codex": IN_PLACE, "claude-code": NOT_COVERED},
+        {"claude-desktop": IN_PLACE, "codex": IN_PLACE},
     ),
     "not readable": (
         lambda tmp_path: (
             lambda argv: (
                 CommandOutput(1, "", json.dumps({"error": "desktop.json is not valid JSON"}))
-                if is_plan_all(argv) or "claude-desktop" in argv
+                if is_plan(argv) and "claude-desktop" in clients_in(argv)
                 else out(results(entry("codex", _existing(tmp_path, "config.toml"), "unchanged")))
             )
         ),
-        {"claude-desktop": NOT_READABLE, "codex": IN_PLACE, "claude-code": NOT_COVERED},
+        {"claude-desktop": NOT_READABLE, "codex": IN_PLACE},
     ),
 }
-
-
-def _existing(tmp_path: Path, name: str) -> Path:
-    path = tmp_path / name
-    path.write_text("{}", encoding="utf-8")
-    return path
 
 
 @pytest.mark.parametrize("scenario", sorted(SCENARIOS))
@@ -341,17 +470,15 @@ def test_check_renders_each_state(qtbot, settings_path, tmp_path, scenario):
 
     for client, state in expected.items():
         _wait_for_state(qtbot, section, client, state)
-    assert _text(section, "client-setup-claude-code-state") == STATE_TEXT[NOT_COVERED]
+    assert _text(section, "client-setup-claude-code-state") == STATE_TEXT[NOT_SELECTED]
 
 
 def test_rows_show_the_file_and_the_names_of_the_change(qtbot, settings_path, tmp_path):
-    store = configured_store(tmp_path, settings_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     desktop_file = _existing(tmp_path, "desktop.json")
     run = FakeRun(
         lambda argv: out(
             results(entry("claude-desktop", desktop_file, "would_write", added=["meridian-docs"], changed=["meridian-search"]))
-            if is_plan_all(argv)
-            else results()
         )
     )
     section = _section(qtbot, store, run=run)
@@ -361,28 +488,57 @@ def test_rows_show_the_file_and_the_names_of_the_change(qtbot, settings_path, tm
     _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
     assert _text(section, "client-setup-claude-desktop-path") == f"File: {desktop_file}"
     assert _text(section, "client-setup-claude-desktop-detail") == "Adds: meridian-docs. Changes: meridian-search."
-    assert _button(section, "client-setup-claude-desktop-apply").isEnabled() is True
+    assert _apply(section).isEnabled() is True
 
 
-def test_apply_is_off_for_a_client_already_in_place_and_remove_stays_on(qtbot, settings_path, tmp_path):
+def test_apply_stays_on_for_ticked_clients_already_in_place_and_says_so_in_the_preview(qtbot, settings_path, tmp_path):
     store = configured_store(tmp_path, settings_path)
-    run = FakeRun(lambda argv: out(results(entry("codex", _existing(tmp_path, "config.toml"), "unchanged"))) if is_plan_all(argv) else out(results()))
+    run = FakeRun(
+        lambda argv: out(
+            results(
+                entry("claude-desktop", _existing(tmp_path, "desktop.json"), "unchanged"),
+                entry("codex", _existing(tmp_path, "config.toml"), "unchanged"),
+            )
+        )
+    )
     section = _section(qtbot, store, run=run)
 
     _button(section, "client-setup-check").click()
 
     _wait_for_state(qtbot, section, "codex", IN_PLACE)
-    assert _button(section, "client-setup-codex-apply").isEnabled() is False
-    assert _button(section, "client-setup-codex-remove").isEnabled() is True
+    assert _apply(section).isEnabled() is True
+    assert _remove(section).isEnabled() is True
 
 
-def test_claude_code_has_both_buttons_off_and_says_why(qtbot, settings_path, tmp_path):
+def test_only_uncovered_ticked_clients_turn_apply_and_remove_off_and_say_why(qtbot, settings_path, tmp_path):
     store = configured_store(tmp_path, settings_path)
     section = _section(qtbot, store)
 
-    assert _button(section, "client-setup-claude-code-apply").isEnabled() is False
-    assert _button(section, "client-setup-claude-code-remove").isEnabled() is False
-    assert "does not cover Claude Code yet" in _text(section, "client-setup-claude-code-detail")
+    _tick(section, "claude-desktop", False)
+    _tick(section, "codex", False)
+    _tick(section, "claude-code")
+
+    assert _apply(section).isEnabled() is False
+    assert _remove(section).isEnabled() is False
+    assert _apply(section).toolTip() == REASON_NOT_COVERED
+    assert _text(section, "client-setup-claude-code-detail") == NOT_COVERED_TEXT.format(label="Claude Code")
+
+
+def test_with_no_client_ticked_apply_and_remove_are_off_and_nothing_is_sent(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    run = FakeRun(lambda argv: out(results()))
+    section = _section(qtbot, store, run=run)
+
+    _tick(section, "claude-desktop", False)
+    _tick(section, "codex", False)
+
+    assert _apply(section).isEnabled() is False
+    assert _remove(section).isEnabled() is False
+    assert _apply(section).toolTip() == REASON_NOT_TICKED
+    assert _text(section, "client-setup-status") == NO_TICK_STATUS_TEXT
+    _apply(section).click()
+    _remove(section).click()
+    assert run.argvs == [], "Apply and Remove with none ticked send nothing to the core"
 
 
 def test_a_failed_check_says_why_and_leaves_rows_not_checked(qtbot, settings_path, tmp_path):
@@ -396,16 +552,30 @@ def test_a_failed_check_says_why_and_leaves_rows_not_checked(qtbot, settings_pat
     _wait_for_state(qtbot, section, "codex", NOT_CHECKED)
 
 
+def test_a_core_failure_for_one_client_shows_on_that_row_only(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    message = "desktop.json is not valid JSON; refusing to rewrite it"
+    payload = results(
+        entry("claude-desktop", tmp_path / "desktop.json", "failed", message=message),
+        entry("codex", _existing(tmp_path, "config.toml"), "unchanged"),
+    )
+    run = FakeRun(lambda argv: CommandOutput(1, json.dumps(payload), ""))
+    section = _section(qtbot, store, run=run)
+
+    _button(section, "client-setup-check").click()
+
+    _wait_for_state(qtbot, section, "claude-desktop", NOT_READABLE)
+    assert _text(section, "client-setup-claude-desktop-detail") == message
+    _wait_for_state(qtbot, section, "codex", IN_PLACE)
+    assert _text(section, "client-setup-codex-detail") == ""
+    assert message not in _text(section, "client-setup-codex-detail")
+
+
 # ----------------------------------------------------------- apply: the dialog and the Yes
 
 
-def _ready_store(qtbot, settings_path, tmp_path):
-    store = configured_store(tmp_path, settings_path)
-    return store
-
-
 def test_cancelling_the_dialog_runs_nothing(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     config = _existing(tmp_path, "desktop.json")
     before = config.read_bytes()
 
@@ -415,7 +585,7 @@ def test_cancelling_the_dialog_runs_nothing(qtbot, settings_path, tmp_path):
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
 
-    _button(section, "client-setup-claude-desktop-apply").click()
+    _apply(section).click()
 
     _wait_for_result(qtbot, section, CANCELLED_TEXT)
     assert len(confirm.calls) == 1, "the dialog is shown once, after the dry run"
@@ -425,20 +595,18 @@ def test_cancelling_the_dialog_runs_nothing(qtbot, settings_path, tmp_path):
 
 
 def test_yes_runs_apply_with_the_right_arguments_and_shows_the_backup(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     settings = store.load().settings
     config = _existing(tmp_path, "desktop.json")
     backup = str(tmp_path / "desktop.json.meridian-backup-20261019-120000")
     state = {"written": False}
 
     def respond(argv):
-        if is_plan_all(argv):
-            if state["written"]:
-                return out(results(entry("claude-desktop", config, "unchanged")))
-            return out(results(entry("claude-desktop", config, "would_write", added=["meridian-docs"])))
         if "--yes" in argv:
             state["written"] = True
             return out(results(entry("claude-desktop", config, "written", added=["meridian-docs"], backup=backup, restart=True), wrote=True))
+        if is_plan(argv) and state["written"]:
+            return out(results(entry("claude-desktop", config, "unchanged")))
         return out(results(entry("claude-desktop", config, "would_write", added=["meridian-docs"])))
 
     run = FakeRun(respond)
@@ -447,7 +615,7 @@ def test_yes_runs_apply_with_the_right_arguments_and_shows_the_backup(qtbot, set
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
 
-    _button(section, "client-setup-claude-desktop-apply").click()
+    _apply(section).click()
 
     _wait_for_result(qtbot, section, "Written:")
     assert [argv for argv in run.argvs if "--yes" in argv] == [
@@ -460,9 +628,126 @@ def test_yes_runs_apply_with_the_right_arguments_and_shows_the_backup(qtbot, set
     _wait_for_state(qtbot, section, "claude-desktop", IN_PLACE)
 
 
-def test_the_dialog_names_the_exact_file_change_and_command(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+def test_apply_writes_every_ticked_client_behind_one_confirmation_that_names_each(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
     settings = store.load().settings
+    desktop_file = tmp_path / "desktop.json"
+    codex_file = tmp_path / "config.toml"
+    state = {"written": False}
+
+    def respond(argv):
+        if "--yes" in argv:
+            state["written"] = True
+            return out(
+                results(
+                    entry("claude-desktop", desktop_file, "written", added=["meridian-docs"], backup=None, restart=True),
+                    entry("codex", codex_file, "written", added=["meridian-docs"], backup=None, restart=True),
+                    wrote=True,
+                )
+            )
+        if is_plan(argv) and state["written"]:
+            return out(
+                results(
+                    entry("claude-desktop", desktop_file, "unchanged"),
+                    entry("codex", codex_file, "unchanged"),
+                )
+            )
+        return out(
+            results(
+                entry("claude-desktop", desktop_file, "would_write", added=["meridian-docs"]),
+                entry("codex", codex_file, "would_write", added=["meridian-docs"]),
+            )
+        )
+
+    run = FakeRun(respond)
+    confirm = Recorder(answer=True)
+    section = _section(qtbot, store, run=run, confirm=confirm)
+    _button(section, "client-setup-check").click()
+    _wait_for_state(qtbot, section, "codex", MISSING)
+
+    _apply(section).click()
+
+    _wait_for_result(qtbot, section, "Written:")
+    assert len(confirm.calls) == 1, "one confirmation covers every ticked client that will be written"
+    title, text = confirm.calls[0]
+    assert title == APPLY_DIALOG_TITLE
+    assert "Apply Meridian's entries to Claude Desktop and Codex?" in text
+    assert f"File: {desktop_file}" in text and f"File: {codex_file}" in text
+    assert f"-m {CORE_MODULE} apply --client claude-desktop,codex --yes" in text
+    assert [argv for argv in run.argvs if "--yes" in argv] == [
+        [settings.core_python, "-m", CORE_MODULE, "apply", "--client", "claude-desktop,codex", "--yes"]
+    ]
+    assert _text(section, "client-setup-result").count("Written:") == 2
+
+
+MISSING_FOLDER_MESSAGE = "is not installed here: its config folder does not exist."
+
+
+def test_apply_with_one_missing_client_confirms_only_the_installed_one_and_the_missing_row_says_so(
+    qtbot, settings_path, tmp_path
+):
+    store = configured_store(tmp_path, settings_path)
+    settings = store.load().settings
+    desktop_path = tmp_path / "Claude" / "claude_desktop_config.json"  # the Claude Desktop folder is not here
+    codex_file = _existing(tmp_path, "config.toml")
+    state = {"written": False}
+
+    def respond(argv):
+        missing = entry("claude-desktop", desktop_path, "not_installed", message=MISSING_FOLDER_MESSAGE)
+        if "--yes" in argv:
+            state["written"] = True
+            return out(results(entry("codex", codex_file, "written", added=["meridian-docs"], restart=True), wrote=True))
+        if state["written"]:
+            return out(results(missing, entry("codex", codex_file, "unchanged")))
+        return out(results(missing, entry("codex", codex_file, "would_write", added=["meridian-docs"])))
+
+    run = FakeRun(respond)
+    confirm = Recorder(answer=True)
+    section = _section(qtbot, store, run=run, confirm=confirm)
+    _button(section, "client-setup-check").click()
+    _wait_for_state(qtbot, section, "codex", WOULD_CHANGE)
+    _wait_for_state(qtbot, section, "claude-desktop", MISSING)
+
+    _apply(section).click()
+
+    _wait_for_result(qtbot, section, "Written:")
+    assert len(confirm.calls) == 1, "only the client that will be written is confirmed"
+    title, text = confirm.calls[0]
+    assert title == APPLY_DIALOG_TITLE
+    assert "Apply Meridian's entries to Codex?" in text
+    assert "Claude Desktop" not in text
+    assert f"-m {CORE_MODULE} apply --client codex --yes" in text
+    assert [argv for argv in run.argvs if "--yes" in argv] == [
+        [settings.core_python, "-m", CORE_MODULE, "apply", "--client", "codex", "--yes"]
+    ]
+    assert _text(section, "client-setup-result").count("Written:") == 1
+    qtbot.waitUntil(lambda: _text(section, "client-setup-claude-desktop-state") == STATE_TEXT[MISSING], timeout=5000)
+    assert NOT_INSTALLED_TEXT.format(label="Claude Desktop") in _text(section, "client-setup-claude-desktop-detail")
+
+
+def test_apply_when_the_only_ticked_client_is_missing_asks_nothing_and_says_it_is_not_set_up(
+    qtbot, settings_path, tmp_path
+):
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
+    desktop_path = tmp_path / "Claude" / "claude_desktop_config.json"
+    run = FakeRun(
+        lambda argv: out(results(entry("claude-desktop", desktop_path, "not_installed", message=MISSING_FOLDER_MESSAGE)))
+    )
+    confirm = Recorder(answer=True)
+    section = _section(qtbot, store, run=run, confirm=confirm)
+    _button(section, "client-setup-check").click()
+    _wait_for_state(qtbot, section, "claude-desktop", MISSING)
+
+    _apply(section).click()
+
+    _wait_for_result(qtbot, section, "is not set up on this computer")
+    assert confirm.calls == [], "nothing is written, so there is nothing to confirm"
+    assert not any("--yes" in argv for argv in run.argvs)
+    assert _text(section, "client-setup-result") == NOT_INSTALLED_TEXT.format(label="Claude Desktop")
+
+
+def test_the_dialog_names_the_exact_file_change_and_command(qtbot, settings_path, tmp_path):
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     config = _existing(tmp_path, "desktop.json")
     run = FakeRun(
         lambda argv: out(results(entry("claude-desktop", config, "would_write", added=["meridian-docs"], changed=["meridian-search"])))
@@ -472,7 +757,7 @@ def test_the_dialog_names_the_exact_file_change_and_command(qtbot, settings_path
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
 
-    _button(section, "client-setup-claude-desktop-apply").click()
+    _apply(section).click()
 
     _wait_for_result(qtbot, section, CANCELLED_TEXT)
     title, text = confirm.calls[0]
@@ -483,8 +768,23 @@ def test_the_dialog_names_the_exact_file_change_and_command(qtbot, settings_path
     assert "backup" in text.lower()
 
 
+def test_the_confirmation_text_names_each_client_and_its_own_file(tmp_path):
+    from meridian_desktop.client_setup_runner import ClientChange
+
+    entries = [
+        ("Codex", ClientChange(client="codex", path=str(tmp_path / "config.toml"), action="would_write", added=("a",))),
+        ("Cursor", ClientChange(client="cursor", path=str(tmp_path / "mcp.json"), action="would_write", removed=("b",))),
+    ]
+    text = confirmation_text("remove", entries, "the command")
+
+    assert text.splitlines()[0] == "Remove Meridian's entries from Codex and Cursor?"
+    assert f"File: {tmp_path / 'config.toml'}" in text and f"File: {tmp_path / 'mcp.json'}" in text
+    assert "Removes: b." in text and "Adds: a." in text
+    assert text.endswith("Command: the command")
+
+
 def test_a_new_file_says_no_backup_was_made(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+    store = store_with_choices(tmp_path, settings_path, "codex")
     config = tmp_path / "fresh" / "config.toml"
     state = {"written": False}
 
@@ -498,24 +798,23 @@ def test_a_new_file_says_no_backup_was_made(qtbot, settings_path, tmp_path):
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "codex", MISSING)
 
-    _button(section, "client-setup-codex-apply").click()
+    _apply(section).click()
 
     _wait_for_result(qtbot, section, "Written:")
     assert "No backup was made: the file did not exist before this change." in _text(section, "client-setup-result")
 
 
 def test_remove_uses_a_dry_run_then_remove_with_yes(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
-    settings = store.load().settings
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     config = _existing(tmp_path, "desktop.json")
     state = {"removed": False}
 
     def respond(argv):
-        if is_plan_all(argv):
-            return out(results(entry("claude-desktop", config, "unchanged")))
         if "remove" in argv and "--yes" in argv:
             state["removed"] = True
             return out(results(entry("claude-desktop", config, "removed", removed=["meridian-docs"], backup="b.bak", restart=True), wrote=True))
+        if is_plan(argv):
+            return out(results(entry("claude-desktop", config, "unchanged")))
         return out(results(entry("claude-desktop", config, "would_remove", removed=["meridian-docs"])))
 
     run = FakeRun(respond)
@@ -524,17 +823,19 @@ def test_remove_uses_a_dry_run_then_remove_with_yes(qtbot, settings_path, tmp_pa
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "claude-desktop", IN_PLACE)
 
-    _button(section, "client-setup-claude-desktop-remove").click()
+    _remove(section).click()
 
     _wait_for_result(qtbot, section, "Removed Meridian's entries")
     assert confirm.calls[0][0] == REMOVE_DIALOG_TITLE
     assert "Removes: meridian-docs." in confirm.calls[0][1]
-    assert [argv[3:] for argv in run.argvs if "--yes" in argv] == [["remove", "--client", "claude-desktop", "--yes"]]
+    assert [argv[3:] for argv in run.argvs if "--yes" in argv] == [
+        ["remove", "--client", "claude-desktop", "--yes"]
+    ]
     assert "Backup saved at: b.bak" in _text(section, "client-setup-result")
 
 
 def test_a_refused_change_shows_the_core_message(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     config = _existing(tmp_path, "desktop.json")
 
     def respond(argv):
@@ -546,19 +847,17 @@ def test_a_refused_change_shows_the_core_message(qtbot, settings_path, tmp_path)
     _button(section, "client-setup-check").click()
     _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
 
-    _button(section, "client-setup-claude-desktop-apply").click()
+    _apply(section).click()
 
     _wait_for_result(qtbot, section, "uvx was not found")
 
 
 def test_remove_on_an_in_place_client_with_nothing_to_remove_asks_nothing(qtbot, settings_path, tmp_path):
-    store = _ready_store(qtbot, settings_path, tmp_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     config = _existing(tmp_path, "desktop.json")
     confirm = Recorder(answer=True)
 
     def respond(argv):
-        if is_plan_all(argv):
-            return out(results(entry("claude-desktop", config, "unchanged")))
         return out(results(entry("claude-desktop", config, "unchanged")))
 
     run = FakeRun(respond)
@@ -567,7 +866,7 @@ def test_remove_on_an_in_place_client_with_nothing_to_remove_asks_nothing(qtbot,
     _wait_for_state(qtbot, section, "claude-desktop", IN_PLACE)
     run_before = len(run.argvs)
 
-    _button(section, "client-setup-claude-desktop-remove").click()
+    _remove(section).click()
 
     _wait_for_result(qtbot, section, "No Meridian entries are in")
     assert confirm.calls == [], "nothing to remove means no question"
@@ -590,7 +889,8 @@ def test_buttons_are_off_while_a_command_runs(qtbot, settings_path, tmp_path):
     _button(section, "client-setup-check").click()
 
     assert _button(section, "client-setup-check").isEnabled() is False
-    assert _button(section, "client-setup-codex-apply").isEnabled() is False
+    assert _apply(section).isEnabled() is False
+    assert _choice(section, "codex").isEnabled() is False
     gate.set()
     qtbot.waitUntil(lambda: _button(section, "client-setup-check").isEnabled(), timeout=5000)
 
@@ -599,10 +899,10 @@ def test_an_unexpected_error_names_only_its_class(qtbot, settings_path, tmp_path
     store = configured_store(tmp_path, settings_path)
 
     class Broken:
-        def check(self):
+        def check(self, clients=None):
             raise RuntimeError(f"leaked {FAKE_TOKEN}")
 
-        def describe_command(self, client, mode):
+        def describe_command(self, clients, mode):
             return ""
 
     section = _section(qtbot, store, runner=Broken())
@@ -673,13 +973,13 @@ def test_a_dry_run_still_running_when_the_section_is_deleted_does_not_keep_the_s
     desktop_file = _existing(tmp_path, "desktop.json")
 
     def respond(argv):
-        if is_plan_all(argv):
+        if is_plan(argv):
             return out(results(entry("claude-desktop", desktop_file, "would_write", added=["meridian-docs"])))
         entered.set()  # the Apply dry run is held at the gate
         gate.wait(5)
         return out(results())
 
-    store = configured_store(tmp_path, settings_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     shown = []
     monkeypatch.setattr(ClientSetupSection, "_after_preview", lambda self, pending, result: shown.append(result))
 
@@ -690,7 +990,7 @@ def test_a_dry_run_still_running_when_the_section_is_deleted_does_not_keep_the_s
         section = ClientSetupSection(store, parent=container, runner=runner)
         _button(section, "client-setup-check").click()
         _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
-        _button(section, "client-setup-claude-desktop-apply").click()  # the dry run starts and is held at the gate
+        _apply(section).click()  # the dry run starts and is held at the gate
         assert entered.wait(5)
         ref = weakref.ref(section)
         shiboken6.delete(container)  # the section's widgets are deleted on the GUI thread while the dry run still runs
@@ -717,7 +1017,7 @@ def test_a_result_from_another_owner_or_from_a_superseded_check_is_dropped(qtbot
     with a superseded generation, so it is dropped by generation alone. The section's second result is what the user sees
     throughout, and it is the control that the section's own current Delivered is accepted.
     """
-    store = configured_store(tmp_path, settings_path)
+    store = store_with_choices(tmp_path, settings_path, "claude-desktop")
     responder = {"current": SCENARIOS["would change and missing"][0](tmp_path)}
     section = _section(qtbot, store, run=FakeRun(lambda argv: responder["current"](argv)))
     sibling = _section(qtbot, store, run=FakeRun(SCENARIOS["in place"][0](tmp_path)))

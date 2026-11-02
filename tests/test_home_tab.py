@@ -142,7 +142,7 @@ def test_every_card_checks_once_when_the_window_first_shows_with_no_click(qtbot,
     assert _headline(tab, "local") == "Not running"
     assert _headline(tab, "tools") == "All set up"
     # Nothing in this boot is a failure: the services card reads its stand-in probes and says so.
-    assert _headline(tab, "services") == "LaTeX engine not running"
+    assert _headline(tab, "services") == "LaTeX backup engine off"
     assert _headline(tab, "tunnel") == "Not checked"
     assert _headline(tab, "zotero") == "Not installed"
     for key in ("local", "tunnel", "services", "zotero", "tools"):

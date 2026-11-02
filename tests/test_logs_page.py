@@ -70,6 +70,7 @@ from meridian_desktop.ui.logs_page import (
 )
 
 from _shared_delivery import emit, recording_deliveries, visible_state
+from _shared_text import MARKUP_LINE, assert_shows_literally
 
 FAKE_QUERY_TOKEN = "fake-query-0001"
 FAKE_BEARER = "sk_meridian_fake-bearer-0002"
@@ -208,7 +209,21 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
     assert _text(page, "logs-tunnel-text") == "<b>bold</b> tunnel line"
     assert _text(page, "logs-runner-text") == "<i>runner</i> line"
     for label in page.findChildren(QLabel):
-        assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+        # The intro and the desktop heading are one rich-text block (its lines are paragraphs). Each line in it is still
+        # inserted as plain text, so only that block is rich.
+        if label.objectName() == "logs-intro-text":
+            assert label.textFormat() == Qt.TextFormat.RichText
+        else:
+            assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
+
+
+def test_a_markup_looking_line_in_the_intro_block_shows_its_characters_and_no_bold(qtbot):
+    # The block is rich text, so a line in it must still show markup-looking text as its own characters.
+    page = _page(qtbot, tunnel=Recorder(_tail_ok([], "tunnel.log")))
+    intro = page.findChild(QLabel, "logs-intro")
+    intro.setText(MARKUP_LINE)
+    assert intro.textFormat() == Qt.TextFormat.PlainText
+    assert_shows_literally(page.findChild(QLabel, "logs-intro-text"), MARKUP_LINE)
 
 
 def test_nothing_is_read_until_refresh_is_pressed(qtbot):

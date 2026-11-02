@@ -363,6 +363,17 @@ def test_hosted_default_transport_failure_hides_the_token(monkeypatch):
     assert SENTINEL_TOKEN not in repr(result)
 
 
+def test_a_real_transport_given_to_the_sessions_read_is_refused_at_the_send_step(hosted_transport_guard):
+    # The sessions read sends through the same send step as list_projects, so a passed-in real transport is refused
+    # there too. The refusal is recorded, the read fails as an error, and the token is not in the result.
+    result = sc.hosted_sessions(HOSTED, PID, SENTINEL_TOKEN, transport=hosted_transport_guard.real)
+    assert result.state == sc.ERROR
+    # The record keeps the method, scheme, host and path. The query string is not kept.
+    assert hosted_transport_guard.calls == [f"GET {HOSTED}/projects/{PID}/sessions"]
+    assert SENTINEL_TOKEN not in repr(result)
+    hosted_transport_guard.calls.clear()
+
+
 def test_hosted_summary_and_notes_never_reach_a_result():
     body = body_of([session(session_summary={"notes": SECRET_SUMMARY}, name="visible")])
     result = sc.hosted_sessions(HOSTED, PID, SENTINEL_TOKEN, transport=FakeHosted(body=body))

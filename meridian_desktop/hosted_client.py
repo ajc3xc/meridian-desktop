@@ -4,6 +4,9 @@
 returns the parsed JSON list. The caller reads the token from the keychain and passes it in. This
 module never stores the token and never writes it to a file.
 
+``health_status`` sends one GET to {hosted URL}/health with no token and returns the HTTP status. It is the
+reachability step of the connection check (connection_status.py), and it never sends a credential.
+
 Refused before any request is made:
 - a base URL that is not https, unless its host is 127.0.0.1, localhost or ::1 (http is allowed there);
 - a base URL that holds a user name, a password, a query or a fragment;
@@ -40,6 +43,7 @@ from meridian_desktop import __version__
 from meridian_desktop.local_client import LOOPBACK_HOSTS
 
 HOSTED_TIMEOUT = 10.0
+HEALTH_PATH = "/health"
 PROJECTS_PATH = "/projects"
 
 # The host that trusts only the certifi CA bundle. A custom hosted URL uses the system store, so a private CA works.
@@ -51,7 +55,9 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 USER_AGENT = f"MeridianDesktop/{__version__} (hosted client)"
 
-NOT_SIGNED_IN_TEXT = "No hosted token is saved. Paste your hosted token in Settings and press Save token."
+NOT_SIGNED_IN_TEXT = (
+    "No hosted token is saved. Sign in with the browser in Settings, or paste a token there and press Save token."
+)
 REJECTED_TEXT = (
     "Hosted Meridian did not accept the saved token (HTTP 401). "
     "Paste a current token in Settings and press Save token."
@@ -346,7 +352,51 @@ def list_projects(
     return _rows(reply)
 
 
+def health_status(
+    base_url: str,
+    *,
+    transport: Transport | None = None,
+    timeout: float = HOSTED_TIMEOUT,
+) -> int:
+    """GET {base_url}/health with no Authorization header, and return the HTTP status of the reply.
+
+    The URL is checked first, so a refused URL sends no request. The body is not read past the usual cap, and
+    nothing in it is returned. A redirect is not followed. A timeout raises HostedTimeout, and a lost or refused
+    connection raises HostedUnreachable, as list_projects does. Any status that came back means the host answered.
+    """
+    base = validate_base_url(base_url)
+    request = urllib.request.Request(
+        base + HEALTH_PATH,
+        method="GET",
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+    )
+    return _send(transport if transport is not None else _urllib_transport, request, timeout).status
+
+
+def post_to(
+    base_url: str,
+    path: str,
+    body: bytes,
+    *,
+    content_type: str | None = None,
+    transport: Transport | None = None,
+    timeout: float = HOSTED_TIMEOUT,
+) -> Reply:
+    """POST ``body`` to {base_url}{path} with no Authorization header, and return the reply as it came.
+
+    Used for the sign-in steps, which carry no token. The URL is checked first, so a refused URL sends no request. A
+    non-2xx status is returned, not raised, and a redirect is not followed. The failures are the ones _send raises.
+    """
+    base = validate_base_url(base_url)
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(base + path, data=body, method="POST", headers=headers)
+    return _send(transport if transport is not None else _urllib_transport, request, timeout)
+
+
 __all__ = [
+    "HEALTH_PATH",
     "HOSTED_TIMEOUT",
     "MAX_RESPONSE_BYTES",
     "PROJECTS_PATH",
@@ -360,7 +410,9 @@ __all__ = [
     "NotSignedIn",
     "Reply",
     "Transport",
+    "health_status",
     "list_projects",
+    "post_to",
     "usable_token",
     "validate_base_url",
 ]

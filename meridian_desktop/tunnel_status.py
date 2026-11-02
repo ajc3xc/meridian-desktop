@@ -63,15 +63,19 @@ UNREAD_REASON = f"{UNKNOWN_PREFIX} The runner reports a tunnel process state the
 CHECK_FAILED_REASON = f"{UNKNOWN_PREFIX} The status check failed unexpectedly ({{}})."
 
 # The tools that connect through the tunnel, named as the user sees them.
-DEPENDENT_TOOLS = ("codebase-memory", "Serena", "filesystem")
+DEPENDENT_TOOLS = ("codebase-memory", "Serena", "filesystem", "Zotero")
 DEPENDENCY_TEXT = (
-    "The codebase-memory, Serena and filesystem tools connect through the tunnel. "
+    "The codebase-memory, Serena, filesystem and Zotero tools connect through the tunnel. "
     "While the tunnel is not running, they are unavailable."
 )
 
 # Where the owner starts or checks the tunnel. The buttons are on the Home tunnel card, and Start asks first. No command
 # is typed by hand, so these hints name the card and never a terminal command.
-START_HINT = "To start it, press Start on the Home tunnel card. The desktop asks first and starts nothing without a yes."
+START_HINT = (
+    "The tunnel only lets claude.ai reach this computer's codebase-memory, Serena, filesystem and Zotero tools, while "
+    "the Code, Outputs, Research, Projects and Sessions tabs and the Zotero card on Home work in the desktop app "
+    "without it; to start it, press Start on the Home tunnel card, which asks first and starts nothing without a yes."
+)
 CHECK_HINT = "Press Check now on Home to check it again."
 
 # The top bar's one line and its detail line in Tunnel mode. The Home tunnel card shows the same answers

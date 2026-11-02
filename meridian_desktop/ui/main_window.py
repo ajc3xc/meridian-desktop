@@ -1,23 +1,26 @@
-"""Main window: a mode selector on top, then five tabs: Home, Projects, Sessions, Search and Settings.
+"""Main window: a mode selector on top, then seven tabs: Home, Projects, Sessions, Code, Outputs, Research and Settings.
 
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
-pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) searches the
-local server's code, outputs and research, and sends queries only to the Local URL. Settings holds the connection
-settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
-Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
-Sessions tabs are read-only.
+pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. The Code, Outputs and Research
+tabs (ui/search_tab.py) each search one kind of the local server's index, and send queries only to the Local URL.
+Settings holds the connection settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and
+Slides, each Not connected), and Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel
+and runner logs. The Projects and Sessions tabs are read-only.
 
 Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through settings_store and the
 RunPod key goes through secret_store, and neither imports Qt. The only network calls, apart from the update check
 below, are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
-its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
-only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
-pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
-on the Test connection button in Settings.
+its button is pressed. The search tabs call the local server only when Search or Enter is pressed. Hosted mode calls
+only the hosted URL the owner sets, with the saved token: on the Projects tab, on the Sessions tab when it is first
+shown or its Refresh is pressed (for the project list and the sessions), and on the Test connection button in
+Settings. In hosted mode neither tab reads the local server or the database file. Local mode reads both tabs in one
+order: the local server when it answers (one /health check, data_source.local_server_answers, for both tabs), then
+the hosted URL when a hosted token is saved, then the database file, read-only, only when neither answered and no
+token is saved.
 
 The Sessions tab (read-only) lists the sessions of one project, picked from the project list. The project list
 and the sessions are read when the tab is first shown and when its Refresh button is pressed, through the mode
@@ -36,6 +39,21 @@ Tunnel mode reads projects the same way Hosted does. Its top bar shows one line 
 state (from one read-only status call, made when the mode is switched to Tunnel and at start in
 Tunnel mode), the tools that need the tunnel, and how to start it by hand. The top bar has no
 control that starts, stops or restarts anything.
+
+Under the mode's description, the mode bar shows one connection line for the chosen mode, with the
+time it was checked, and a Test connection button beside it (connection_status.py holds the texts).
+Local shows the answer of the local server's /health. Hosted, with a token saved, reads the hosted
+host's /health with no token and then /projects with the token; with no token it sends nothing.
+Tunnel shows the tunnel status read the top bar makes, so the tunnel is read once. The line is
+checked once when the window opens, once each time the mode changes, and when Test connection is
+pressed, each on the thread pool. It starts, stops and restarts nothing. A window built with
+skip_connection_check (ui/app.py does so for a --smoke run) makes no check at all, so a smoke run
+sends nothing to the hosted host.
+
+The window opens inside the usable area of its screen (the screen less the taskbar), centred, with its title bar on
+screen: 1280 x 780 where that fits, and at most 90 percent of the usable width and height where it does not. When the
+window moves to another screen, or its screen's usable area changes, a window larger than the usable area shrinks to
+it, and a title bar above its top moves down. Content that does not fit scrolls.
 """
 
 from __future__ import annotations
@@ -44,25 +62,31 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, Qt, Slot
+from PySide6.QtCore import QMargins, QPoint, QRect, QSize, QThreadPool, QTimer, Qt, Slot
+from PySide6.QtGui import QScreen, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from meridian_desktop import token_store, updater, zotero_client
-from meridian_desktop.data_source import STATE_OK, DataSources, resolve
+from meridian_desktop import connection_status, hosted_client, token_store, updater, zotero_bridge_client, zotero_client
+from meridian_desktop.connection_status import ConnectionResult
+from meridian_desktop.data_source import DataSources, ProjectsProvider
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
+from meridian_desktop.search_kinds import KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
+from meridian_desktop.ui.connection_check import ConnectionCheckJob, ConnectionDone
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
@@ -71,23 +95,28 @@ from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.tab_scroll import install_drag_scroll
+from meridian_desktop.ui.text import TextBlock, make_selectable, set_label_text
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
-# (tab name, wave that built it). Display order is the tuple order. Five tabs, no more: the rest of the
-# areas are cards on Home, the Search tab's kinds, or sections of Settings.
+# (tab name, wave that built it). Display order is the tuple order. Seven tabs, no more: the rest of the
+# areas are cards on Home or sections of Settings.
 TAB_SPECS = (
     ("Home", 7),
     ("Projects", 2),
     ("Sessions", 3),
-    ("Search", 6),
+    ("Code", 6),
+    ("Outputs", 6),
+    ("Research", 6),
     ("Settings", 2),
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
+# The three search tabs, and the one kind each one searches (see ui/search_tab.py).
+SEARCH_TAB_KINDS = {"Code": KIND_CODE, "Outputs": KIND_OUTPUTS, "Research": KIND_RESEARCH}
 
 ZOTERO_SECTION = "Zotero (the Zotero app on this computer, 127.0.0.1:23119)"
 
@@ -101,9 +130,66 @@ MODE_DESCRIPTIONS = {
     TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
-# The window opens at this size (width, height). The five tab labels fit at 1280 px, and Home scrolls its cards
-# below that height, so no card is cut off on a short window.
+# The window opens at this size (width, height) when the screen has room for it. The seven tab labels fit at 1280 px,
+# and Home scrolls its cards below that height, so no card is cut off on a short window.
 DEFAULT_WINDOW_SIZE = (1280, 780)
+# On a smaller screen the window opens at most this share of the usable width and height, so its frame and title bar
+# stay on screen with a little room around them.
+SCREEN_SHARE = 0.9
+
+
+def _start_within(start: int, length: int, low: int, length_available: int) -> int:
+    """The start of a span of ``length`` moved as little as it can to lie inside ``length_available`` from ``low``.
+
+    When the span is longer than the room, it starts at ``low``, so a window's left edge and title bar stay on screen.
+    """
+    return max(low, min(start, low + length_available - length))
+
+
+def initial_window_rect(available: QRect, frame: QMargins, preferred: QSize, minimum: QSize) -> QRect:
+    """The window's rectangle on first show, as setGeometry takes it (the area inside the frame). Pure: no widget.
+
+    ``available`` is the usable area of the screen (QScreen.availableGeometry: the screen less the taskbar), and
+    ``frame`` is the border and title bar around the window. The frame is at most SCREEN_SHARE of the usable width and
+    height, the window is at most ``preferred`` and at least ``minimum``, and the frame is centred in the usable area.
+    Only a ``minimum`` too large for the usable area makes the frame leave it, and then the frame's top-left corner is
+    the usable area's, so the title bar stays on screen.
+    """
+    horizontal = frame.left() + frame.right()
+    vertical = frame.top() + frame.bottom()
+    width = min(preferred.width(), int(available.width() * SCREEN_SHARE) - horizontal)
+    height = min(preferred.height(), int(available.height() * SCREEN_SHARE) - vertical)
+    size = QSize(width, height).expandedTo(minimum).expandedTo(QSize(1, 1))
+    frame_width, frame_height = size.width() + horizontal, size.height() + vertical
+    left = _start_within(
+        available.left() + (available.width() - frame_width) // 2, frame_width, available.left(), available.width()
+    )
+    top = _start_within(
+        available.top() + (available.height() - frame_height) // 2, frame_height, available.top(), available.height()
+    )
+    return QRect(QPoint(left + frame.left(), top + frame.top()), size)
+
+
+def kept_window_rect(available: QRect, current: QRect, frame: QMargins, minimum: QSize) -> QRect:
+    """The window's rectangle after it moved to another screen, or its screen's usable area changed. Pure: no widget.
+
+    ``current`` is the window's rectangle as geometry() gives it. The window keeps its place and size where it can. A
+    window wider or taller than the usable area shrinks to it (never below ``minimum``) and moves inside it on that
+    side, and a title bar above the top of the usable area moves down to it. A window that fits but sits partly off a
+    side, as while it is dragged to the next screen, is left where it is.
+    """
+    horizontal = frame.left() + frame.right()
+    vertical = frame.top() + frame.bottom()
+    room = QSize(available.width() - horizontal, available.height() - vertical)
+    size = current.size().boundedTo(room).expandedTo(minimum)
+    left = current.left() - frame.left()
+    top = current.top() - frame.top()
+    if size.width() < current.width():
+        left = _start_within(left, size.width() + horizontal, available.left(), available.width())
+    if size.height() < current.height():
+        top = _start_within(top, size.height() + vertical, available.top(), available.height())
+    top = max(top, available.top())
+    return QRect(QPoint(left + frame.left(), top + frame.top()), size)
 
 
 def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
@@ -117,13 +203,25 @@ def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
     return allowed
 
 
-class ProjectsUnavailable(Exception):
-    """The Projects resolver found no source to read. The Sessions tab then says the projects could not be read,
-    in plain words that name no class and no path."""
+def _show_line(label: QLabel, text: str) -> None:
+    """Show one status-bar line. The same line again is left alone, so a selection in it stays. The tooltip holds all
+    of it, for a line too long for the bar."""
+    set_label_text(label, text)
+    label.setToolTip(text)
+
+
+def _line_reporter(label: QLabel) -> Callable[[str], None]:
+    """A callable that shows a line in ``label``, for the update notice. It holds the label, never the window, so the
+    notice keeps no reference cycle through the window (see _saved_local_url)."""
+
+    def report(text: str) -> None:
+        _show_line(label, text)
+
+    return report
 
 
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
-    """The local URL as saved now, read by the Search tab when a search runs.
+    """The local URL as saved now, read by the search tabs when a search runs.
 
     It holds the store, not the window. A bound method of the window kept the window in a reference
     cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
@@ -159,26 +257,44 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
     return read
 
 
-def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str]]]:
-    """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
+def _connection_reader(
+    store: SettingsStore,
+    secrets: SecretStore,
+    local_probe: Callable[[str], str],
+    hosted_transport: hosted_client.Transport | None,
+    mode: str,
+) -> Callable[[], ConnectionResult]:
+    """The read one connection check makes for ``mode``. It runs on the worker thread and holds no window.
 
-    When the resolver found no source to read, the provider raises ProjectsUnavailable. The Sessions tab then
-    says the projects could not be read, rather than that no projects exist.
+    Local asks ``local_probe``, the probe the Projects tab uses, at the Local URL saved now. Hosted reads the hosted URL
+    saved now and the saved token. The token is read here, on the worker, and goes only to the hosted client. Tunnel is
+    not read here: its check is the top bar's tunnel status read.
     """
 
-    def read() -> list[tuple[str, str]]:
-        outcome = resolve(store.load().settings, sources)
-        if outcome.state != STATE_OK:
-            raise ProjectsUnavailable(outcome.message)
-        pairs: list[tuple[str, str]] = []
-        for row in outcome.rows:
-            pid = row.get("id")
-            if isinstance(pid, str) and pid.strip():
-                name = row.get("name")
-                pairs.append((pid, name if isinstance(name, str) else ""))
-        return pairs
+    def read() -> ConnectionResult:
+        settings = store.load().settings
+        if mode == connection_status.HOSTED:
+            return connection_status.probe_hosted(
+                settings.hosted_url, token_store.get_token(store=secrets), transport=hosted_transport
+            )
+        return connection_status.probe_local(settings.local_url, local_probe)
 
     return read
+
+
+def _saved_projects(store: SettingsStore, sources: DataSources) -> ProjectsProvider:
+    """The projects the Projects tab resolves, as (id, name) pairs, through the same resolver and Settings.
+
+    When the resolver gives no rows (no source to read, or a failed read such as a hosted 401), the provider raises
+    data_source.ProjectsUnresolved with the resolver's own message, and the Sessions tab shows that message. The
+    provider also names the database file the Sessions file read uses, and the settings that choose it. It holds the
+    store, never the window.
+    """
+
+    def load() -> Settings:
+        return store.load().settings
+
+    return ProjectsProvider(load, sources)
 
 
 def _saved_tools_status(store: SettingsStore) -> Callable[[], ToolsStatus]:
@@ -217,7 +333,7 @@ class _ConfiguredRunner:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above five tabs: Home, Projects, Sessions, Search and Settings."""
+    """Mode selector above seven tabs: Home, Projects, Sessions, Code, Outputs, Research and Settings."""
 
     def __init__(
         self,
@@ -231,10 +347,25 @@ class MainWindow(QMainWindow):
         runner_actions: RunnerActions | None = None,
         update_root: Path | None = None,
         record_apps_entry: updater.AppsEntryWriter | None = None,
+        zotero_bridge: Any | None = None,
+        hosted_transport: hosted_client.Transport | None = None,
+        skip_connection_check: bool = False,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
+        # The hosted connection check's transport (the /health and /projects reads of the mode bar). Tests pass a
+        # fake, so they send nothing. None means the real urllib transport, which is what the app uses.
+        self._hosted_transport = hosted_transport
+        # A window built for a --smoke run starts no connection check (see _start_connection_check). A normal launch
+        # leaves this off, so its check runs as before.
+        self._skip_connection_check = skip_connection_check
+        # Each connection check takes the next number. A result with an older number is dropped
+        # (see _on_connection_done).
+        self._connection_generation = 0
+        # The Zotero bridge calls (status and update, both on the local server at the Local URL). Tests pass a fake.
+        # The app uses the zotero_bridge_client module.
+        self._zotero_bridge = zotero_bridge if zotero_bridge is not None else zotero_bridge_client
         # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
         # The Zotero cards and panel call this object. Tests pass a fake. The app uses the zotero_client module.
@@ -250,6 +381,8 @@ class MainWindow(QMainWindow):
         self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
         # Each tunnel check takes the next number. A result with an older number is dropped.
         self._tunnel_generation = 0
+        # Checks on the pool that have not delivered yet. Test connection is off while any is running.
+        self._checks_in_flight = 0
         # A plain token that identifies this window's checks. A result carries it, so the window keeps only its own.
         self._owner = object()
         shared_delivery().delivered.connect(self._on_delivered)
@@ -258,6 +391,15 @@ class MainWindow(QMainWindow):
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addLayout(self._build_mode_bar(central))
+
+        # The status bar's one line of text is a selectable label, not a painted message, so it can be selected and
+        # copied. Every line the window shows there goes through show_status. It takes no width of its own, so a long
+        # line never widens the window: it is cut at the edge, and its tooltip holds all of it.
+        self._status_line = make_selectable(QLabel(self))
+        self._status_line.setObjectName("status-line")
+        self._status_line.setTextFormat(Qt.TextFormat.PlainText)
+        self._status_line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.statusBar().addWidget(self._status_line, 1)
 
         # The status-bar notice holds the one update check of this window, and Home's Updates card reads its result, so
         # it is built before the tabs and added to the status bar below. The bar is hidden unless a release is downloading
@@ -268,11 +410,13 @@ class MainWindow(QMainWindow):
             update_transport,
             install_root=update_root,
             enabled=_updates_allowed_reader(self._store),
-            report=self.statusBar().showMessage,
+            report=_line_reporter(self._status_line),
             parent=self,
             record_apps_entry=record_apps_entry,
         )
 
+        # A left-button drag held past the edge of a tab scrolls it (ui/tab_scroll.py). Installed once per application.
+        install_drag_scroll()
         self.tabs = QTabWidget(central)
         for name, _wave in TAB_SPECS:
             if name == "Home":
@@ -294,9 +438,10 @@ class MainWindow(QMainWindow):
                     _saved_mode(self._store),
                     parent=self.tabs,
                 )
-            elif name == "Search":
-                # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
-                page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
+            elif name in SEARCH_TAB_KINDS:
+                # Each search tab searches its own kind. Nothing is searched on build or show. Search or Enter reads
+                # the Local URL at that moment.
+                page = SearchTab(_saved_local_url(self._store), SEARCH_TAB_KINDS[name], parent=self.tabs)
             else:
                 page = self._build_settings_page()
                 self._settings_page = page
@@ -304,16 +449,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
         # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
-        # may not shrink below the full bar, so every tab label stays visible.
+        # may not shrink below the full bar, so every tab label stays visible. The labels are short and fit well
+        # inside a small laptop screen, so this minimum stays.
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
+        # The size asked for. The first show fits it to the usable area of the screen (see showEvent).
         self.resize(*DEFAULT_WINDOW_SIZE)
+        self._placed = False
+        self._watched_screen: QScreen | None = None
 
-        self.statusBar().showMessage(STATUS_MESSAGE)
+        self.show_status(STATUS_MESSAGE)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
+        # The connection line for the saved mode, checked once as the window opens. Tunnel mode's line is the check
+        # above.
+        self._start_connection_check()
         # The core search at start, and any later search or chosen core folder, changes what the tunnel check can reach.
         # A Tunnel mode window checks again once a search has finished.
         self._runner_actions.coreChanged.connect(self._on_core_changed)
@@ -324,6 +476,100 @@ class MainWindow(QMainWindow):
         if self._runner_actions.locating or self._saved_mode != TUNNEL_MODE:
             return
         self._start_tunnel_check()
+
+    # ----------------------------------------------------------- size and place on screen
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """At the first show, fit the window inside the usable area of its screen, centred, and start watching it."""
+        super().showEvent(event)
+        if self._placed:
+            return
+        self._placed = True
+        self._place_on_screen()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.screenChanged.connect(self._on_screen_changed)
+        self._watch_screen(self.screen())
+        # Some systems report the title bar's height only once the window is on screen. Check the frame again then.
+        # A child timer, not QTimer.singleShot with a bound method: that would hold the window until it fired, so a
+        # window closed at once would not be freed by reference counting.
+        recheck = QTimer(self)
+        recheck.setSingleShot(True)
+        recheck.timeout.connect(self._recheck_after_show)
+        recheck.start(0)
+
+    def _sized_by_state(self) -> bool:
+        """A maximised, full-screen or minimised window is sized by the system, so it is never moved here."""
+        return self.isMaximized() or self.isFullScreen() or self.isMinimized()
+
+    def _frame_margins(self) -> QMargins:
+        """The border and title bar around the window, as the system reports them (zero until it knows them)."""
+        frame, inner = self.frameGeometry(), self.geometry()
+        return QMargins(
+            inner.left() - frame.left(),
+            inner.top() - frame.top(),
+            frame.right() - inner.right(),
+            frame.bottom() - inner.bottom(),
+        )
+
+    def _minimum_window_size(self) -> QSize:
+        return self.minimumSizeHint().expandedTo(self.minimumSize())
+
+    def _place_on_screen(self) -> None:
+        """Size the window to its screen's usable area (see initial_window_rect) and centre it there."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        self.setGeometry(
+            initial_window_rect(
+                screen.availableGeometry(), self._frame_margins(), self.size(), self._minimum_window_size()
+            )
+        )
+
+    @Slot()
+    def _recheck_after_show(self) -> None:
+        """Place the window again if its real frame, now known, leaves the usable area of its screen."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        if not screen.availableGeometry().contains(self.frameGeometry()):
+            self._place_on_screen()
+
+    def _watch_screen(self, screen: QScreen | None) -> None:
+        """Follow changes to the usable area of the window's screen, and stop following the screen it left."""
+        if screen is self._watched_screen:
+            return
+        if self._watched_screen is not None:
+            try:
+                self._watched_screen.availableGeometryChanged.disconnect(self._on_available_changed)
+            except (RuntimeError, TypeError):
+                pass  # the screen was removed, or the connection is already gone
+        self._watched_screen = screen
+        if screen is not None:
+            screen.availableGeometryChanged.connect(self._on_available_changed)
+
+    @Slot(QScreen)
+    def _on_screen_changed(self, screen: QScreen) -> None:
+        """The window moved to another screen. Keep it no larger than that screen, with its title bar on it."""
+        self._watch_screen(screen)
+        self._keep_on_screen()
+
+    @Slot(QRect)
+    def _on_available_changed(self, _available: QRect) -> None:
+        """The usable area of the window's screen changed, as when the resolution, scale or taskbar changes."""
+        self._keep_on_screen()
+
+    def _keep_on_screen(self) -> None:
+        """Shrink a window larger than its screen's usable area, and move a title bar above it down (kept_window_rect)."""
+        screen = self.screen()
+        if screen is None or self._sized_by_state():
+            return
+        current = self.geometry()
+        kept = kept_window_rect(
+            screen.availableGeometry(), current, self._frame_margins(), self._minimum_window_size()
+        )
+        if kept != current:
+            self.setGeometry(kept)
 
     # ----------------------------------------------------------- building
 
@@ -362,7 +608,16 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(container)
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
-        column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
+        # The bridge line and Update bridge read the local server at the saved Local URL, on the pool, the same way the
+        # search tabs read it (_saved_local_url holds the store, never the window).
+        column.addWidget(
+            ZoteroPanel(
+                client=self._zotero,
+                bridge=self._zotero_bridge,
+                local_url=_saved_local_url(self._store),
+                parent=container,
+            )
+        )
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
         column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
         column.addWidget(WritingArea(container))
@@ -393,10 +648,15 @@ class MainWindow(QMainWindow):
         self.tunnel_status_label = make_selectable(QLabel(parent))
         self.tunnel_status_label.setObjectName("tunnel-mode-status")
         self.tunnel_status_label.setTextFormat(Qt.TextFormat.PlainText)
-        bar.addWidget(self.tunnel_status_label)
+        # The top bar's lines wrap. A label that does not wrap is as wide as its text at the least, and a settings
+        # warning can join one problem per key, so the window could not shrink to a small screen.
+        self.tunnel_status_label.setWordWrap(True)
+        # It takes the spare width, so it stays on one line wherever the window has room for it.
+        bar.addWidget(self.tunnel_status_label, 1)
 
         self.settings_warning = make_selectable(QLabel(parent))
         self.settings_warning.setObjectName("settings-warning")
+        self.settings_warning.setWordWrap(True)
         if result.warning:
             self.settings_warning.setText(f"Settings: {result.warning}")
         else:
@@ -404,20 +664,28 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.settings_warning, 1)
 
         # The chosen mode's description. In Tunnel mode, the detail line names the tools that need the
-        # tunnel and, when the tunnel is not running, how to start it by hand.
-        self.mode_description = make_selectable(QLabel(parent))
-        self.mode_description.setObjectName("mode-description")
-        self.mode_description.setTextFormat(Qt.TextFormat.PlainText)
-        self.mode_description.setWordWrap(True)
-        self.tunnel_detail = make_selectable(QLabel(parent))
-        self.tunnel_detail.setObjectName("tunnel-mode-detail")
-        self.tunnel_detail.setTextFormat(Qt.TextFormat.PlainText)
-        self.tunnel_detail.setWordWrap(True)
-
+        # tunnel and, when the tunnel is not running, how to start it by hand. The two lines are one block, so one drag
+        # over them selects both. The gap is the 6 px a layout gives two labels on this style. The column has no parent yet,
+        # so its own spacing() is unset here and cannot supply it.
         column = QVBoxLayout()
+        self._mode_text = TextBlock(parent, "mode-text", spacing=6)
+        self.mode_description = self._mode_text.line("mode-description", "")
+        self.tunnel_detail = self._mode_text.line("tunnel-mode-detail", "")
         column.addLayout(bar)
-        column.addWidget(self.mode_description)
-        column.addWidget(self.tunnel_detail)
+        column.addWidget(self._mode_text.label)
+        # The connection line for the chosen mode sits under the description, with its Test connection button beside it.
+        # It is one selectable line, so a drag over it and Ctrl+C copy it. Its text comes from connection_status.py.
+        connection = QHBoxLayout()
+        self.connection_status_label = make_selectable(QLabel(parent))
+        self.connection_status_label.setObjectName("connection-status")
+        self.connection_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.connection_status_label.setWordWrap(True)
+        connection.addWidget(self.connection_status_label, 1)
+        self.test_connection_button = QPushButton("Test connection", parent)
+        self.test_connection_button.setObjectName("mode-test-connection")
+        self.test_connection_button.clicked.connect(self._on_test_connection)
+        connection.addWidget(self.test_connection_button)
+        column.addLayout(connection)
         return column
 
     # ----------------------------------------------------------- tabs
@@ -432,12 +700,21 @@ class MainWindow(QMainWindow):
 
         A line another part of the window set, such as a launch note or an update notice, is left alone when Home is chosen.
         """
-        status = self.statusBar()
         if self.tabs.widget(index) is self._home_page:
-            if not status.currentMessage():
-                status.showMessage(STATUS_MESSAGE)
-        elif status.currentMessage() == STATUS_MESSAGE:
-            status.clearMessage()
+            if not self.status_message():
+                self.show_status(STATUS_MESSAGE)
+        elif self.status_message() == STATUS_MESSAGE:
+            self.show_status("")
+
+    # ----------------------------------------------------------- status bar
+
+    def show_status(self, text: str) -> None:
+        """Show one line on the status bar. The same line again is left alone, so a selection in it stays."""
+        _show_line(self._status_line, text)
+
+    def status_message(self) -> str:
+        """The line the status bar shows now, or "" when it shows none."""
+        return self._status_line.text()
 
     # ----------------------------------------------------------- mode
 
@@ -457,6 +734,8 @@ class MainWindow(QMainWindow):
         # The Projects tab reads from the source the new mode names.
         self._projects.refresh()
         self._apply_mode_view(mode)
+        # The connection line for the new mode, checked once.
+        self._start_connection_check()
 
     def _apply_mode_view(self, mode: str) -> None:
         """Show the description of ``mode``, and the tunnel lines only in Tunnel mode.
@@ -488,6 +767,8 @@ class MainWindow(QMainWindow):
         delivery = shared_delivery()
         self.tunnel_status_label.setText(BAR_CHECKING_TEXT)
         self.tunnel_detail.setText(DEPENDENCY_TEXT)
+        self._show_connection(connection_status.CHECKING_TEXT)
+        self._check_started()
         QThreadPool.globalInstance().start(
             TunnelCheckJob(
                 lambda: read_tunnel_status(runner.status),
@@ -500,16 +781,94 @@ class MainWindow(QMainWindow):
         """Runs on the GUI thread. A result for another window, an older check, or one from before a mode change is dropped."""
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
+        # Every check on the pool delivers once, so the count is back to zero even when its result is dropped below.
+        self._check_delivered()
+        if isinstance(item.value, ConnectionDone):
+            self._on_connection_done(item.value)
+            return
         generation, (status, failure) = item.value
         if generation != self._tunnel_generation or self._saved_mode != TUNNEL_MODE:
             return  # an older check, or the mode changed after this check started
         line, detail = bar_texts(status, failure)
         self.tunnel_status_label.setText(line)
         self.tunnel_detail.setText(detail)
+        # The tunnel's connection line is this same read, so the tunnel is read once per check.
+        if status is None:
+            self._show_connection(connection_status.CHECK_FAILED_TEXT)
+        else:
+            self._show_connection(connection_status.status_text(connection_status.tunnel_result(status)))
+
+    # ----------------------------------------------------------- connection line
+
+    def _show_connection(self, text: str) -> None:
+        """Show the mode bar's connection line. The same text again is left alone, so a selection in it stays."""
+        set_label_text(self.connection_status_label, text)
+
+    def _check_started(self) -> None:
+        """One check is now on the pool. Test connection is off until every check on the pool has delivered."""
+        self._checks_in_flight += 1
+        self.test_connection_button.setEnabled(False)
+
+    def _check_delivered(self) -> None:
+        """One check on the pool has delivered, whether or not its result is shown. Test connection is on at zero.
+
+        A check that a mode change makes stale still delivers, so the count reaches zero and the button comes back on.
+        """
+        self._checks_in_flight = max(0, self._checks_in_flight - 1)
+        self.test_connection_button.setEnabled(self._checks_in_flight == 0)
+
+    def _start_connection_check(self) -> None:
+        """One read-only check of the chosen mode's connection, on the thread pool. The UI thread never waits on it.
+
+        Local and Hosted are checked here. Tunnel has no check of its own: its line is the top bar's tunnel status read
+        (_start_tunnel_check), so each check reads the tunnel once. The job holds the stores, the probe and the owner
+        token, never the window. Its result comes back to _on_delivered on the GUI thread.
+
+        A window built with skip_connection_check starts no check here, from any caller, so it sends no request.
+        """
+        if self._saved_mode == TUNNEL_MODE or self._skip_connection_check:
+            return
+        self._connection_generation += 1
+        generation = self._connection_generation
+        mode = self._saved_mode
+        owner = self._owner
+        delivery = shared_delivery()
+        self._show_connection(connection_status.CHECKING_TEXT)
+        read = _connection_reader(self._store, self._secrets, self._sources.probe, self._hosted_transport, mode)
+
+        def deliver(result: ConnectionResult | None) -> None:
+            delivery.delivered.emit(Delivered(owner, ConnectionDone(generation, mode, result)))
+
+        self._check_started()
+        QThreadPool.globalInstance().start(ConnectionCheckJob(read, deliver))
+
+    @Slot()
+    def _on_test_connection(self) -> None:
+        """Test connection: one check of the chosen mode, now. Tunnel mode makes the read its top bar makes.
+
+        A window built with skip_connection_check makes no check from here in any mode, so a smoke run starts none.
+        """
+        if self._saved_mode == TUNNEL_MODE:
+            if not self._skip_connection_check:
+                self._start_tunnel_check()
+        else:
+            self._start_connection_check()
+
+    def _on_connection_done(self, done: ConnectionDone) -> None:
+        """Show a finished connection check. A result from an older check, or from another mode, is dropped."""
+        if done.generation != self._connection_generation or done.mode != self._saved_mode:
+            return
+        self._show_connection(
+            connection_status.CHECK_FAILED_TEXT if done.result is None else connection_status.status_text(done.result)
+        )
 
     def show_launch_notes(self, text: str) -> None:
         """Show what the launch-time starts did, on the status bar. Called on the GUI thread by ui/runner_actions.LaunchStarts."""
-        self.statusBar().showMessage(text)
+        self.show_status(text)
+
+    def run_home_launch_checks(self) -> None:
+        """The Overleaf card's launch-time checks. app.py calls this once, after the window shows. The card runs them once."""
+        self._home_page.run_launch_checks()
 
     def _revert_mode_selector(self) -> None:
         """Show the last saved mode again. Signals stay blocked, so the change does not save a second time."""

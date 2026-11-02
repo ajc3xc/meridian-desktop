@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from meridian_desktop import claude_processes as cp
 from meridian_desktop import settings_store, token_store
 from meridian_desktop.settings_store import (
     DEFAULT_LOCAL_URL,
@@ -14,6 +15,7 @@ from meridian_desktop.settings_store import (
     core_path_problem,
     default_settings_path,
 )
+from meridian_desktop.ui.sessions_panel import claude_status_text
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -383,6 +385,143 @@ def test_check_updates_that_is_not_true_or_false_warns_and_stays_on(settings_pat
     assert result.warning is not None and "check_updates" in result.warning
 
 
+# ----------------------------------------------------------- the LaTeX engine folder and the Overleaf card's switches
+
+
+def test_the_engine_settings_default_without_a_warning(settings_path):
+    assert Settings().engine_folder == ""
+    assert Settings().engine_auto_start is True
+    assert Settings().overleaf_auto_check is True
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == ""
+    assert result.settings.engine_auto_start is True
+    assert result.settings.overleaf_auto_check is True
+
+
+def test_absent_engine_keys_give_the_defaults_and_keep_the_other_fields(settings_path):
+    _write(settings_path, json.dumps({"check_updates": False}))
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == ""
+    assert result.settings.engine_auto_start is True
+    assert result.settings.overleaf_auto_check is True
+    assert result.settings.check_updates is False
+
+
+def test_engine_folder_round_trips_and_is_written_only_when_chosen(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    chosen = str(tmp_path / "engine")
+    store.save(Settings(engine_folder=chosen))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["engine_folder"] == chosen
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == chosen
+    # Cleared, the key goes, so a file that never chose a folder is written as before.
+    store.save(Settings(engine_folder=""))
+    assert "engine_folder" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.engine_folder == ""
+
+
+@pytest.mark.parametrize("key", ["engine_auto_start", "overleaf_auto_check"])
+def test_each_engine_switch_round_trips_off_and_back_on(settings_path, key):
+    store = SettingsStore(settings_path)
+    store.save(replace(Settings(), **{key: False}))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))[key] is False
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert getattr(result.settings, key) is False
+    # On is the default, so turning it back on removes the key again.
+    store.save(replace(Settings(), **{key: True}))
+    assert key not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert getattr(SettingsStore(settings_path).load().settings, key) is True
+
+
+def test_saving_the_engine_folder_keeps_the_switches_and_the_other_fields(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    store.save(replace(Settings(), check_updates=False, engine_auto_start=False))
+    store.save(replace(SettingsStore(settings_path).load().settings, engine_folder=str(tmp_path)))
+    kept = SettingsStore(settings_path).load().settings
+    assert kept.engine_folder == str(tmp_path)
+    assert kept.engine_auto_start is False
+    assert kept.check_updates is False
+
+
+@pytest.mark.parametrize("key", ["engine_auto_start", "overleaf_auto_check"])
+@pytest.mark.parametrize("value", ["no", 0, None, [True]])
+def test_a_non_boolean_engine_switch_warns_and_uses_its_default(settings_path, key, value):
+    _write(settings_path, json.dumps({key: value}))
+    result = SettingsStore(settings_path).load()
+    assert getattr(result.settings, key) is True
+    assert result.warning is not None and key in result.warning
+
+
+def test_an_engine_folder_that_is_not_text_warns_and_is_empty(settings_path):
+    _write(settings_path, json.dumps({"engine_folder": 5}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.engine_folder == ""
+    assert result.warning is not None and "engine_folder" in result.warning
+
+
+def test_the_hourly_overleaf_check_is_off_by_default_without_a_warning(settings_path):
+    assert Settings().overleaf_check_interval_minutes == 0
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.overleaf_check_interval_minutes == 0
+
+
+def test_the_hourly_overleaf_check_round_trips_and_is_written_only_when_on(settings_path):
+    store = SettingsStore(settings_path)
+    store.save(replace(Settings(), overleaf_check_interval_minutes=60))
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["overleaf_check_interval_minutes"] == 60
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.overleaf_check_interval_minutes == 60
+    # Off is the default, so turning it off removes the key again.
+    store.save(replace(Settings(), overleaf_check_interval_minutes=0))
+    assert "overleaf_check_interval_minutes" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.overleaf_check_interval_minutes == 0
+
+
+@pytest.mark.parametrize("value", [5, 30, 120, "60", 60.0, True, None, [60]])
+def test_a_malformed_hourly_check_value_warns_and_stays_off(settings_path, value):
+    _write(settings_path, json.dumps({"overleaf_check_interval_minutes": value}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.overleaf_check_interval_minutes == 0
+    assert result.warning is not None and "overleaf_check_interval_minutes" in result.warning
+
+
+def test_the_confirmed_engine_folder_defaults_to_not_confirmed_without_a_warning(settings_path):
+    assert Settings().confirmed_engine_folder == ""
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.confirmed_engine_folder == ""
+
+
+def test_confirmed_engine_folder_round_trips_and_is_written_only_when_confirmed(settings_path, tmp_path):
+    store = SettingsStore(settings_path)
+    chosen = str(tmp_path / "engine")
+    store.save(Settings(engine_folder=chosen, confirmed_engine_folder=chosen))
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["engine_folder"] == chosen
+    assert saved["confirmed_engine_folder"] == chosen
+    result = SettingsStore(settings_path).load()
+    assert result.warning is None
+    assert result.settings.engine_folder == chosen
+    assert result.settings.confirmed_engine_folder == chosen
+    # A folder that was chosen but never confirmed has no confirmed key, so a file written before this key is unchanged.
+    store.save(Settings(engine_folder=chosen))
+    assert "confirmed_engine_folder" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.confirmed_engine_folder == ""
+
+
+def test_a_confirmed_engine_folder_that_is_not_text_warns_and_is_empty(settings_path):
+    _write(settings_path, json.dumps({"confirmed_engine_folder": 5}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.confirmed_engine_folder == ""
+    assert result.warning is not None and "confirmed_engine_folder" in result.warning
+
+
 # ----------------------------------------------------------- the runner control switches (contract rule 10, amendments A to C)
 
 CONTROL_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server_autostart")
@@ -660,3 +799,150 @@ def test_without_a_resolved_launch_mode_a_store_still_reads_local(settings_path)
     _write(settings_path, json.dumps({"hosted_url": "https://usemeridian.us"}))
 
     assert SettingsStore(settings_path).load().settings.mode == "local"
+
+
+# ----------------------------------------------------------- the saved custom program names (agent_process_names)
+
+
+def test_custom_names_load_with_the_dropped_count_and_save_only_the_valid_ones(settings_path):
+    _write(settings_path, json.dumps({"agent_process_names": ["myagent.exe", "bad/x.exe", 7, None, "ok_agent.exe"]}))
+    loaded = SettingsStore(settings_path).load()
+    # The list loads with no warning. Each non-text entry is kept as an empty name, which the listing counts as dropped.
+    assert loaded.warning is None
+    # The listing counts the three entries that are not valid, and its status line says so.
+    result = cp.list_claude_processes(snapshot=lambda: [], custom_names=loaded.settings.agent_process_names)
+    assert result.dropped == 3
+    assert claude_status_text(result, "12:00:00").endswith("3 saved program names are not valid and were left out.")
+    # Saving writes only the valid names: no empty entry and no broken one.
+    SettingsStore(settings_path).save(loaded.settings)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["agent_process_names"] == ["myagent.exe", "ok_agent.exe"]
+    # The saved file loads back with the two valid names, so nothing is left to drop.
+    again = SettingsStore(settings_path).load()
+    assert again.warning is None
+    assert again.settings.agent_process_names == ("myagent.exe", "ok_agent.exe")
+    assert cp.list_claude_processes(snapshot=lambda: [], custom_names=again.settings.agent_process_names).dropped == 0
+
+
+def test_saving_only_names_that_are_not_valid_writes_no_key(settings_path):
+    SettingsStore(settings_path).save(Settings(agent_process_names=("bad/x.exe", "", "no_extension")))
+    assert "agent_process_names" not in json.loads(settings_path.read_text(encoding="utf-8"))
+    assert SettingsStore(settings_path).load().settings.agent_process_names == ()
+
+
+def test_an_old_settings_file_without_the_custom_names_key_still_loads(settings_path):
+    _write(settings_path, json.dumps({"mode": "local", "local_url": DEFAULT_LOCAL_URL}))
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.warning is None
+    assert loaded.settings.agent_process_names == ()
+    SettingsStore(settings_path).save(loaded.settings)
+    assert "agent_process_names" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+
+# ----------------------------------------------------------- the clients the owner ticks (client_choices)
+
+
+def test_client_choices_default_to_the_two_clients_the_desktop_always_set_up(settings_path):
+    assert Settings().client_choices == ("claude-desktop", "codex")
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.settings.client_choices == ("claude-desktop", "codex")
+    assert loaded.warning is None
+
+
+def test_a_saved_client_choice_reads_back_in_the_order_given(settings_path):
+    store = SettingsStore(settings_path)
+    store.set_client_choices(["codex", "cursor"])
+
+    assert SettingsStore(settings_path).load().settings.client_choices == ("codex", "cursor")
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["client_choices"] == ["codex", "cursor"]
+
+
+def test_an_empty_choice_is_saved_as_a_real_choice_and_read_back(settings_path):
+    SettingsStore(settings_path).set_client_choices([])
+
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.settings.client_choices == ()
+    assert loaded.warning is None
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["client_choices"] == []
+
+
+def test_the_default_choice_is_never_written(settings_path):
+    SettingsStore(settings_path).set_client_choices(["claude-desktop", "codex"])
+
+    assert "client_choices" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+
+def test_a_repeated_choice_is_kept_once(settings_path):
+    _write(settings_path, json.dumps({"client_choices": ["cursor", "cursor", "codex"]}))
+
+    loaded = SettingsStore(settings_path).load()
+    assert loaded.settings.client_choices == ("cursor", "codex")
+    assert loaded.warning is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "codex",
+        7,
+        None,
+        {"codex": True},
+        ["codex", 3],
+        [None],
+        [["codex"]],
+    ],
+)
+def test_a_malformed_client_choice_loads_as_nothing_ticked_with_a_warning(settings_path, value):
+    _write(settings_path, json.dumps({"client_choices": value}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.settings.client_choices == ()
+    assert loaded.warning is not None and "client_choices" in loaded.warning
+
+
+def test_a_malformed_client_choice_is_not_the_default_two_clients(settings_path):
+    _write(settings_path, json.dumps({"client_choices": "codex"}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.settings.client_choices == ()
+    assert "claude-desktop" not in loaded.settings.client_choices
+    assert loaded.warning == "client_choices must be a list of known client names; using none"
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        (["codex", "not-a-client"], ("codex",)),
+        (["cursor", "codex", "gone", "codex"], ("cursor", "codex")),
+        (["not-a-client"], ()),
+    ],
+)
+def test_a_partly_unknown_client_choice_keeps_the_known_names_and_warns(settings_path, value, kept):
+    _write(settings_path, json.dumps({"client_choices": value}))
+
+    loaded = SettingsStore(settings_path).load()
+
+    assert loaded.settings.client_choices == kept
+    assert loaded.warning == "client_choices has names this desktop does not know; dropping them"
+
+
+def test_a_set_with_a_name_the_desktop_does_not_know_writes_nothing(settings_path):
+    store = SettingsStore(settings_path)
+    store.set_client_choices(["cursor"])
+
+    with pytest.raises(ValueError):
+        store.set_client_choices(["codex", "not-a-client"])
+
+    assert SettingsStore(settings_path).load().settings.client_choices == ("cursor",)
+
+
+def test_saving_other_settings_keeps_the_client_choice(settings_path):
+    store = SettingsStore(settings_path)
+    store.set_client_choices(["claude-code"])
+    store.set_mode("hosted")
+
+    settings = SettingsStore(settings_path).load().settings
+    assert settings.client_choices == ("claude-code",)
+    assert settings.mode == "hosted"

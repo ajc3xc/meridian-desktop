@@ -295,7 +295,9 @@ def fetch_latest(transport: Transport) -> Release:
     zip_asset = by_name.get(zip_name)
     sums_asset = by_name.get(SUMS_NAME)
     if zip_asset is None:
-        raise Refused(f"The latest release has no {zip_name} asset.")
+        raise Refused(
+            f"No downloadable build is published for version {version} yet. This is not an error in the app."
+        )
     if sums_asset is None:
         raise Refused("The latest release has no SHA256SUMS asset.")
     sig_asset = by_name.get(SIG_NAME)

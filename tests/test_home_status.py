@@ -6,7 +6,7 @@ or the old tab names. A card that cannot check says why and what to do.
 
 from datetime import datetime
 
-from meridian_desktop import local_client, updater
+from meridian_desktop import local_client, tunnel_status, updater
 from meridian_desktop.home_status import (
     ACTION_CHECK_TOOLS,
     ACTION_LAUNCH_ZOTERO,
@@ -134,9 +134,9 @@ def test_services_engine_running_and_ports_counted():
         ports=(SlotPortResult("a", 1, True), SlotPortResult("b", 2, False), SlotPortResult("c", 3, True)),
     )
     view = services_view(facts)
-    assert view.headline == "LaTeX engine running"
+    assert view.headline == "LaTeX backup engine running"
     assert view.tone == TONE_OK
-    assert view.rows[0].text == "LaTeX engine on port 8471."
+    assert view.rows[0].text == "LaTeX normally runs in Overleaf in your browser. Local backup engine on port 8471."
     assert view.rows[1].text == "Slot ports: 2 of 3 listening on 127.0.0.1."
     _assert_no_old_words(view)
 
@@ -144,9 +144,9 @@ def test_services_engine_running_and_ports_counted():
 def test_services_engine_not_running_is_idle_not_an_error():
     facts = ServiceFacts(engine_url="http://127.0.0.1:8471", engine=_engine(ENGINE_NOT_RUNNING), ports=())
     view = services_view(facts)
-    assert view.headline == "LaTeX engine not running"
+    assert view.headline == "LaTeX backup engine off"
     assert view.tone == TONE_IDLE
-    assert "Start the LaTeX engine you installed" in view.rows[0].detail
+    assert "node dist/server.js" in view.rows[0].detail
 
 
 def test_services_another_program_on_the_engine_port_needs_attention():
@@ -182,6 +182,23 @@ def test_tunnel_running_names_what_needs_it():
     assert view.headline == "Running"
     assert view.tone == TONE_OK
     assert "codebase-memory" in view.detail
+
+
+TUNNEL_TOOLS = ("codebase-memory", "Serena", "filesystem", "Zotero")
+
+
+def test_tunnel_running_detail_names_all_four_tunnel_tools():
+    view = tunnel_view(TunnelStatus(state=RUNNING, reason="The tunnel process is running.", checked_at=CLOCK))
+    assert view.headline == "Running"
+    for tool in TUNNEL_TOOLS:
+        assert tool in view.detail, tool
+
+
+def test_tunnel_running_detail_names_the_same_tools_as_dependent_tools():
+    assert set(tunnel_status.DEPENDENT_TOOLS) == set(TUNNEL_TOOLS)
+    view = tunnel_view(TunnelStatus(state=RUNNING, reason="The tunnel process is running.", checked_at=CLOCK))
+    for tool in tunnel_status.DEPENDENT_TOOLS:
+        assert tool in view.detail, tool
 
 
 def test_tunnel_not_running_says_how_to_start_it_by_hand_and_names_the_confirm():

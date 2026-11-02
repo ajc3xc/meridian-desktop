@@ -15,12 +15,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QRunnable, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QLineEdit,
     QPushButton,
     QTableWidget,
@@ -31,11 +30,12 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import local_client
 from meridian_desktop.local_client import LocalClientError
+from meridian_desktop.api_keys import RUNPOD_NAME
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
-from meridian_desktop.ui.text import enable_table_copy, make_selectable
+from meridian_desktop.ui.text import TextBlock, enable_table_copy
 
 PROBE_TIMEOUT = 2.0
 RUNPOD_TIMEOUT = 30.0
@@ -53,6 +53,8 @@ REMOVE_KEY_CANCELLED_TEXT = "Not removed. The RunPod key is still saved."
 # A removal that failed on the disk. The message names no path and no system text.
 REMOVE_KEY_FAILED_TEXT = "Not removed. The RunPod key could not be deleted from the keychain. Try again."
 NOTHING_HERE_TEXT = "Nothing here yet."
+# The card's heading, the name of the key it holds. The Keys section shows the card under this heading.
+RUNPOD_HEADING = RUNPOD_NAME
 SERVER_UNCHECKED_TEXT = "Local Meridian server: not checked yet"
 
 
@@ -247,14 +249,6 @@ class _Job(QRunnable):
         self._delivery.delivered.emit(Delivered(self._owner, _JobDone(self._job_id, result, error)))
 
 
-def _label(parent: QWidget, name: str, text: str) -> QLabel:
-    label = QLabel(text, parent)
-    label.setObjectName(name)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setWordWrap(True)
-    return make_selectable(label)
-
-
 class RunPodPanel(QWidget):
     """Settings tab content: key storage, a key check, the pod list and the server state."""
 
@@ -303,11 +297,18 @@ class RunPodPanel(QWidget):
         layout = QVBoxLayout(self._card)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._server_status = _label(self, "runpod-server-status", SERVER_UNCHECKED_TEXT)
-        layout.addWidget(self._server_status)
-
-        self._key_status = _label(self, "runpod-key-status", "Checking key storage...")
-        layout.addWidget(self._key_status)
+        # The whole card's text is one block, so one drag from the heading to the last line selects all of it. The block
+        # holds the heading, the two status lines, the result line and the one plain line for no pods. Each line keeps the
+        # object name it had as a label of its own. The result line takes no room until it has text, and the pods line
+        # shows only while there are no pods, so neither leaves a gap. The key row and the buttons stay below the block.
+        self._status = TextBlock(self._card, "runpod-status", spacing=layout.spacing())
+        self._status.line("keys-runpod-name", RUNPOD_HEADING, bold=True)
+        self._server_status = self._status.line("runpod-server-status", SERVER_UNCHECKED_TEXT)
+        self._key_status = self._status.line("runpod-key-status", "Checking key storage...")
+        self._result = self._status.line("runpod-result", "")
+        self._result.setVisible(False)
+        self._pods_empty = self._status.line("runpod-pods-empty", NOTHING_HERE_TEXT)
+        layout.addWidget(self._status.label)
 
         key_row = QHBoxLayout()
         self._key_input = QLineEdit(self)
@@ -333,15 +334,6 @@ class RunPodPanel(QWidget):
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
-        self._result = _label(self, "runpod-result", "")
-        # The result line takes no room until it has text, so an empty line never leaves a gap above the pods table.
-        self._result.setVisible(False)
-        layout.addWidget(self._result)
-
-        # With no pods the grid is hidden and one plain line says so, so an empty box never shows.
-        self._pods_empty = make_selectable(QLabel(NOTHING_HERE_TEXT, self))
-        self._pods_empty.setObjectName("runpod-pods-empty")
-        layout.addWidget(self._pods_empty)
         self._pods = QTableWidget(0, len(POD_COLUMNS), self)
         self._pods.setObjectName("runpod-pods")
         self._pods.setVisible(False)

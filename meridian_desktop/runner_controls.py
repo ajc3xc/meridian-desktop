@@ -27,13 +27,20 @@ and nowhere else, and the only commands it builds are these, run with shell=Fals
   runner's output, a token or a path. Status is a read, not an attempt, so it is not logged.
 - A state is running only when the runner reports the child running. A missing, failed, unreadable or
   unknown state is unknown, and unknown is never shown as running (rule 7).
+- A confirmed start is read from the status the runner prints as it starts the child, before the child can exit. So
+  the controls read the status again about 3 and 20 seconds later (START_CHECK_DELAYS_SECONDS, check_start). A child
+  that is no longer running then reads as STOPPED_AFTER_START. Each check is logged as ``start-check``, because it
+  settles that start's outcome. It only runs ``status``, never a start or a stop.
 - The desktop never reads or logs a tunnel token (rule 8). It passes none, and it reads none from the environment.
+- The one environment entry the desktop adds is MERIDIAN_TUNNEL_SIGNIN_DAYS, the saved tunnel sign-in lifetime, and only
+  on the tunnel start (tunnel_start_env). Every other call inherits the desktop's environment unchanged.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from meridian_desktop.log_tail import DEFAULT_MAX_BYTES, LogTail, read_log_tail
-from meridian_desktop.settings_store import default_settings_path
+from meridian_desktop.settings_store import DEFAULT_TUNNEL_SIGNIN_DAYS, SettingsStore, default_settings_path
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, UNKNOWN
 
 MODULE = "meridian.local_runner"
@@ -61,6 +68,11 @@ START_TIMEOUT_SECONDS = 30.0
 STOP_TIMEOUT_SECONDS = 15.0
 STATUS_TIMEOUT_SECONDS = 10.0
 TIMEOUTS = {START: START_TIMEOUT_SECONDS, STOP: STOP_TIMEOUT_SECONDS, STATUS: STATUS_TIMEOUT_SECONDS}
+
+# The status reads after a confirmed start, in seconds after it. The log names each one START_CHECK. It is a log word
+# only, never a subcommand: check_start runs ``status``.
+START_CHECK = "start-check"
+START_CHECK_DELAYS_SECONDS = (3.0, 20.0)
 
 # The arguments that follow the core python for each scope's child. Fixed here, never typed by the owner.
 CHILD_ARGS = {
@@ -82,6 +94,8 @@ ALREADY_RUNNING = "already_running"
 FAILED = "failed"
 NOT_AVAILABLE = "not_available"
 REFUSED = "refused"
+# A start check found the child not running: the start was confirmed, but the child exited straight after.
+STOPPED_AFTER_START = "stopped_after_start"
 
 REFUSED_MESSAGE = "This command is not allowed. Only start, stop and status for the local or tunnel scope can be run."
 NOT_AVAILABLE_MESSAGE = (
@@ -103,6 +117,8 @@ STATE_MESSAGES = {
     UNKNOWN: "The {label} state is unknown. It is not shown as running.",
 }
 STARTED_MESSAGE = "The {label} started, and the runner reports it running (pid {pid})."
+STOPPED_AFTER_START_MESSAGE = "Started, but it stopped straight after. Check the control log."
+START_CHECK_UNKNOWN_MESSAGE = "Started, but its state could not be read just after. It is not shown as running."
 STOPPED_MESSAGE = "The {label} is stopped."
 TIMEOUT_MESSAGE = (
     "Not confirmed: the {verb} of the {label} did not finish within {seconds} seconds. Nothing was retried. "
@@ -139,6 +155,26 @@ class ControlResult:
     @property
     def confirmed(self) -> bool:
         return self.outcome == CONFIRMED
+
+
+# The environment entry for the tunnel start: the saved tunnel sign-in lifetime in days. It is the only entry the
+# desktop adds to a runner call, and only the tunnel start carries it (tunnel_start_env).
+SIGNIN_DAYS_ENV = "MERIDIAN_TUNNEL_SIGNIN_DAYS"
+
+
+def tunnel_start_env(signin_days: int) -> dict[str, str]:
+    """The environment for the tunnel start: the desktop's own variables, plus MERIDIAN_TUNNEL_SIGNIN_DAYS only."""
+    env = dict(os.environ)
+    env[SIGNIN_DAYS_ENV] = str(int(signin_days))
+    return env
+
+
+def _saved_signin_days() -> int:
+    """The tunnel sign-in lifetime the owner saved. A settings problem reads as the default, and never stops a start."""
+    try:
+        return SettingsStore(default_settings_path()).load().settings.tunnel_signin_days
+    except Exception:  # noqa: BLE001 - a settings problem only means the default lifetime is passed
+        return DEFAULT_TUNNEL_SIGNIN_DAYS
 
 
 def _label(scope: str) -> str:
@@ -290,8 +326,12 @@ def read_control_log_tail(path: Path | None = None, *, max_bytes: int = DEFAULT_
     return read_log_tail(path if path is not None else default_log_path(), max_bytes=max_bytes)
 
 
-def _append_line(path: Path, line: str) -> None:
-    """Append one line. A log that cannot be written never stops or fails the call."""
+def append_control_line(path: Path, line: str) -> None:
+    """Append one line to the control log. A log that cannot be written never stops or fails the call.
+
+    The runner calls and the Overleaf card's engine starts (overleaf_engine.log_engine_start) both write through here, so
+    there is one control log file.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
@@ -319,12 +359,15 @@ class RunnerControl:
         spawn: Callable[..., Any] = subprocess.run,
         log_path: Path | None = None,
         clock: Callable[[], dt.datetime] = _utc_now,
+        signin_days: Callable[[], int] | None = None,
     ) -> None:
         self._python = python or ""
         self._cwd = cwd or ""
         self._spawn = spawn
         self._log_path = log_path
         self._clock = clock
+        # Read at each tunnel start. None reads the saved lifetime from the settings file.
+        self._signin_days = signin_days if signin_days is not None else _saved_signin_days
 
     def status(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._run(STATUS, scope)
@@ -334,6 +377,26 @@ class RunnerControl:
 
     def stop(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._attempt(STOP, scope)
+
+    def check_start(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
+        """Read the status again after a confirmed start, and log what it found. It runs ``status`` only.
+
+        Running is CONFIRMED. Not running is STOPPED_AFTER_START: the start was confirmed, but the child exited straight
+        after. Any state that cannot be read is NOT_CONFIRMED, and is never worded as running. A refused scope runs and
+        logs nothing.
+        """
+        status = self._run(STATUS, scope)
+        if status.outcome == REFUSED:
+            return status
+        if status.confirmed and status.state == RUNNING:
+            outcome, message, state = CONFIRMED, STATE_MESSAGES[RUNNING].format(label=_label(scope)), RUNNING
+        elif status.confirmed and status.state == NOT_RUNNING:
+            outcome, message, state = STOPPED_AFTER_START, STOPPED_AFTER_START_MESSAGE, NOT_RUNNING
+        else:
+            outcome, message, state = NOT_CONFIRMED, START_CHECK_UNKNOWN_MESSAGE, UNKNOWN
+        result = ControlResult(START_CHECK, scope, outcome, message, state, status.pid, status.exit_code)
+        self._log(START_CHECK, scope, result)
+        return result
 
     def _attempt(self, subcommand: str, scope: str) -> ControlResult:
         result = self._run(subcommand, scope)
@@ -351,16 +414,18 @@ class RunnerControl:
             argv = build_argv(self._python, subcommand, scope)
         except RunnerRefused:
             return ControlResult(subcommand, scope, REFUSED, REFUSED_MESSAGE)
+        kwargs: dict[str, Any] = {
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "timeout": TIMEOUTS[subcommand],
+            "cwd": self._cwd,
+            "creationflags": _NO_WINDOW,
+        }
+        if subcommand == START and scope == SCOPE_TUNNEL:
+            kwargs["env"] = tunnel_start_env(self._signin_days())
         try:
-            completed = self._spawn(
-                argv,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=TIMEOUTS[subcommand],
-                cwd=self._cwd,
-                creationflags=_NO_WINDOW,
-            )
+            completed = self._spawn(argv, **kwargs)
         except subprocess.TimeoutExpired:
             message = TIMEOUT_MESSAGE.format(
                 verb=VERBS[subcommand], label=_label(scope), seconds=int(TIMEOUTS[subcommand]),
@@ -374,7 +439,7 @@ class RunnerControl:
     def _log(self, subcommand: str, scope: str, result: ControlResult) -> None:
         path = self._log_path if self._log_path is not None else default_log_path()
         stamp = self._clock().isoformat(timespec="seconds")
-        _append_line(path, format_log_line(stamp, subcommand, scope, result.outcome, result.pid))
+        append_control_line(path, format_log_line(stamp, subcommand, scope, result.outcome, result.pid))
 
 
 __all__ = [
@@ -383,6 +448,7 @@ __all__ = [
     "DEFAULT_SCOPE",
     "ALREADY_RUNNING",
     "CONFIRMED",
+    "append_control_line",
     "CHILD_ARGS",
     "FAILED",
     "LOCAL_DEFAULT_PORT",
@@ -395,7 +461,12 @@ __all__ = [
     "SCOPE_LOCAL",
     "SCOPE_TUNNEL",
     "START",
+    "START_CHECK",
+    "START_CHECK_DELAYS_SECONDS",
+    "START_CHECK_UNKNOWN_MESSAGE",
     "START_TIMEOUT_SECONDS",
+    "STOPPED_AFTER_START",
+    "STOPPED_AFTER_START_MESSAGE",
     "STATUS",
     "STATUS_TIMEOUT_SECONDS",
     "STOP",
@@ -403,6 +474,7 @@ __all__ = [
     "ControlResult",
     "RunnerControl",
     "RunnerRefused",
+    "SIGNIN_DAYS_ENV",
     "build_argv",
     "confirmation_text",
     "default_log_path",
@@ -410,4 +482,5 @@ __all__ = [
     "format_log_line",
     "scope_notes",
     "state_of",
+    "tunnel_start_env",
 ]
