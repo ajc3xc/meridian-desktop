@@ -1,8 +1,9 @@
-"""The Keys block on the Settings tab: the RunPod entry, one card per saved name, and a form that adds a name. Qt code.
+"""The Keys block on the Settings tab: RunPod, a search box, one card per saved name, and an add form. Qt code.
 
 The RunPod entry is the RunPod panel's own card (ui/runpod_panel.py), so its checks, its pod list and its key row work as
 they did before. Every other name is a card of its own: its status, a password box for a new value, Save value and Remove.
-A name is added with the form at the foot of the block.
+A name is added with the form at the foot of the block. The search box above the list shows only the cards whose name
+contains its text, ignoring case. It searches names only, never values or statuses.
 
 Values go to the keychain through api_keys. This block never shows a value, never reads one back into a control, and never
 writes one to the settings file. A status is read only to test whether a value is set. A failed read shows as unreadable.
@@ -50,6 +51,9 @@ ADD_HEADING_TEXT = "Add a key"
 NAME_PLACEHOLDER = "Name, for example OpenAI"
 VALUE_PLACEHOLDER = "Key value"
 NEW_VALUE_PLACEHOLDER = "New value, to replace the saved one"
+SEARCH_PLACEHOLDER = "Search keys"
+# Shown when no name matches the search. It does not repeat the search text, so nothing the owner typed is echoed back.
+SEARCH_EMPTY_TEXT = "No key name matches the search. Clear the search to see every name."
 ADD_TEXT = "Add key"
 SAVE_VALUE_TEXT = "Save value"
 REMOVE_TEXT = "Remove"
@@ -125,6 +129,8 @@ class KeysSection(QWidget):
         # None means the Yes/No dialog. It is looked up when Remove is pressed, not here, so a test can swap it.
         self._confirm = confirm
         self._cards: dict[str, _Card] = {}
+        # The RunPod card's frame, when a RunPod card is hosted. The search filters it by its name like the others.
+        self._runpod_frame: QFrame | None = None
         # The first read of the listed names runs on the thread pool, so building this block never reads the keychain.
         self._owner = object()
         self._load_generation = 0
@@ -168,10 +174,22 @@ class KeysSection(QWidget):
         column.setSpacing(8)
         column.addWidget(_label(self, "keys-intro", INTRO_TEXT))
 
+        self._search = QLineEdit(self)
+        self._search.setObjectName("keys-search")
+        self._search.setPlaceholderText(SEARCH_PLACEHOLDER)
+        self._search.setAccessibleName(SEARCH_PLACEHOLDER)
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_changed)
+        column.addWidget(self._search)
+        self._search_empty = _label(self, "keys-search-empty", SEARCH_EMPTY_TEXT)
+        self._search_empty.setVisible(False)
+        column.addWidget(self._search_empty)
+
         if self._runpod_card is not None:
             # The RunPod card is framed like the other cards, so every name in the block looks the same.
             frame = QFrame(self)
             frame.setObjectName("keys-entry-runpod")
+            self._runpod_frame = frame
             frame.setFrameShape(QFrame.Shape.StyledPanel)
             frame_column = QVBoxLayout(frame)
             frame_column.addWidget(_bold(_label(frame, "keys-runpod-name", RUNPOD_HEADING_TEXT)))
@@ -264,10 +282,31 @@ class KeysSection(QWidget):
                 self._cards[entry.name] = card
                 self._entry_layout.addWidget(card.frame)
             card.status.setText(STATUS_TEXT[entry.status])
+        self._apply_filter()
 
     def _show(self, text: str) -> None:
         self._message.setText(text)
         self._message.setVisible(bool(text))
+
+    # ----------------------------------------------------------- search
+
+    @Slot(str)
+    def _on_search_changed(self, _text: str) -> None:
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """Show each card whose name holds the search text, ignoring case. Only names are matched, never values."""
+        query = self._search.text().strip().casefold()
+        frames = [(name, card.frame) for name, card in self._cards.items()]
+        if self._runpod_frame is not None:
+            frames.insert(0, (RUNPOD_NAME, self._runpod_frame))
+        any_match = False
+        for name, frame in frames:
+            match = not query or query in name.casefold()
+            frame.setVisible(match)
+            any_match = any_match or match
+        # Nothing is said while the names are still being read, because no card exists yet to match against.
+        self._search_empty.setVisible(bool(query) and not any_match and not self._loading)
 
     # ----------------------------------------------------------- actions
 
@@ -344,5 +383,7 @@ __all__ = [
     "NOT_WRITTEN_TEXT",
     "REMOVED_TEXT",
     "REPLACED_TEXT",
+    "SEARCH_EMPTY_TEXT",
+    "SEARCH_PLACEHOLDER",
     "STATUS_TEXT",
 ]

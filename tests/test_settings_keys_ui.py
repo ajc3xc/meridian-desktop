@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 
 from PySide6.QtCore import QPoint, QThreadPool
-from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
+from PySide6.QtWidgets import QAbstractButton, QFrame, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
 
 from _fakes import MemoryKeyring
 from meridian_desktop import local_client
@@ -18,7 +18,13 @@ from meridian_desktop.api_keys import KEY_SERVICE, STATUS_NOT_SET, STATUS_SET, A
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import keys_section as keys_module
-from meridian_desktop.ui.keys_section import ADDED_TEXT, NOT_REMOVED_OS_TEXT, STATUS_TEXT, KeysSection
+from meridian_desktop.ui.keys_section import (
+    ADDED_TEXT,
+    NOT_REMOVED_OS_TEXT,
+    SEARCH_EMPTY_TEXT,
+    STATUS_TEXT,
+    KeysSection,
+)
 from meridian_desktop.ui.runpod_panel import (
     KEY_MISSING_TEXT,
     KEY_STORED_TEXT,
@@ -425,6 +431,169 @@ def test_a_read_that_a_later_refresh_supersedes_cannot_bring_back_a_name_the_ref
     qtbot.wait(20)
     assert section.findChild(QWidget, "keys-entry-openai") is None
     assert section.loading is False
+
+
+# ----------------------------------------------------------- search
+
+
+def _search_box(tab) -> QLineEdit:
+    return tab.findChild(QLineEdit, "keys-search")
+
+
+def _search_empty(tab) -> QLabel:
+    return tab.findChild(QLabel, "keys-search-empty")
+
+
+def _frame(tab, key: str) -> QFrame:
+    return tab.findChild(QFrame, f"keys-entry-{key}")
+
+
+def _shown(tab, key: str) -> bool:
+    return not _frame(tab, key).isHidden()
+
+
+def test_the_search_box_sits_above_the_key_cards_and_says_what_it_is_for(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI",), value_for="OpenAI")
+    container, page, tab = _page_and_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _expand_all(tab)
+    _show_at_1280(qtbot, container, page, tab)
+
+    search = _search_box(tab)
+    assert search.placeholderText() == "Search keys"
+    assert search.text() == ""
+    assert _search_empty(tab).isHidden()
+
+    def top(widget):
+        return widget.mapTo(tab, QPoint(0, 0)).y()
+
+    assert top(search) + search.height() <= top(_frame(tab, "runpod")), "the search is above the RunPod card"
+    assert top(search) + search.height() <= top(_frame(tab, "openai")), "the search is above the saved cards"
+
+
+def test_typing_filters_the_names_as_the_owner_types_and_ignores_case(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic", "Mistral"), value_for="OpenAI")
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    search = _search_box(tab)
+    assert _shown(tab, "openai") and _shown(tab, "anthropic") and _shown(tab, "mistral")
+
+    qtbot.keyClicks(search, "OPEN")
+    assert _shown(tab, "openai")
+    assert not _shown(tab, "anthropic") and not _shown(tab, "mistral")
+
+    search.clear()
+    qtbot.keyClicks(search, "an")
+    assert _shown(tab, "anthropic")
+    assert not _shown(tab, "openai") and not _shown(tab, "mistral")
+
+    search.clear()
+    assert _shown(tab, "openai") and _shown(tab, "anthropic") and _shown(tab, "mistral")
+    assert _search_empty(tab).isHidden()
+
+
+def test_the_search_matches_names_only_never_a_value_or_a_status(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    search = _search_box(tab)
+
+    # Part of the saved value matches no name, so the cards stay hidden.
+    qtbot.keyClicks(search, "sk-fake")
+    assert not _shown(tab, "openai") and not _shown(tab, "anthropic")
+    assert not _search_empty(tab).isHidden()
+
+    # Status wording, "A value is set.", is not searched either.
+    search.clear()
+    qtbot.keyClicks(search, "is set")
+    assert not _shown(tab, "openai") and not _shown(tab, "anthropic")
+    assert FAKE_VALUE not in _all_text(tab)
+
+
+def test_the_empty_state_shows_when_nothing_matches_and_goes_when_the_search_clears(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic"))
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    search = _search_box(tab)
+
+    qtbot.keyClicks(search, "zebra")
+    empty = _search_empty(tab)
+    assert not empty.isHidden()
+    assert empty.text() == SEARCH_EMPTY_TEXT
+    assert "zebra" not in empty.text(), "the empty state does not repeat what the owner typed"
+    assert not _shown(tab, "openai") and not _shown(tab, "anthropic")
+
+    search.clear()
+    assert empty.isHidden()
+    assert _shown(tab, "openai") and _shown(tab, "anthropic")
+
+
+def test_the_empty_state_shows_for_an_empty_list_and_a_search_text(qtbot, settings_path):
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+
+    assert _search_empty(tab).isHidden(), "no search text means no empty state"
+    qtbot.keyClicks(_search_box(tab), "openai")
+    assert not _search_empty(tab).isHidden()
+
+
+def test_the_runpod_card_is_filtered_by_its_name_like_the_others(qtbot, settings_path):
+    backend = MemoryKeyring()
+    secrets = KeyringSecretStore(backend=backend)
+    _seed(settings_path, backend, names=("OpenAI",))
+    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    search = _search_box(tab)
+
+    qtbot.keyClicks(search, "runpod")
+    assert _shown(tab, "runpod") and not _shown(tab, "openai")
+
+    search.clear()
+    qtbot.keyClicks(search, "open")
+    assert not _shown(tab, "runpod") and _shown(tab, "openai")
+    assert _search_empty(tab).isHidden()
+
+
+def test_the_filter_holds_across_a_refresh(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic"))
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+
+    qtbot.keyClicks(_search_box(tab), "open")
+    tab.findChild(KeysSection, "keys-section").refresh()
+
+    assert _shown(tab, "openai") and not _shown(tab, "anthropic")
+
+
+def test_save_and_remove_still_work_under_a_search_and_no_value_shows(qtbot, settings_path, monkeypatch):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    qtbot.keyClicks(_search_box(tab), "open")
+    assert FAKE_VALUE not in _all_text(tab)
+
+    # Save value: the new value goes to the keychain, the box is cleared, and the card stays in the filtered list.
+    tab.findChild(QLineEdit, "keys-entry-openai-value").setText(FAKE_VALUE_TWO)
+    tab.findChild(QPushButton, "keys-entry-openai-save").click()
+    assert backend.snapshot() == {(KEY_SERVICE, "key-openai"): FAKE_VALUE_TWO}
+    assert _shown(tab, "openai") and not _shown(tab, "anthropic")
+    assert FAKE_VALUE_TWO not in _all_text(tab)
+
+    # Remove: the owner is asked first, the question names the key, and once confirmed the name leaves the list.
+    asked = []
+    monkeypatch.setattr(keys_module, "_ask_remove", lambda parent, title, text: asked.append(text) or True)
+    tab.findChild(QPushButton, "keys-entry-openai-remove").click()
+    assert len(asked) == 1 and "OpenAI" in asked[0]
+    assert backend.snapshot() == {}
+    assert not _search_empty(tab).isHidden(), "no name matches the search any more"
+    assert _search_empty(tab).text() == SEARCH_EMPTY_TEXT
+    qtbot.waitUntil(lambda: tab.findChild(QWidget, "keys-entry-openai") is None, timeout=5000)
+    assert FAKE_VALUE_TWO not in _all_text(tab)
 
 
 # ----------------------------------------------------------- no clipping at 1280 px
