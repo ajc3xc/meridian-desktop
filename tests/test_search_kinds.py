@@ -1,25 +1,34 @@
-"""The Search tab's three kinds, read from the local server only. Pure Python: no Qt, no socket.
+"""The Search tab's three kinds as lists. Pure Python: no Qt, no socket.
 
-Each transport here is a fake that records the calls and answers from a table, so no test reaches a server. A kind
-whose route answers 404 says "Not connected: the local server has no <kind> search route yet". No result is invented.
+Code and outputs have no list route on the local server, so they say "No data source yet" and send nothing. Research
+runs come from the research runs route, are grouped by provider, and the transports here are fakes that record each call.
 """
 
 import json
 
-from meridian_desktop import local_client
+import pytest
+
+from meridian_desktop import local_client, outputs_client
 from meridian_desktop.search_kinds import (
     KIND_CODE,
+    KIND_LABELS,
     KIND_OUTPUTS,
     KIND_RESEARCH,
     KINDS,
+    NO_SOURCE_TEXT,
+    NOT_CHECKED_TEXT,
     STATE_EMPTY,
     STATE_ERROR,
-    STATE_INVALID,
+    STATE_NO_SOURCE,
+    STATE_NOT_CHECKED,
     STATE_NOT_CONNECTED,
-    STATE_NOT_INDEXED,
     STATE_RESULTS,
-    run_search,
-    search_kind,
+    KindList,
+    group_runs,
+    no_source_list,
+    not_checked_list,
+    read_kind,
+    read_lists,
 )
 
 BASE = "http://127.0.0.1:7878"
@@ -36,10 +45,10 @@ def _json(status, payload):
 
 
 class Recorder:
-    """A transport that answers each route from a table, and records every path it was asked for."""
+    """A transport that answers each path prefix from a table, and records every path it was asked for."""
 
-    def __init__(self, answers):
-        self.answers = answers
+    def __init__(self, answers=None):
+        self.answers = answers or {}
         self.paths = []
 
     def __call__(self, base_url, path, timeout):
@@ -52,166 +61,194 @@ class Recorder:
         return Reply(404, b"")
 
 
-CODE_HITS = {
-    "results": [
-        {"path": "meridian/server.py", "line": 42, "score": 0.91, "snippet": "def  start_session(\n    x)"},
-        {"path": "meridian/db.py", "line": 0, "score": None, "snippet": "tables"},
-    ]
-}
-OUTPUT_HITS = {
-    "hits": [
-        {"path": "out/figure1.png", "kind": "figure", "generating_script": "plot.py", "mtime": "2026-10-01"},
-    ],
-    "degraded": False,
-}
+class MustNotBeCalled:
+    """A transport for a kind with no list route. Any call fails the test."""
+
+    def __init__(self):
+        self.paths = []
+
+    def __call__(self, base_url, path, timeout):
+        self.paths.append(path)
+        raise AssertionError(f"a kind with no list route must not send a request: {path}")
+
+
 RUNS = {
     "runs": [
         {"id": "run-alpha", "status": "completed", "provider": "openalex", "started_at": "2026-10-02"},
         {"id": "run-beta", "status": "running", "provider": "pubmed", "started_at": "2026-10-03"},
+        {"id": "run-gamma", "status": "done", "provider": "openalex", "started_at": "2026-10-04"},
+        {"id": "run-delta", "status": "queued"},
     ],
-    "count": 2,
+    "count": 4,
 }
 
 
-# ----------------------------------------------------------------- code
+# ----------------------------------------------------------------- code and outputs: no list route, nothing sent
 
-def test_code_results_become_rows_with_path_and_line(tmp_path):
-    transport = Recorder({"/desktop/code/search": _json(200, CODE_HITS)})
-    outcome = search_kind(KIND_CODE, BASE, "start_session", transport=transport)
+
+def test_code_has_no_list_and_sends_nothing():
+    transport = MustNotBeCalled()
+    outcome = read_kind(KIND_CODE, BASE, transport=transport)
+    assert outcome.state == STATE_NO_SOURCE
+    assert outcome.line == NO_SOURCE_TEXT[KIND_CODE]
+    assert outcome.groups == ()
+    assert transport.paths == []
+
+
+def test_outputs_has_no_list_and_sends_nothing():
+    transport = MustNotBeCalled()
+    outcome = read_kind(KIND_OUTPUTS, BASE, transport=transport)
+    assert outcome.state == STATE_NO_SOURCE
+    assert outcome.line == NO_SOURCE_TEXT[KIND_OUTPUTS]
+    assert outcome.groups == ()
+    assert transport.paths == []
+
+
+def test_the_no_source_lines_name_the_missing_grouping_and_say_nothing_was_sent():
+    assert NO_SOURCE_TEXT[KIND_CODE].startswith("Code: no data source yet.")
+    assert "by repo" in NO_SOURCE_TEXT[KIND_CODE]
+    assert NO_SOURCE_TEXT[KIND_OUTPUTS].startswith("Outputs: no data source yet.")
+    assert "by project" in NO_SOURCE_TEXT[KIND_OUTPUTS]
+    assert NO_SOURCE_TEXT[KIND_CODE].endswith("Nothing was sent.")
+
+
+def test_no_source_list_and_not_checked_list_describe_a_kind_before_any_read():
+    assert no_source_list(KIND_CODE) == KindList(KIND_CODE, STATE_NO_SOURCE, NO_SOURCE_TEXT[KIND_CODE])
+    assert not_checked_list(KIND_RESEARCH) == KindList(KIND_RESEARCH, STATE_NOT_CHECKED, NOT_CHECKED_TEXT)
+    assert not_checked_list(KIND_OUTPUTS).state == STATE_NO_SOURCE
+
+
+# ----------------------------------------------------------------- research: grouped by provider
+
+
+def test_research_runs_are_grouped_by_provider_with_unreported_last():
+    transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
     assert outcome.state == STATE_RESULTS
-    assert outcome.line == 'Code: 2 match(es) for "start_session".'
-    assert [(row.where, row.details) for row in outcome.rows] == [
-        ("meridian/server.py:42", "def start_session( x)"),
-        ("meridian/db.py", "tables"),
-    ]
-    assert all(row.kind == "Code" for row in outcome.rows)
+    assert [group.title for group in outcome.groups] == ["openalex", "pubmed", "provider not reported"]
+    assert [len(group.rows) for group in outcome.groups] == [2, 1, 1]
+    assert outcome.count == 4
+    assert outcome.line == "Research: 4 run(s) in 3 group(s), grouped by provider."
 
 
-def test_code_route_missing_says_not_connected_and_invents_nothing():
+def test_research_group_rows_keep_the_order_the_server_sent():
+    transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
+    openalex = outcome.groups[0]
+    assert [row.item for row in openalex.rows] == ["run-alpha", "run-gamma"]
+    assert openalex.rows[0].state == "completed"
+    assert openalex.rows[0].started == "2026-10-02"
+    assert openalex.rows[0].updated == ""  # the server sent no updated time, so the row keeps it empty
+
+
+def test_a_run_with_no_provider_is_grouped_under_provider_not_reported():
+    transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
+    unreported = outcome.groups[-1]
+    assert unreported.title == "provider not reported"
+    assert [row.item for row in unreported.rows] == ["run-delta"]
+
+
+def test_group_runs_of_nothing_is_nothing():
+    assert group_runs([]) == ()
+
+
+def test_group_runs_sorts_titles_without_regard_to_case():
+    runs = (
+        outputs_client.ResearchRun("a", "done", "Zebra", "", "", ""),
+        outputs_client.ResearchRun("b", "done", "alpha", "", "", ""),
+    )
+    assert [group.title for group in group_runs(runs)] == ["alpha", "Zebra"]
+
+
+def test_research_request_is_a_list_request_with_no_query_text():
+    transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
+    read_kind(KIND_RESEARCH, BASE, transport=transport)
+    assert len(transport.paths) == 1
+    path = transport.paths[0]
+    assert path.startswith("/desktop/research/runs?")
+    assert "q=" not in path
+    assert "limit=50" in path
+
+
+def test_research_with_no_runs_is_the_empty_state_not_an_invented_group():
+    transport = Recorder({"/desktop/research/runs": _json(200, {"runs": []})})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
+    assert outcome.state == STATE_EMPTY
+    assert outcome.groups == ()
+    assert outcome.line == "Research: no research runs yet."
+
+
+def test_research_route_missing_says_not_connected_and_shows_no_group():
     transport = Recorder({})  # every path answers 404
-    outcome = search_kind(KIND_CODE, BASE, "anything", transport=transport)
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
     assert outcome.state == STATE_NOT_CONNECTED
-    assert outcome.line == "Not connected: the local server has no code search route yet"
-    assert outcome.rows == ()
+    assert outcome.line == (
+        "Research: not connected. The local server has no research runs route yet. Update Meridian, then press Refresh."
+    )
+    assert outcome.groups == ()
 
 
-def test_code_server_not_running_is_not_connected():
-    transport = Recorder({"/desktop/code/search": local_client.LocalClientError("not_running", "down")})
-    outcome = search_kind(KIND_CODE, BASE, "anything", transport=transport)
+def test_research_server_not_running_is_not_connected_and_names_the_address():
+    transport = Recorder({"/desktop/research/runs": local_client.LocalClientError("not_running", "down")})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
     assert outcome.state == STATE_NOT_CONNECTED
     assert "is not running at http://127.0.0.1:7878" in outcome.line
 
 
-def test_code_index_not_built_says_so(tmp_path):
-    transport = Recorder({"/desktop/code/search": _json(409, {"error": {"code": "not_indexed"}})})
-    outcome = search_kind(KIND_CODE, BASE, "anything", transport=transport)
-    assert outcome.state == STATE_NOT_INDEXED
-    assert "index has not been built" in outcome.line
-
-
-def test_code_empty_answer_says_nothing_matches():
-    transport = Recorder({"/desktop/code/search": _json(200, {"results": []})})
-    outcome = search_kind(KIND_CODE, BASE, "nothing-here", transport=transport)
-    assert outcome.state == STATE_EMPTY
-    assert outcome.line == 'Code: nothing matches "nothing-here".'
-    assert outcome.rows == ()
-
-
-# ----------------------------------------------------------------- outputs
-
-def test_outputs_results_show_path_kind_and_script():
-    transport = Recorder({"/desktop/outputs/search": _json(200, OUTPUT_HITS)})
-    outcome = search_kind(KIND_OUTPUTS, BASE, "figure", transport=transport)
-    assert outcome.state == STATE_RESULTS
-    assert outcome.rows[0].where == "out/figure1.png"
-    assert outcome.rows[0].details == "figure; generated by plot.py"
-    assert outcome.rows[0].kind == "Outputs"
-
-
-def test_outputs_route_missing_says_not_connected_with_the_outputs_word():
-    transport = Recorder({})
-    outcome = search_kind(KIND_OUTPUTS, BASE, "figure", transport=transport)
-    assert outcome.state == STATE_NOT_CONNECTED
-    assert outcome.line == "Not connected: the local server has no outputs search route yet"
-
-
-def test_outputs_server_error_is_an_error_not_a_result():
-    transport = Recorder({"/desktop/outputs/search": _json(200, {"error": "index locked"})})
-    outcome = search_kind(KIND_OUTPUTS, BASE, "figure", transport=transport)
+def test_research_unreadable_body_is_an_error_not_an_empty_list():
+    transport = Recorder({"/desktop/research/runs": _json(200, {"runs": "not a list"})})
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=transport)
     assert outcome.state == STATE_ERROR
-    assert outcome.rows == ()
-    assert outcome.line.startswith("Outputs: the search could not be completed.")
+    assert outcome.groups == ()
+    assert outcome.line.startswith("Research: the runs could not be read.")
 
 
-# ----------------------------------------------------------------- research
-
-def test_research_filters_the_listed_runs_by_the_query():
+def test_research_non_loopback_address_sends_nothing():
     transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
-    outcome = search_kind(KIND_RESEARCH, BASE, "pubmed", transport=transport)
-    assert outcome.state == STATE_RESULTS
-    assert [row.where for row in outcome.rows] == ["run-beta"]
-    assert outcome.rows[0].details == "running; pubmed; started 2026-10-03"
-    assert outcome.line.endswith("Research searches the 2 run(s) the server lists.")
-
-
-def test_research_no_matching_run_is_empty_not_invented():
-    transport = Recorder({"/desktop/research/runs": _json(200, RUNS)})
-    outcome = search_kind(KIND_RESEARCH, BASE, "zzz", transport=transport)
-    assert outcome.state == STATE_EMPTY
-    assert outcome.rows == ()
-
-
-def test_research_route_missing_says_not_connected_with_the_research_word():
-    transport = Recorder({})
-    outcome = search_kind(KIND_RESEARCH, BASE, "pubmed", transport=transport)
-    assert outcome.state == STATE_NOT_CONNECTED
-    assert outcome.line == "Not connected: the local server has no research search route yet"
-
-
-# ----------------------------------------------------------------- query and address rules
-
-def test_a_blank_query_is_refused_and_nothing_is_sent():
-    transport = Recorder({"/": _json(200, {})})
-    outcome = search_kind(KIND_CODE, BASE, "   ", transport=transport)
-    assert outcome.state == STATE_INVALID
-    assert transport.paths == []
-
-
-def test_an_over_long_query_is_refused_and_nothing_is_sent():
-    transport = Recorder({"/": _json(200, {})})
-    outcome = search_kind(KIND_OUTPUTS, BASE, "x" * 201, transport=transport)
-    assert outcome.state == STATE_INVALID
-    assert "longer than 200 characters" in outcome.line
-    assert transport.paths == []
-
-
-def test_a_non_loopback_address_sends_nothing():
-    transport = Recorder({"/": _json(200, CODE_HITS)})
-    outcome = search_kind(KIND_CODE, "http://example.com", "start", transport=transport)
+    outcome = read_kind(KIND_RESEARCH, "http://example.com", transport=transport)
     assert outcome.state == STATE_ERROR
     assert transport.paths == []
 
 
-def test_run_search_searches_each_chosen_kind_in_order():
-    transports = {
-        KIND_CODE: Recorder({"/desktop/code/search": _json(200, CODE_HITS)}),
-        KIND_OUTPUTS: Recorder({}),
-        KIND_RESEARCH: Recorder({"/desktop/research/runs": _json(200, RUNS)}),
-    }
-    outcome = run_search(BASE, "  pubmed  ", KINDS, transports=transports)
-    assert outcome.query == "pubmed"
-    assert [item.kind for item in outcome.outcomes] == [KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH]
-    assert outcome.outcomes[1].state == STATE_NOT_CONNECTED  # one kind's gap does not hide the others
-    assert [row.kind for row in outcome.rows] == ["Code", "Code", "Research"]  # the code answer lists its two rows
+# ----------------------------------------------------------------- the three kinds together
 
 
-def test_run_search_with_one_kind_asks_only_that_route():
-    code = Recorder({"/desktop/code/search": _json(200, CODE_HITS)})
-    outputs = Recorder({})
-    run_search(BASE, "start", (KIND_CODE,), transports={KIND_CODE: code, KIND_OUTPUTS: outputs})
-    assert code.paths and outputs.paths == []
+def test_read_lists_reads_only_research_and_keeps_the_kind_order():
+    code = MustNotBeCalled()
+    outputs = MustNotBeCalled()
+    research = Recorder({"/desktop/research/runs": _json(200, RUNS)})
+    outcome = read_lists(BASE, KINDS, transports={KIND_CODE: code, KIND_OUTPUTS: outputs, KIND_RESEARCH: research})
+    assert [item.kind for item in outcome.kinds] == [KIND_CODE, KIND_OUTPUTS, KIND_RESEARCH]
+    assert [item.state for item in outcome.kinds] == [STATE_NO_SOURCE, STATE_NO_SOURCE, STATE_RESULTS]
+    assert code.paths == [] and outputs.paths == []
+    assert len(research.paths) == 1
 
 
-def test_run_search_ignores_an_unknown_kind():
-    outcome = run_search(BASE, "start", ("code", "zotero"), transports={"code": Recorder({})})
-    assert [item.kind for item in outcome.outcomes] == ["code"]
+def test_one_kinds_failure_does_not_hide_the_others():
+    def broken(base_url, path, timeout):
+        raise RuntimeError("socket exploded")
+
+    outcome = read_lists(BASE, KINDS, transports={KIND_RESEARCH: broken})
+    states = {item.kind: item.state for item in outcome.kinds}
+    assert states == {KIND_CODE: STATE_NO_SOURCE, KIND_OUTPUTS: STATE_NO_SOURCE, KIND_RESEARCH: STATE_ERROR}
+
+
+def test_read_lists_skips_an_unknown_kind():
+    outcome = read_lists(BASE, ("code", "zotero"))
+    assert [item.kind for item in outcome.kinds] == ["code"]
+
+
+def test_read_kind_refuses_an_unknown_kind_as_a_caller_error():
+    with pytest.raises(ValueError):
+        read_kind("zotero", BASE)
+
+
+def test_kind_labels_are_the_three_kinds():
+    assert KIND_LABELS == {KIND_CODE: "Code", KIND_OUTPUTS: "Outputs", KIND_RESEARCH: "Research"}
+
+
+def test_kindlist_count_is_the_number_of_rows_in_its_groups():
+    outcome = read_kind(KIND_RESEARCH, BASE, transport=Recorder({"/desktop/research/runs": _json(200, RUNS)}))
+    assert outcome.count == 4
+    assert read_kind(KIND_CODE, BASE).count == 0

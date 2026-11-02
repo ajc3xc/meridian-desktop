@@ -10,8 +10,9 @@ owner presses it.
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
-pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) searches the
-local server's code, outputs and research, and sends queries only to the Local URL. Settings holds the connection
+pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) lists the
+local server's code, outputs and research, grouped by source. It has no search box. Code and outputs have no list
+route yet, so they send nothing, and research runs are read from the Local URL. Settings holds the connection
 settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
 Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
 Sessions tabs are read-only.
@@ -21,7 +22,7 @@ RunPod key goes through secret_store, and neither imports Qt. The only network c
 below and the hosted calls of the connection bar and Sign in with browser (described at the top), are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
-its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
+its button is pressed. The Search tab reads the research runs when it is first shown and when Refresh is pressed. Hosted mode calls
 only the hosted URL the owner sets: on the Projects tab, on the Sessions tab when it is first shown or its Refresh is
 pressed (for the project list, and for the sessions when no local server answers and a hosted token is saved), and
 on the Test connection and Try again buttons in Settings.
@@ -132,7 +133,7 @@ class ProjectsUnavailable(Exception):
 
 
 def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
-    """The local URL as saved now, read by the Search tab when a search runs.
+    """The local URL as saved now, read by the Search tab when a list is read.
 
     It holds the store, not the window. A bound method of the window kept the window in a reference
     cycle, so a closed window was freed only by the cyclic collector. The collector runs on whichever
