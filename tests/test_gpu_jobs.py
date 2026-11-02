@@ -1138,3 +1138,64 @@ def test_too_many_authentication_failures_backs_the_host_off():
     run = FakeRunner({ssh_key("busy"): refused})
     gpu_jobs.read_host(run, "busy", backoff)
     assert backoff.remaining("busy") == 60
+
+
+# ----------------------------------------------------------------- resolve_program: .exe only (round 3)
+
+
+@pytest.fixture(autouse=True)
+def fresh_program_cache():
+    """The resolver keeps its answers for the whole process, so each test starts and ends with an empty cache."""
+    gpu_jobs.clear_program_cache()
+    yield
+    gpu_jobs.clear_program_cache()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the .exe rule is the Windows program rule")
+@pytest.mark.parametrize("name", ["nvidia-smi", "ssh", "squeue", "bjobs"])
+def test_a_script_on_path_is_refused_with_a_clear_message(monkeypatch, tmp_path, name):
+    (tmp_path / f"{name}.cmd").write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_jobs, "PROGRAM_CANDIDATES", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    started = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(argv) or _Done())
+    result = REAL_RUN_COMMAND((name, "--version"), 1.0)
+    assert result.missing is True
+    assert started == []
+    assert f"{name}.cmd" in result.refusal
+    assert ".exe" in result.refusal
+    assert "only .exe programs are run" in result.refusal
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the .exe rule is the Windows program rule")
+def test_a_bat_on_path_is_refused_too(monkeypatch, tmp_path):
+    (tmp_path / "bjobs.bat").write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_jobs, "PROGRAM_CANDIDATES", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert gpu_jobs.resolve_program("bjobs") is None
+    assert "bjobs.bat" in gpu_jobs.program_refusal("bjobs")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the .exe rule is the Windows program rule")
+def test_an_exe_on_path_is_accepted_and_a_script_beside_it_is_ignored(monkeypatch, tmp_path):
+    (tmp_path / "squeue.exe").write_bytes(b"not a real program")
+    (tmp_path / "squeue.cmd").write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_jobs, "PROGRAM_CANDIDATES", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    resolved = gpu_jobs.resolve_program("squeue")
+    assert resolved is not None
+    assert resolved.lower().endswith("squeue.exe")
+    assert os.path.isabs(resolved)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the .exe rule is the Windows program rule")
+def test_a_refused_script_is_named_in_the_nvidia_gpu_status(monkeypatch, tmp_path):
+    (tmp_path / "nvidia-smi.bat").write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_jobs, "PROGRAM_CANDIDATES", {})
+    monkeypatch.setenv("PATH", str(tmp_path))
+    run = FakeRunner({})
+    real_run = REAL_RUN_COMMAND
+    snapshot = collect(lambda argv, timeout: real_run(argv, timeout), (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert "nvidia-smi.bat" in status.text
+    assert status.state == STATE_FAILED

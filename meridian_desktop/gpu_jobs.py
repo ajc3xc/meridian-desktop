@@ -156,6 +156,8 @@ class CommandResult:
     missing: bool = False  # the program is not on this machine
     timed_out: bool = False
     failed_to_start: bool = False
+    # Set when the program is on PATH only as a script (.cmd or .bat). It is the text the owner sees, and nothing runs.
+    refusal: str = ""
 
 
 Runner = Callable[[Sequence[str], float], CommandResult]
@@ -232,10 +234,32 @@ _RESOLVED: dict[str, str | None] = {}
 _RESOLVE_LOCK = threading.Lock()
 
 
+# Only a real program runs. On Windows that is an .exe; a .cmd or .bat is a script and is refused by name.
+PROGRAM_EXTENSION = ".exe" if os.name == "nt" else ""
+REFUSED_SCRIPT_EXTENSIONS = (".cmd", ".bat")
+
+
 def _extensions() -> tuple[str, ...]:
+    return (PROGRAM_EXTENSION,)
+
+
+def _absolute_path_folders() -> list[str]:
+    return [folder for folder in os.environ.get("PATH", "").split(os.pathsep) if folder and os.path.isabs(folder)]
+
+
+def program_refusal(name: str) -> str | None:
+    """The owner-facing text when a script of this name is on an absolute PATH folder and no .exe is found."""
     if os.name != "nt":
-        return ("",)
-    return ("",) + tuple(os.environ.get("PATHEXT", ".EXE;.BAT;.CMD").lower().split(";"))
+        return None
+    for folder in _absolute_path_folders():
+        for extension in REFUSED_SCRIPT_EXTENSIONS:
+            script = os.path.join(folder, name + extension)
+            if os.path.isfile(script):
+                return (
+                    f"{name}{extension} is on PATH, but it is a script, and only .exe programs are run. "
+                    f"Put {name}.exe on PATH instead."
+                )
+    return None
 
 
 def resolve_program(name: str) -> str | None:
@@ -281,7 +305,7 @@ def run_command(argv: Sequence[str], timeout: float) -> CommandResult:
         return CommandResult(returncode=None, missing=True)
     program = resolve_program(argv[0])
     if program is None:
-        return CommandResult(returncode=None, missing=True)
+        return CommandResult(returncode=None, missing=True, refusal=program_refusal(argv[0]) or "")
     kwargs: dict[str, Any] = {}
     if _NO_WINDOW:
         kwargs["creationflags"] = _NO_WINDOW
@@ -533,6 +557,8 @@ def parse_runpod_pods(payload: Mapping[str, Any]) -> tuple[GpuJob, ...]:
 def _nvidia_gpu_status(where: str, result: CommandResult, *, remote: bool) -> tuple[tuple[GpuRow, ...], SourceStatus]:
     """The GPU rows and the status line for one nvidia-smi GPU query."""
     if result.missing:
+        if result.refusal:
+            return (), SourceStatus(where, PART_GPUS, STATE_FAILED, result.refusal)
         text = (
             "nvidia-smi is not on this host, so its GPUs cannot be read."
             if remote
@@ -559,7 +585,8 @@ def _apps_status(where: str, result: CommandResult, gpus: Sequence[GpuRow]) -> t
     if result.timed_out:
         return (), SourceStatus(where, PART_PROCESSES, STATE_FAILED, "GPU processes timed out.")
     if result.missing or result.returncode != 0:
-        return (), SourceStatus(where, PART_PROCESSES, STATE_FAILED, "GPU processes could not be read.")
+        text = result.refusal or "GPU processes could not be read."
+        return (), SourceStatus(where, PART_PROCESSES, STATE_FAILED, text)
     jobs, unmatched, hidden = parse_apps(result.stdout, where, gpus)
     if unmatched and not jobs:
         return (), SourceStatus(where, PART_PROCESSES, STATE_FAILED, "GPU processes printed output this desktop does not read.")
@@ -576,6 +603,8 @@ def _scheduler_status(
     where: str, part: str, result: CommandResult | None, parser: Callable[[str, str], tuple[tuple[GpuJob, ...], int]]
 ) -> tuple[tuple[GpuJob, ...], SourceStatus]:
     """Slurm or LSF on one place. ``result`` is None when the tool is not there (a remote host with no marker)."""
+    if result is not None and result.refusal:
+        return (), SourceStatus(where, part, STATE_FAILED, result.refusal)
     if result is None or result.missing:
         text = f"{part}: not on this machine." if where == LOCAL_HOST else f"{part}: not on this host."
         return (), SourceStatus(where, part, STATE_ABSENT, text)
