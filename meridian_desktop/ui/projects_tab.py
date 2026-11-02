@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QRunnable, QSize, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -133,7 +133,11 @@ def detail_text(row: dict[str, Any]) -> str:
 
 
 class _TreeNameDelegate(QStyledItemDelegate):
-    """Draws a child's name indented by its depth. The cell text is not changed, only where it is drawn."""
+    """Draws a child's name indented by its depth. The cell text is not changed, only where it is drawn.
+
+    The size hint includes the same indent, so the name column is wide enough for an indented name and its text
+    is not clipped on the right.
+    """
 
     def paint(self, painter: Any, option: QStyleOptionViewItem, index: Any) -> None:
         depth = index.data(TREE_DEPTH_ROLE)
@@ -141,6 +145,13 @@ class _TreeNameDelegate(QStyledItemDelegate):
             option = QStyleOptionViewItem(option)
             option.rect = option.rect.adjusted(depth * TREE_INDENT_PX, 0, 0, 0)
         super().paint(painter, option, index)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: Any) -> QSize:
+        size = super().sizeHint(option, index)
+        depth = index.data(TREE_DEPTH_ROLE)
+        if isinstance(depth, int) and depth > 0:
+            size.setWidth(size.width() + depth * TREE_INDENT_PX)
+        return size
 
 
 @dataclass(frozen=True)

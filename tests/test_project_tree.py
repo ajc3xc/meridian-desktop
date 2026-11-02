@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QToolButton,
 )
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop import local_client, project_tree, projects_reader
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop.ui.projects_tab import TREE_DEPTH_ROLE, ProjectsTab, _TreeNameDelegate
+from meridian_desktop.ui.projects_tab import TREE_DEPTH_ROLE, TREE_INDENT_PX, ProjectsTab, _TreeNameDelegate
 from meridian_desktop.ui.text import selected_cells_text
 
 WRITE_CONTROLS = (
@@ -215,3 +217,24 @@ def test_the_indented_tree_paints_without_error(qtbot, settings_path, tmp_path):
     table.selectRow(4)
     # Painting runs the delegate on every row, the indented children included. An image back means it drew.
     assert not table.grab().isNull()
+
+
+def test_the_name_column_is_sized_for_the_indent(qtbot, settings_path, tmp_path):
+    """Column 0 is sized from the delegate's size hint, so each name must ask for its indent or its text is clipped."""
+    tab = _tab(qtbot, settings_path, _tree_db(tmp_path))
+    table = tab.findChild(QTableWidget, "projects-table")
+    qtbot.waitUntil(lambda: table.rowCount() == 5, timeout=5000)
+    delegate = table.itemDelegateForColumn(0)
+    option = QStyleOptionViewItem()
+    widest = 0
+    depths = []
+    for row in range(table.rowCount()):
+        index = table.model().index(row, 0)
+        depth = index.data(TREE_DEPTH_ROLE)
+        depths.append(depth)
+        base = super(_TreeNameDelegate, delegate).sizeHint(option, index)
+        assert delegate.sizeHint(option, index).width() == base.width() + depth * TREE_INDENT_PX
+        widest = max(widest, delegate.sizeHint(option, index).width())
+    # The fixture has indented children, so the per-row check above is not vacuous.
+    assert max(depths) >= 1
+    assert table.columnWidth(0) >= widest
