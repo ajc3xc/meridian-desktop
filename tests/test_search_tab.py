@@ -101,7 +101,9 @@ def _json(status, payload):
 
 
 def _tab(qtbot, url=URL, transports=None, *, show=True):
-    tab = SearchTab(lambda: url, transports=transports)
+    # A tab shown with no transport would read the real loopback address. Tests give a fake route instead.
+    fakes = {KIND_RESEARCH: Route()} if transports is None else transports
+    tab = SearchTab(lambda: url, transports=fakes)
     qtbot.addWidget(tab)
     if show:
         tab.show()
