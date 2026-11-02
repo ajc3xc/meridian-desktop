@@ -17,6 +17,9 @@ from datetime import datetime, timezone
 import pytest
 
 from meridian_desktop import gpu_jobs
+
+# Taken at import, before the conftest guard replaces gpu_jobs.run_command, so the direct tests below run the real one.
+REAL_RUN_COMMAND = gpu_jobs.run_command
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.gpu_jobs import (
     BJOBS_ARGV,
@@ -891,7 +894,7 @@ def test_a_missing_program_is_reported_as_missing_not_raised():
     original = subprocess.run
     subprocess.run = absent
     try:
-        result = gpu_jobs.run_command(("definitely-missing-program",), 1.0)
+        result = REAL_RUN_COMMAND(("definitely-missing-program",), 1.0)
     finally:
         subprocess.run = original
     assert result == CommandResult(returncode=None, missing=True)
@@ -904,7 +907,7 @@ def test_a_timeout_is_reported_as_timed_out():
     original = subprocess.run
     subprocess.run = slow
     try:
-        result = gpu_jobs.run_command(("nvidia-smi",), 1.0)
+        result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
     finally:
         subprocess.run = original
     assert result.timed_out is True
@@ -918,7 +921,7 @@ def test_an_os_error_is_reported_as_failed_to_start():
     original = subprocess.run
     subprocess.run = denied
     try:
-        result = gpu_jobs.run_command(("nvidia-smi",), 1.0)
+        result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
     finally:
         subprocess.run = original
     assert result.failed_to_start is True
@@ -935,7 +938,7 @@ def test_every_program_is_started_by_an_absolute_path(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(list(argv)) or _Done())
     for name in ("nvidia-smi", "ssh", "squeue", "bjobs"):
         started.clear()
-        result = gpu_jobs.run_command([name, "--probe"], 1.0)
+        result = REAL_RUN_COMMAND([name, "--probe"], 1.0)
         if started:
             assert os.path.isabs(started[0][0]), name
         else:
@@ -952,7 +955,7 @@ def test_a_program_planted_in_the_current_directory_is_never_run(monkeypatch, tm
     assert gpu_jobs.resolve_program("squeue") is None
     started = []
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(argv) or _Done())
-    assert gpu_jobs.run_command(["squeue", "--me"], 1.0).missing is True
+    assert REAL_RUN_COMMAND(["squeue", "--me"], 1.0).missing is True
     assert started == []
 
 
@@ -999,7 +1002,7 @@ def test_a_finished_program_returns_its_exit_code_and_text(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", finished)
     monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: os.path.join("C:\\", "Windows", name + ".exe"))
-    result = gpu_jobs.run_command(("nvidia-smi", "--version"), 2.0)
+    result = REAL_RUN_COMMAND(("nvidia-smi", "--version"), 2.0)
     assert result == CommandResult(returncode=0, stdout="out", stderr="err")
     assert seen["argv"] == [os.path.join("C:\\", "Windows", "nvidia-smi.exe"), "--version"]
     assert seen["shell"] is False

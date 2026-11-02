@@ -77,6 +77,36 @@ def no_real_zotero_reads(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_gpu_or_runpod_reads(monkeypatch):
+    """The GPUs tab reads this computer's GPUs with nvidia-smi and ssh, and the RunPod pods from the local server. A
+    window that shows the tab without a fake would run those reads for real. Here each one is replaced: no program is
+    started, no socket opens, and the reads report as missing or not running. Every attempt is recorded, and the test
+    fails at teardown when there was one, even one the code went on to swallow. Tests that call the real run_command
+    keep a reference taken when test_gpu_jobs is imported, before this fixture runs."""
+    from meridian_desktop import gpu_jobs, local_client
+
+    hits: list[str] = []
+
+    def guarded_run(argv, timeout):
+        hits.append(f"run_command {argv[0] if argv else ''}".strip())
+        return gpu_jobs.CommandResult(returncode=None, missing=True)
+
+    def guarded_pods(base_url, timeout=local_client.DEFAULT_TIMEOUT):
+        hits.append("runpod_list_pods")
+        raise local_client.LocalClientError("not_running", local_client.NOT_RUNNING_MESSAGE)
+
+    def guarded_check(base_url, timeout=local_client.DEFAULT_TIMEOUT):
+        hits.append("runpod_check")
+        raise local_client.LocalClientError("not_running", local_client.NOT_RUNNING_MESSAGE)
+
+    monkeypatch.setattr(gpu_jobs, "run_command", guarded_run)
+    monkeypatch.setattr(local_client, "runpod_list_pods", guarded_pods)
+    monkeypatch.setattr(local_client, "runpod_check", guarded_check)
+    yield hits
+    assert not hits, f"a test reached a real GPU or RunPod read: {hits}"
+
+
+@pytest.fixture(autouse=True)
 def no_modal_dialog(monkeypatch):
     """A modal dialog never returns offscreen, so a test that opens one by accident would hang the whole run.
 
