@@ -907,6 +907,10 @@ class HostBackoff:
             self._failures.pop(alias, None)
             self._retry_at.pop(alias, None)
 
+    def forget(self, alias: str) -> None:
+        """Drop a host's skip and its failure count, as a Refresh or a removal from Settings does."""
+        self.succeeded(alias)
+
 
 def _guarded_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Reading:
     try:

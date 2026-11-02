@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -495,3 +495,176 @@ def test_the_tab_opens_no_socket_and_starts_no_process_with_fakes(qtbot, monkeyp
     wait_checked(qtbot, panel)
     assert run.calls == 1
     assert hits == []
+
+
+# ----------------------------------------------------------------- round 3: Refresh, removal, own pool, panel clock
+
+
+DENIED_RESULT = CommandResult(returncode=255, stderr="user@gpu-box: Permission denied (publickey).")
+
+
+class HostRunner(RecordingRunner):
+    """Local reads as usual. Each ssh call is counted, and answers ``ssh_answer`` once ``gate`` opens, when there is one."""
+
+    def __init__(self, ssh_answer=None, gate=None):
+        super().__init__()
+        self.ssh_answer = ssh_answer if ssh_answer is not None else CommandResult(returncode=255, stderr="Connection timed out")
+        self.gate = gate
+        self.ssh_calls = 0
+
+    def __call__(self, argv, timeout):
+        if argv[0] == "ssh":
+            with self._lock:
+                self.ssh_calls += 1
+            if self.gate is not None:
+                self.gate.wait(10)
+            return self.ssh_answer
+        return super().__call__(argv, timeout)
+
+
+def _idle(qtbot, panel):
+    qtbot.waitUntil(lambda: button(panel).isEnabled(), timeout=5000)
+
+
+def _press_refresh(qtbot, panel):
+    _idle(qtbot, panel)
+    button(panel).click()
+
+
+def _wait_reported(qtbot, panel, word):
+    """Wait until a host's read has been shown. A Refresh does nothing while that host's read is still running."""
+    qtbot.waitUntil(lambda: any(word in text for text in _status_texts(panel)), timeout=5000)
+
+
+def _status_texts(panel):
+    statuses = table(panel, "gpu-statuses")
+    return [statuses.item(row, 2).text() for row in range(statuses.rowCount())]
+
+
+def test_refresh_reads_remote_hosts_and_bypasses_the_thirty_second_spacing(qtbot):
+    clock = FakeClock()
+    run = HostRunner()
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    _wait_reported(qtbot, panel, "Timed out")
+    # Five seconds later, inside the thirty-second spacing, Refresh still reads the host.
+    clock.advance(5)
+    _press_refresh(qtbot, panel)
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+
+
+def test_refresh_retries_a_host_at_most_once_per_thirty_seconds(qtbot):
+    clock = FakeClock()
+    run = HostRunner()
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    _wait_reported(qtbot, panel, "Timed out")
+    clock.advance(5)
+    _press_refresh(qtbot, panel)
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+    _wait_reported(qtbot, panel, "Timed out")
+    clock.advance(5)
+    _press_refresh(qtbot, panel)
+    qtbot.wait(50)
+    assert run.ssh_calls == 2  # the second Refresh, five seconds after the first, does not read the host again
+    clock.advance(30)
+    _press_refresh(qtbot, panel)
+    qtbot.waitUntil(lambda: run.ssh_calls == 3, timeout=5000)
+
+
+def test_refresh_clears_a_host_backoff_and_reads_it_again(qtbot):
+    clock = FakeClock()
+    run = HostRunner(ssh_answer=DENIED_RESULT)
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    _wait_reported(qtbot, panel, "Auth failed")
+    clock.advance(5)
+    _press_refresh(qtbot, panel)
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+    assert not any(text.startswith("Skipped for") for text in _status_texts(panel))
+
+
+def test_removing_a_host_drops_its_backoff_so_a_re_added_host_starts_clean(qtbot):
+    clock = FakeClock()
+    run = HostRunner(ssh_answer=DENIED_RESULT)
+    hosts = ["gpu-box"]
+    panel = GpuJobsPanel(lambda: tuple(hosts), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    # Removed in Settings. The next local read drops the host.
+    hosts.clear()
+    clock.advance(5)
+    panel.findChild(QTimer).timeout.emit()
+    _idle(qtbot, panel)
+    # Re-added. Thirty-one seconds after the failed login the spacing allows a read, and the backoff is gone with the host.
+    hosts.append("gpu-box")
+    clock.advance(26)
+    panel.findChild(QTimer).timeout.emit()
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+    assert not any(text.startswith("Skipped for") for text in _status_texts(panel))
+
+
+def test_four_blocked_hosts_do_not_hold_back_the_local_tables(qtbot):
+    gate = threading.Event()
+    run = HostRunner(gate=gate)
+    hosts = ("h0", "h1", "h2", "h3")
+    panel = GpuJobsPanel(lambda: hosts, None, run=run)
+    qtbot.addWidget(panel)
+    try:
+        panel.show()
+        qtbot.waitUntil(lambda: run.ssh_calls == 4, timeout=5000)
+        qtbot.waitUntil(lambda: table(panel, "gpu-gpus").rowCount() == 1, timeout=5000)
+        assert not any(text.startswith("h") for text in _status_texts(panel))
+    finally:
+        gate.set()
+    qtbot.waitUntil(lambda: sum(1 for text in _status_texts(panel) if "timed out" in text.lower()) >= 4, timeout=5000)
+
+
+def test_remote_reads_have_their_own_pool_sized_to_the_saved_hosts(qtbot):
+    run = HostRunner()
+    panel = GpuJobsPanel(lambda: ("h0", "h1", "h2"), None, run=run)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 3, timeout=5000)
+    remote = panel.findChild(QThreadPool, "gpu-remote-pool")
+    local = panel.findChild(QThreadPool, "gpu-local-pool")
+    assert remote is not None and local is not None and remote is not local
+    assert remote.maxThreadCount() == 3
+    assert local.maxThreadCount() == 1
+
+
+def test_the_remote_pool_is_capped_at_eight_threads(qtbot):
+    hosts = tuple(f"h{index}" for index in range(gpu_jobs.MAX_HOSTS))
+    run = HostRunner()
+    panel = GpuJobsPanel(lambda: hosts, None, run=run)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == gpu_jobs.MAX_HOSTS, timeout=5000)
+    assert panel.findChild(QThreadPool, "gpu-remote-pool").maxThreadCount() == gpu_jobs.MAX_HOSTS
+
+
+def test_the_panel_backoff_uses_the_panel_clock(qtbot):
+    clock = FakeClock()
+    run = HostRunner(ssh_answer=DENIED_RESULT)
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    # Thirty-one seconds on the panel's clock: the spacing allows a read, and the one-minute backoff still holds.
+    clock.advance(31)
+    panel.findChild(QTimer).timeout.emit()
+    _idle(qtbot, panel)
+    qtbot.wait(50)
+    assert run.ssh_calls == 1
+    assert any(text == "Skipped for 1 min after a failed login." for text in _status_texts(panel))
+    # Sixty-one seconds on the panel's clock: the backoff has run out, so the host is read again.
+    clock.advance(30)
+    panel.findChild(QTimer).timeout.emit()
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)

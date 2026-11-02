@@ -158,7 +158,20 @@ class GpuJobsPanel(QWidget):
         self._remote_started: dict[str, float] = {}
         # Identifies this tab's reads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
-        self._backoff = HostBackoff()
+        # The backoff reads the same clock as the spacing, so a test that moves the clock moves both.
+        self._backoff = HostBackoff(clock=clock)
+        # Each kind of read has its own pool, so a slow host's SSH call never waits behind a local read, and the other way.
+        # The remote pool is sized to the saved hosts when they are read, and is capped at MAX_HOSTS.
+        self._local_pool = QThreadPool(self)
+        self._local_pool.setObjectName("gpu-local-pool")
+        self._local_pool.setMaxThreadCount(1)
+        self._remote_pool = QThreadPool(self)
+        self._remote_pool.setObjectName("gpu-remote-pool")
+        self._remote_pool.setMaxThreadCount(1)
+        # Each host's last Refresh-triggered read. Refresh may retry a host once per REMOTE_REFRESH_SECONDS.
+        self._remote_manual: dict[str, float] = {}
+        # Set by Refresh, read by the local part that Refresh starts. A timer tick never sets it.
+        self._manual_pending = False
         self._local_in_flight = False
         self._remote_in_flight: set[str] = set()
         self._read_once = False
@@ -215,9 +228,12 @@ class GpuJobsPanel(QWidget):
     # ----------------------------------------------------------- reads
 
     def refresh(self) -> None:
-        """A read now. It does nothing while the local read runs, and the Refresh button is off until it ends."""
+        """A read now, of this computer and of each saved host. Refresh skips the timer's spacing, but a host is read by
+        Refresh at most once per REMOTE_REFRESH_SECONDS, and each Refresh clears that host's backoff. It does nothing while
+        the local read runs, and the Refresh button is off until it ends."""
         if self._local_in_flight:
             return
+        self._manual_pending = True
         self._start_local()
 
     def _start_local(self) -> None:
@@ -242,7 +258,7 @@ class GpuJobsPanel(QWidget):
         def deliver(part: object) -> None:
             delivery.delivered.emit(Delivered(owner, part))
 
-        QThreadPool.globalInstance().start(_ReadJob(work, deliver, failure))
+        self._local_pool.start(_ReadJob(work, deliver, failure))
 
     def _maybe_start_remote(self, alias: str) -> None:
         """Read one saved host, unless its read is still running or its last read started less than
@@ -254,6 +270,22 @@ class GpuJobsPanel(QWidget):
         started = self._remote_started.get(alias)
         if started is not None and now - started < gpu_jobs.REMOTE_REFRESH_SECONDS:
             return
+        self._submit_remote(alias, now)
+
+    def _refresh_host(self, alias: str) -> None:
+        """Read one saved host because Refresh was pressed. The timer's spacing does not apply, but Refresh itself may
+        retry a host once per REMOTE_REFRESH_SECONDS, and a read clears the host's backoff."""
+        if alias in self._remote_in_flight:
+            return
+        now = self._clock()
+        last = self._remote_manual.get(alias)
+        if last is not None and now - last < gpu_jobs.REMOTE_REFRESH_SECONDS:
+            return
+        self._remote_manual[alias] = now
+        self._backoff.forget(alias)
+        self._submit_remote(alias, now)
+
+    def _submit_remote(self, alias: str, now: float) -> None:
         self._remote_started[alias] = now
         self._remote_in_flight.add(alias)
         owner = self._owner
@@ -270,7 +302,7 @@ class GpuJobsPanel(QWidget):
         def deliver(part: object) -> None:
             delivery.delivered.emit(Delivered(owner, part))
 
-        QThreadPool.globalInstance().start(_ReadJob(work, deliver, failure))
+        self._remote_pool.start(_ReadJob(work, deliver, failure))
 
     @Slot(object)
     def _on_delivered(self, item: object) -> None:
@@ -288,12 +320,22 @@ class GpuJobsPanel(QWidget):
         self._checked_at = part.checked_at
         self._hosts = part.hosts
         self._local = part.reading
-        for alias in list(self._remote):
+        manual = self._manual_pending
+        self._manual_pending = False
+        # A host removed in Settings drops its reading, its spacing, its Refresh record and its backoff. A host added later
+        # starts clean.
+        for alias in list(self._remote_started):
             if alias not in part.hosts:
-                del self._remote[alias]
+                self._remote.pop(alias, None)
                 self._remote_started.pop(alias, None)
+                self._remote_manual.pop(alias, None)
+                self._backoff.forget(alias)
+        self._remote_pool.setMaxThreadCount(max(1, min(len(part.hosts), gpu_jobs.MAX_HOSTS)))
         for alias in part.hosts:
-            self._maybe_start_remote(alias)
+            if manual:
+                self._refresh_host(alias)
+            else:
+                self._maybe_start_remote(alias)
         self._render()
 
     def _on_remote(self, part: RemotePart) -> None:
@@ -343,7 +385,9 @@ class GpuJobsPanel(QWidget):
         self._timer.start()
         if not self._read_once:
             self._read_once = True
-            self.refresh()
+            # The first read is the tab opening, not a Refresh, so it does not count toward a host's Refresh spacing.
+            if not self._local_in_flight:
+                self._start_local()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         self._timer.stop()
