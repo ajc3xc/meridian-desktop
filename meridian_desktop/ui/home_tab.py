@@ -4,9 +4,9 @@ The cards are the local Meridian server, the tunnel, the services (the LaTeX eng
 AI clients and their tools, and the updates. Each card runs its check when the window first shows, again every five
 minutes while Home is showing, and when Check now is pressed. No button starts the first check.
 
-The checks read only, with two exceptions the owner confirms first. The tunnel's Start, Stop and Restart use the
-runner controls (ui/scope_controls.py), and Launch Zotero asks in the same confirmation dialog the Zotero panel uses.
-The Settings buttons only switch to the Settings tab.
+The checks read only, with one exception the owner confirms first: Launch Zotero asks in the same confirmation dialog
+the Zotero panel uses. The tunnel card has no start or stop control. Its one button only switches to Settings, where the
+Tunnel panel (ui/tunnel_panel.py) holds the tunnel's Start, Stop and Restart. The other Settings buttons only switch tabs.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -59,14 +59,12 @@ from meridian_desktop.home_status import (
 )
 from meridian_desktop.latex_client import EngineStatus
 from meridian_desktop.runner_client import RunnerResult
-from meridian_desktop.runner_controls import SCOPE_TUNNEL
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
-from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, open_release_page
@@ -79,11 +77,12 @@ CHECK_INTERVAL_MS = CHECK_INTERVAL_SECONDS * 1000
 STALL_SECONDS = 60
 INTRO_TEXT = (
     "Each card checks its part of Meridian on its own: when this window opens, and again every five minutes while "
-    "Home is showing. The checks only read. Launch Zotero and the tunnel buttons ask before they act."
+    "Home is showing. The checks only read. Launch Zotero asks before it acts. The tunnel's controls are in the Tunnel panel."
 )
 CHECK_NOW_TEXT = "Check now"
 TITLE_TEXT = "Home"
-OPEN_SETTINGS_TEXT = "Open Settings"
+# The Tunnel card's one control. It opens the Tunnel panel in Settings, where the tunnel's Start, Stop and Restart are.
+OPEN_TUNNEL_PANEL_TEXT = "Open the Tunnel panel"
 LAUNCH_CANCELLED_TEXT = "Launch cancelled. Nothing was started and no file was written."
 LAUNCHING_TEXT = "Launching Zotero..."
 LAUNCH_FAILED_TEXT = "Zotero did not launch ({}). Press Check now to see its state."
@@ -436,7 +435,6 @@ class HomeTab(QWidget):
 
         self._build_cards(container, grid)
         self._controls_row()
-        self.refresh_tunnel_gate()
 
     # ------------------------------------------------------------ building
 
@@ -508,22 +506,18 @@ class HomeTab(QWidget):
         self._refresh_updates()
 
     def _controls_row(self) -> None:
-        """The tunnel's Start, Stop and Restart (ScopeControls, which asks first) and an Open Settings button when they are off."""
-        deps = self._deps
-        if deps.actions is None:
-            return
-        self._tunnel_controls = ScopeControls(SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="tunnel", parent=self._tunnel)
-        self._tunnel_controls.actionFinished.connect(self._tunnel.check)
-        self._tunnel.add_body(self._tunnel_controls)
-        self._tunnel_settings = QPushButton(OPEN_SETTINGS_TEXT, self._tunnel)
+        """The Tunnel card's one control: a button that opens the Tunnel panel in Settings. Start, Stop and Restart live there."""
+        self._tunnel_settings = QPushButton(OPEN_TUNNEL_PANEL_TEXT, self._tunnel)
         self._tunnel_settings.setObjectName("home-tunnel-settings")
         self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
         self._tunnel.add_body(self._tunnel_settings)
-        # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
-        deps.actions.coreChanged.connect(self._on_core_changed)
+        deps = self._deps
+        if deps.actions is not None:
+            # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
+            deps.actions.coreChanged.connect(self._on_core_changed)
 
     def _on_core_changed(self) -> None:
-        """The core search finished, or the core setup was saved: the tunnel buttons and the Tunnel and Tools cards read again.
+        """The core search finished, or the core setup was saved: the Tunnel and Tools cards read again.
 
         The boot checks can run before the launch-time search finds the core, so their first answers can say the core is not
         set. A search that is still running is skipped here, because its finish comes back through this slot.
@@ -531,18 +525,8 @@ class HomeTab(QWidget):
         actions = self._deps.actions
         if actions is None or actions.locating:
             return
-        self.refresh_tunnel_gate()
         self._tunnel.check(replace=True)
         self._tools.check(replace=True)
-
-    def refresh_tunnel_gate(self) -> None:
-        """Read the saved core setup again. The tunnel buttons are on only when the gate allows, and Open Settings shows when they are off."""
-        deps = self._deps
-        if deps.actions is None:
-            return
-        self._tunnel_controls.refresh_enabled()
-        enabled, _note = tunnel_gate(deps.actions.core())
-        self._tunnel_settings.setVisible(not enabled)
 
     # ------------------------------------------------------------ checks
 
@@ -614,7 +598,6 @@ class HomeTab(QWidget):
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
         self._timer.start()
-        self.refresh_tunnel_gate()
         stale = self._last_run is None or time.monotonic() - self._last_run >= CHECK_INTERVAL_SECONDS
         if stale:
             self.check_all()

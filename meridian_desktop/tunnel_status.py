@@ -14,8 +14,8 @@ Each check result carries the time the check finished and one fixed sentence say
 sentence never copies the runner's own output. This module starts nothing, stops nothing and holds
 no secret. It also holds the words that name the tools which connect through the tunnel, and the
 plain-words instructions for starting the tunnel by hand. The desktop starts and stops the tunnel only
-from the Home tunnel card's buttons, after the owner confirms each one, and only when tunnel_control_enabled is
-true (docs/local-trust-contract.md). This module itself still starts nothing.
+from the Tunnel panel's buttons in Settings (ui/tunnel_panel.py), after the owner confirms each one, and only when
+tunnel_control_enabled is true (docs/local-trust-contract.md). This module itself still starts nothing.
 """
 
 from __future__ import annotations
@@ -69,13 +69,15 @@ DEPENDENCY_TEXT = (
     "While the tunnel is not running, they are unavailable."
 )
 
-# Where the owner starts or checks the tunnel. The buttons are on the Home tunnel card, and Start asks first. No command
-# is typed by hand, so these hints name the card and never a terminal command.
-START_HINT = "To start it, press Start on the Home tunnel card. The desktop asks first and starts nothing without a yes."
+# Where the owner starts or checks the tunnel. The buttons are in the Tunnel panel in Settings, and Start asks first. No
+# command is typed by hand, so these hints name the panel and never a terminal command.
+START_HINT = (
+    "To start it, press Start in the Tunnel panel in Settings. The desktop asks first and starts nothing without a yes."
+)
 CHECK_HINT = "Press Check now on Home to check it again."
 
 # The top bar's one line and its detail line in Tunnel mode. The Home tunnel card shows the same answers
-# with its own headlines on the Home tunnel card. The check time and "no time" text are shared with it.
+# with its own headlines. The check time and "no time" text are shared with it.
 BAR_HEADLINES = {
     RUNNING: "Tunnel running",
     NOT_RUNNING: "Tunnel not running",

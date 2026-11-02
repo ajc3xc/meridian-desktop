@@ -321,7 +321,7 @@ def test_the_top_bar_detail_names_the_tools_that_need_the_tunnel(state):
 def test_a_tunnel_that_is_not_running_says_how_to_start_it_and_that_the_desktop_does_not():
     detail = bar_texts(_status(NOT_RUNNING))[1]
     assert START_HINT in detail
-    assert "Home tunnel card" in detail
+    assert "Tunnel panel in Settings" in detail
     assert "pixi run" not in detail  # no hand-typed terminal command
     # A running tunnel gets no start instructions at all.
     assert START_HINT not in bar_texts(_status(RUNNING))[1]
@@ -605,7 +605,7 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     push_buttons = [b for b in push_buttons if b.objectName() != "update-notice-restart"]
     start_like = sorted(b.objectName() for b in push_buttons if START_WORDS.search(b.text()))
     # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
-    # Settings, and the tunnel scope's three buttons on the Tunnel tab (docs/local-trust-contract.md).
+    # Settings, and the tunnel scope's three buttons in the Tunnel panel in Settings (docs/local-trust-contract.md).
     assert start_like == [
         "local-restart", "local-start", "local-stop",
         "tunnel-restart", "tunnel-start", "tunnel-stop",
@@ -617,11 +617,17 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     assert tunnel_buttons
     assert all(not b.isEnabled() for b in tunnel_buttons)
 
-    # The tunnel controls are on Home's tunnel card only. The top bar holds no button, and no other tab or card holds a tunnel control.
+    # The tunnel controls are in the Tunnel panel in Settings, and nowhere else. The Home tunnel card holds only the button
+    # that opens that panel, and the top bar holds no button. No other tab or card holds a tunnel control.
+    from meridian_desktop.ui.tunnel_panel import TunnelPanel
+
+    tunnel_panel = window.findChild(TunnelPanel, "tunnel-panel")
+    assert tunnel_panel is not None
+    assert all(b in _user_buttons(tunnel_panel) for b in tunnel_buttons)
     tunnel_card = window.findChild(QFrame, "home-card-tunnel")
     assert tunnel_card is not None
-    assert all(b in _user_buttons(tunnel_card) for b in tunnel_buttons)
-    for name in ("Projects", "Sessions", "Search", "Settings"):
+    assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(tunnel_card))
+    for name in ("Projects", "Sessions", "Search"):
         other = window.tabs.widget(_tab_index(window, name))
         assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other)), name
     for card in ("local", "services", "zotero", "tools", "updates"):
