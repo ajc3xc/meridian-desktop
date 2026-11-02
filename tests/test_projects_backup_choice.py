@@ -11,7 +11,7 @@ LOCALAPPDATA at its own temp folder. FAKE_TOKEN is an obviously fake value, so a
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -49,8 +49,12 @@ def local_folder(tmp_path, monkeypatch) -> Path:
     return root / "meridian-desktop" / "backups"
 
 
-def _written_ids(folder: Path) -> list[str]:
-    files = sorted(folder.glob("projects-*.json"))
+FULL_GLOB = "projects-*.json"
+SUBSET_GLOB = "subset-projects-*.json"
+
+
+def _written_ids(folder: Path, glob: str = FULL_GLOB) -> list[str]:
+    files = sorted(folder.glob(glob))
     assert len(files) == 1
     document = json.loads(files[0].read_text(encoding="utf-8"))
     return [row["id"] for row in document["projects"]]
@@ -83,18 +87,54 @@ def test_only_the_chosen_ids_are_written(tmp_path):
 
     assert written.count == 2
     assert written.message.startswith("Backed up 2 projects")
-    assert _written_ids(tmp_path / "b") == ["h-1", "h-3"]
+    assert _written_ids(tmp_path / "b", SUBSET_GLOB) == ["h-1", "h-3"]
 
 
 @pytest.mark.parametrize("only", [[], ["not-a-project"]])
 def test_an_empty_or_unknown_selection_writes_nothing_and_removes_nothing(tmp_path, only):
     folder = tmp_path / "b"
-    kept = projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN)
+    for day in range(3):
+        projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=day))
+    before = sorted(path.name for path in folder.iterdir())
 
     with pytest.raises(projects_backup.NoUsableProjects):
         projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN, only=only)
 
-    assert [path.name for path in folder.iterdir()] == [kept.path.name]
+    assert len(before) == 3
+    assert sorted(path.name for path in folder.iterdir()) == before
+
+
+def test_subset_writes_never_delete_a_full_backup(tmp_path):
+    """A subset holds only some projects. Its writes must not evict the full backups, which may be the only copy."""
+    folder = tmp_path / "b"
+    full = [
+        projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=day))
+        for day in range(2)
+    ]
+    for step in range(projects_backup.SUBSET_BACKUPS_KEPT + 3):
+        projects_backup.write_backup(
+            HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=10 + step), only=["h-2"]
+        )
+
+    names = {path.name for path in folder.iterdir()}
+    assert {written.path.name for written in full} <= names
+    assert len(list(folder.glob(SUBSET_GLOB))) == projects_backup.SUBSET_BACKUPS_KEPT
+
+
+def test_full_backups_keep_their_own_cap_beside_subset_backups(tmp_path):
+    folder = tmp_path / "b"
+    newest_full = []
+    for step in range(projects_backup.BACKUPS_KEPT + 2):
+        newest_full.append(
+            projects_backup.write_backup(HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=step)).path.name
+        )
+        projects_backup.write_backup(
+            HOSTED_ROWS, folder=folder, taken_at=TAKEN + timedelta(days=step, hours=1), only=["h-1"]
+        )
+
+    kept_full = sorted(path.name for path in folder.glob(FULL_GLOB))
+    assert kept_full == sorted(newest_full[-projects_backup.BACKUPS_KEPT:])
+    assert len(list(folder.glob(SUBSET_GLOB))) == projects_backup.SUBSET_BACKUPS_KEPT
 
 
 # ----------------------------------------------------------------- the Projects tab (Qt)
@@ -169,9 +209,9 @@ def test_only_the_checked_projects_are_written(qtbot, settings_path, local_folde
     write.click()
     qtbot.waitUntil(lambda: backup_status.text().startswith("Backed up"), timeout=5000)
 
-    assert _written_ids(local_folder) == ["h-1", "h-3"]
+    assert _written_ids(local_folder, SUBSET_GLOB) == ["h-1", "h-3"]
     assert backup_status.text().startswith("Backed up 2 projects")
-    written_text = next(local_folder.glob("projects-*.json")).read_text(encoding="utf-8")
+    written_text = next(local_folder.glob(SUBSET_GLOB)).read_text(encoding="utf-8")
     assert FAKE_TOKEN not in written_text and "FAKE-EXEC-VALUE" not in written_text
     assert write.isEnabled()
 

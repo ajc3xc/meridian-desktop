@@ -11,6 +11,7 @@ in that list. A failed read writes nothing, so a failure never removes a backup.
 (an empty list, or no row with an id) writes nothing either, and raises NoUsableProjects: an empty answer never stands
 in for a backup that holds projects. After a successful write the newest BACKUPS_KEPT backup files are kept, and so is
 the newest backup that holds projects, even when newer files hold none (prune_backups). Older backup files are removed.
+A checked-subset backup (subset-projects-*.json) is kept under its own cap, and its writes never remove a full backup.
 
 Nothing in this module sends anything to the hosted service, and nothing reads a backup back.
 """
@@ -32,8 +33,12 @@ BACKUP_DIR_NAME = "backups"
 BACKUP_VERSION = 1
 # After a write, the newest this many backup files are kept, by name. The newest backup that holds projects is kept too.
 BACKUPS_KEPT = 5
+# A checked-subset backup holds only the projects the owner chose. It has its own name and its own cap, and its writes
+# never remove a full backup, which may be the only local copy of the projects left out of the subset.
+SUBSET_BACKUPS_KEPT = 5
 # The file name, and the time inside it, both in UTC. The time is fixed width, so names sort oldest to newest.
 _NAME = re.compile(r"projects-(\d{8}T\d{6})Z\.json")
+_SUBSET_NAME = re.compile(r"subset-projects-(\d{8}T\d{6})Z\.json")
 _NAME_TIME = "%Y%m%dT%H%M%S"
 _JSON_TIME = "%Y-%m-%dT%H:%M:%SZ"
 # The only fields a backup keeps for a project.
@@ -106,8 +111,9 @@ def backup_dir(env: Mapping[str, str] | None = None, home: Path | None = None) -
     return default_settings_path(env, home).parent / BACKUP_DIR_NAME
 
 
-def backup_name(taken_at: datetime) -> str:
-    return "projects-" + _utc(taken_at).strftime(_NAME_TIME) + "Z.json"
+def backup_name(taken_at: datetime, *, subset: bool = False) -> str:
+    prefix = "subset-projects-" if subset else "projects-"
+    return prefix + _utc(taken_at).strftime(_NAME_TIME) + "Z.json"
 
 
 def backed_up_text(count: int, taken_at: datetime) -> str:
@@ -157,7 +163,8 @@ def write_backup(
     """
     taken = _utc(taken_at)
     projects = kept_projects(rows)
-    if only is not None:
+    subset = only is not None
+    if subset:
         wanted = set(only)
         projects = [project for project in projects if project["id"] in wanted]
         if not projects:
@@ -166,14 +173,14 @@ def write_backup(
         raise NoUsableProjects()
     folder.mkdir(parents=True, exist_ok=True)
     # A backup never replaces an existing file: a second write in the same UTC second takes the next free second's name.
-    while (folder / backup_name(taken)).exists():
+    while (folder / backup_name(taken, subset=subset)).exists():
         taken = taken + timedelta(seconds=1)
     document = {"version": BACKUP_VERSION, "taken_at": taken.strftime(_JSON_TIME), "projects": projects}
-    path = folder / backup_name(taken)
+    path = folder / backup_name(taken, subset=subset)
     temp = folder / (path.name + ".tmp")
     temp.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
-    prune_backups(folder, keep=path)
+    prune_backups(folder, keep=path, subset=subset)
     message = f"{backed_up_text(len(projects), taken)} Saved to: {path}"
     return BackupWritten(path, len(projects), taken, message)
 
@@ -195,10 +202,10 @@ def backup_hosted(
     return write_backup(rows, folder=folder, taken_at=taken_at)
 
 
-def _backup_files(folder: Path) -> list[Path]:
-    """The backup files in ``folder``, newest first. Only names this module writes are listed."""
+def _backup_files(folder: Path, pattern: re.Pattern[str]) -> list[Path]:
+    """The backup files in ``folder`` whose names match ``pattern``, newest first. Only names this module writes match."""
     try:
-        found = [path for path in folder.iterdir() if path.is_file() and _NAME.fullmatch(path.name)]
+        found = [path for path in folder.iterdir() if path.is_file() and pattern.fullmatch(path.name)]
     except OSError:
         return []
     return sorted(found, key=lambda path: path.name, reverse=True)
@@ -216,14 +223,17 @@ def _holds_projects(path: Path) -> bool:
     return any(_kept_row(row) is not None for row in projects)
 
 
-def prune_backups(folder: Path, keep: Path | None = None) -> None:
-    """Remove the backup files that retention does not keep, and leave every other file as it is.
+def prune_backups(folder: Path, keep: Path | None = None, *, subset: bool = False) -> None:
+    """Remove the old backup files of one kind, and leave every other file as it is.
 
-    Kept: the newest BACKUPS_KEPT backup files by name, the newest backup that holds projects (even when newer files
-    hold none), and ``keep``, the file just written. A file that cannot be removed is left as it is.
+    One kind is pruned: the full backups by default, or the subset backups when ``subset`` is true. Each kind has its own
+    cap, so pruning one never removes a file of the other. Within that kind, kept: the newest cap files by name (BACKUPS_KEPT
+    or SUBSET_BACKUPS_KEPT), the newest that holds projects (even when newer files hold none), and ``keep``, the file just
+    written. A file that cannot be removed is left as it is.
     """
-    files = _backup_files(folder)  # newest first
-    kept = set(files[:BACKUPS_KEPT])
+    pattern, cap = (_SUBSET_NAME, SUBSET_BACKUPS_KEPT) if subset else (_NAME, BACKUPS_KEPT)
+    files = _backup_files(folder, pattern)  # newest first
+    kept = set(files[:cap])
     newest_with_projects = next((path for path in files if _holds_projects(path)), None)
     if newest_with_projects is not None:
         kept.add(newest_with_projects)
@@ -240,6 +250,7 @@ def prune_backups(folder: Path, keep: Path | None = None) -> None:
 __all__ = [
     "BACKUP_DIR_NAME",
     "BACKUPS_KEPT",
+    "SUBSET_BACKUPS_KEPT",
     "KEPT_FIELDS",
     "NOTHING_CHECKED_TEXT",
     "NO_PROJECTS_TEXT",
