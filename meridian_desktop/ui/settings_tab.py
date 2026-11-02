@@ -1,4 +1,4 @@
-"""The Settings tab: five collapsible groups in one scrolling column, in this order.
+"""The Settings tab: six collapsible groups in one scrolling column, in this order.
 
 1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
    Save and Remove, the Test connection and Try again buttons, the local URL and the database file.
@@ -6,7 +6,9 @@
    launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
 3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
 4. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
-5. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
+5. MCP tools: one folding group per tool group, with a switch for each tool and for each group (ui/tools_section.py).
+   Every tool is on by default. The choice is saved in the settings file and applied at the next start.
+6. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
    It starts folded. The Logs view reads nothing until its Refresh is pressed.
 
 The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token is typed into
@@ -68,6 +70,7 @@ from meridian_desktop.ui.runner_section import RunnerSection
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.settings_group import CollapsibleGroup
 from meridian_desktop.ui.tools_panel import ToolsPanel
+from meridian_desktop.ui.tools_section import TOOLS_TITLE, ToolsSection
 from meridian_desktop.ui.text import make_selectable
 
 # Mode names in display order: (settings value, label). The top-bar selector uses this list too.
@@ -309,6 +312,7 @@ class SettingsTab(QWidget):
         column.addWidget(self._build_local_server(content))
         column.addWidget(self._build_keys(content, runpod_card))
         column.addWidget(self._build_client_setup(content))
+        column.addWidget(self._build_tools(content))
         column.addWidget(self._build_diagnostics(content))
         column.addStretch(1)
 
@@ -436,6 +440,13 @@ class SettingsTab(QWidget):
         group.add_widget(self._client_setup)
         return group
 
+    def _build_tools(self, parent: QWidget) -> CollapsibleGroup:
+        group = CollapsibleGroup("tools", TOOLS_TITLE, parent, expanded=False)
+        # One switch per tool, and one per group. The block reads the saved choice on refresh and saves each change.
+        self._tools = ToolsSection(self._store, group.body())
+        group.add_widget(self._tools)
+        return group
+
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
         group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
@@ -486,6 +497,7 @@ class SettingsTab(QWidget):
         self._refresh_token_status()
         self._runner.refresh_flags()
         self._keys.refresh()
+        self._tools.refresh()
         self._settings_file.setText(SETTINGS_FILE_TEXT.format(path=self._store.path))
         _set_message(self._load_warning, LOAD_WARNING_TEXT.format(warning=result.warning) if result.warning else "")
 

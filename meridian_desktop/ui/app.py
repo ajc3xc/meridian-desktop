@@ -12,6 +12,7 @@ finishes the update, and shows one line that says it was updated from <old>.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from meridian_desktop import install, token_store, updater
+from meridian_desktop import install, local_cache, token_store, updater
 from meridian_desktop.desktop_log import start_desktop_log
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
@@ -30,6 +31,26 @@ from meridian_desktop.ui.runner_actions import LaunchStarts, RunnerActions
 from meridian_desktop.version import APP_VERSION
 
 SMOKE_FLAG = "--smoke"
+LOCAL_CACHE_LOGGER = "meridian_desktop.local_cache"
+
+
+def _sync_local_cache(store: SettingsStore) -> None:
+    """At a real start, write the local servers into Claude Desktop and Codex, skipping the tools the owner switched off.
+
+    A settings file with a problem is not used. Its tool choice may be unreadable, so every tool would look on and the
+    existing entries would be rewritten. Nothing here stops the app: a failure is logged and the app starts anyway.
+    """
+    log = logging.getLogger(LOCAL_CACHE_LOGGER)
+    try:
+        result = store.load()
+        if result.warning is not None:
+            log.warning("local cache not updated: the settings file has a problem (%s)", result.warning)
+            return
+        settings = result.settings
+        for line in local_cache.sync_local_cache(disabled=settings.disabled_tools, core_checkout=settings.core_checkout):
+            log.info("%s", line)
+    except Exception as exc:  # the app must start even when the cache cannot be written
+        log.warning("local cache not updated (%s)", exc.__class__.__name__)
 
 
 def _after_update_version(args: list[str]) -> str | None:
@@ -91,6 +112,9 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         outcome = run_first_run(store)
         if outcome.notice:
             QMessageBox.information(None, "Meridian Desktop", outcome.notice)
+    # The local cache is written at a real start only, never at --smoke, so a smoke run touches no client config.
+    if not smoke:
+        _sync_local_cache(store)
 
     # The update check runs at a real start and every six hours after, through the urllib transport. A --smoke run
     # passes no transport and no install folder, so it makes no request and stages nothing. The window still honours
