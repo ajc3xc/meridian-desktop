@@ -612,6 +612,9 @@ def test_removing_a_host_drops_its_backoff_so_a_re_added_host_starts_clean(qtbot
 
 
 def test_four_blocked_hosts_do_not_hold_back_the_local_tables(qtbot):
+    """The local pool has two threads. Four remote hosts are blocked in SSH, and a second local read, started while all
+    four are blocked, still delivers. If remote reads shared the local pool, four blocked reads would fill its two threads,
+    the second local read would queue behind them, and the Refresh button would stay off."""
     gate = threading.Event()
     run = HostRunner(gate=gate)
     hosts = ("h0", "h1", "h2", "h3")
@@ -620,8 +623,13 @@ def test_four_blocked_hosts_do_not_hold_back_the_local_tables(qtbot):
     try:
         panel.show()
         qtbot.waitUntil(lambda: run.ssh_calls == 4, timeout=5000)
+        panel.findChild(QThreadPool, "gpu-local-pool").setMaxThreadCount(2)
         qtbot.waitUntil(lambda: table(panel, "gpu-gpus").rowCount() == 1, timeout=5000)
-        assert not any(text.startswith("h") for text in _status_texts(panel))
+        # All four hosts are blocked now. A second local read must run and deliver.
+        _press_refresh(qtbot, panel)
+        qtbot.waitUntil(lambda: run.calls == 2, timeout=5000)
+        qtbot.waitUntil(lambda: button(panel).isEnabled(), timeout=5000)
+        assert run.ssh_calls == 4  # the four blocked hosts are still the only remote reads
     finally:
         gate.set()
     qtbot.waitUntil(lambda: sum(1 for text in _status_texts(panel) if "timed out" in text.lower()) >= 4, timeout=5000)
