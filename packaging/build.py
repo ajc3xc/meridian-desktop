@@ -129,13 +129,15 @@ UNUSED_PYSIDE_MODULES = [
 # gets --copy-metadata, so its dist-info (and licence files) lands in _internal.
 # Names are distribution names. keyring itself is in the manifest's list. keyring's
 # jaraco and more-itertools dependencies are imported by keyring, and keyring's
-# Windows backend imports pywin32-ctypes.
+# Windows backend imports pywin32-ctypes. certifi supplies the CA bundle that the
+# hosted client uses for the default host (hosted_client._tls_context_for).
 EXTRA_METADATA = [
     "jaraco.classes",
     "jaraco.functools",
     "jaraco.context",
     "more-itertools",
     "pywin32-ctypes",
+    "certifi",
 ]
 
 # Not imported by the app or by its direct dependencies (checked against PySide6,

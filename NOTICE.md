@@ -109,6 +109,7 @@ under the section header shown.
 | jaraco.context | 6.1.2 | MIT | https://github.com/jaraco/jaraco.context | `_internal/jaraco_context-6.1.2.dist-info/licenses/LICENSE` |
 | more-itertools | 11.2.1 | MIT | https://github.com/more-itertools/more-itertools | `_internal/more_itertools-11.2.1.dist-info/licenses/LICENSE` |
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes | `_internal/pywin32_ctypes-0.2.3.dist-info/LICENSE.txt` |
+| certifi | 2026.10.23 | MPL-2.0 | https://github.com/certifi/python-certifi | `_internal/certifi-2026.10.23.dist-info/licenses/LICENSE` |
 
 The Qt-family distributions (PySide6, PySide6_Essentials, PySide6_Addons, shiboken6) are listed in the
 Qt section above.
