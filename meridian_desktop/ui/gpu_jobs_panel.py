@@ -7,7 +7,8 @@ until the tab is first shown or Refresh is pressed.
 Every read runs on the thread pool, never on the UI thread. The reads come back as parts, each one a separate delivery:
 this computer's part (GPUs, processes, Slurm, LSF and RunPod) and one part per saved SSH host. A part is shown as soon as
 it arrives, so one slow host never holds back the local tables. Each delivery is tagged with this panel's owner token, so a
-result that belongs to another tab is dropped. While the tab is visible, a timer starts a local read on each tick.
+result that belongs to another tab is dropped. While the tab is visible, a timer starts a local read on each tick. A saved host is read no more often than every
+gpu_jobs.REMOTE_REFRESH_SECONDS (30 s); the local part is read on every tick, 5 s apart.
 
 The panel takes three injected callables. The window passes the real ones, and tests pass fakes:
 - hosts_provider() -> sequence of SSH host names, from Settings. It runs on the worker thread.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -141,12 +143,16 @@ class GpuJobsPanel(QWidget):
         parent: QWidget | None = None,
         *,
         run: Runner | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("gpu-jobs-panel")
         self._hosts_provider = hosts_provider
         self._runpod_provider = runpod_provider
         self._run: Runner = run if run is not None else gpu_jobs.run_command
+        # Reads the time the remote hosts are spaced by. Tests pass a clock they move by hand.
+        self._clock = clock
+        self._remote_started: dict[str, float] = {}
         # Identifies this tab's reads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._backoff = HostBackoff()
@@ -230,9 +236,17 @@ class GpuJobsPanel(QWidget):
 
         QThreadPool.globalInstance().start(_ReadJob(work, deliver, failure))
 
-    def _start_remote(self, alias: str) -> None:
+    def _maybe_start_remote(self, alias: str) -> None:
+        """Read one saved host, unless its read is still running or its last read started less than
+        REMOTE_REFRESH_SECONDS ago. The local part is read on every tick, so the host is read on the first tick at or
+        after that interval, never more often."""
         if alias in self._remote_in_flight:
             return
+        now = self._clock()
+        started = self._remote_started.get(alias)
+        if started is not None and now - started < gpu_jobs.REMOTE_REFRESH_SECONDS:
+            return
+        self._remote_started[alias] = now
         self._remote_in_flight.add(alias)
         owner = self._owner
         delivery = shared_delivery()
@@ -269,8 +283,9 @@ class GpuJobsPanel(QWidget):
         for alias in list(self._remote):
             if alias not in part.hosts:
                 del self._remote[alias]
+                self._remote_started.pop(alias, None)
         for alias in part.hosts:
-            self._start_remote(alias)
+            self._maybe_start_remote(alias)
         self._render()
 
     def _on_remote(self, part: RemotePart) -> None:

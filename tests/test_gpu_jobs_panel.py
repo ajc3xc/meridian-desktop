@@ -346,6 +346,17 @@ def test_every_table_is_read_only_and_its_cells_are_not_editable(qtbot):
                 assert not (item.flags() & Qt.ItemFlag.ItemIsEditable), (name, row, column)
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 500.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class SlowRemoteRunner(RecordingRunner):
     """The local reads run as usual. The ssh call to the host waits on ``gate`` and records that it started."""
 
@@ -387,6 +398,29 @@ def test_the_local_tables_show_while_a_slow_host_is_still_being_read(qtbot):
         ),
         timeout=5000,
     )
+
+
+def test_a_remote_host_is_read_no_more_often_than_every_thirty_seconds(qtbot):
+    clock = FakeClock()
+    gate = threading.Event()
+    gate.set()
+    run = SlowRemoteRunner(gate)
+    panel = GpuJobsPanel(lambda: ("gpu-box",), None, run=run, clock=clock)
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: run.ssh_calls == 1, timeout=5000)
+    # Five local ticks, five seconds apart, do not read the host again.
+    for _ in range(5):
+        clock.advance(gpu_jobs.REMOTE_REFRESH_SECONDS / 6)
+        panel.findChild(QTimer).timeout.emit()
+        qtbot.waitUntil(lambda: button(panel).isEnabled(), timeout=5000)
+    qtbot.wait(50)
+    assert run.ssh_calls == 1
+    # The first tick at or after thirty seconds reads the host again.
+    clock.advance(gpu_jobs.REMOTE_REFRESH_SECONDS / 6)
+    panel.findChild(QTimer).timeout.emit()
+    qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+    assert gpu_jobs.REMOTE_REFRESH_SECONDS == 30.0
 
 
 def test_the_tab_opens_no_socket_and_starts_no_process_with_fakes(qtbot, monkeypatch):
