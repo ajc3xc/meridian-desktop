@@ -43,6 +43,9 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 
 REFRESH_MS = 5000
+# The job table draws at most this many rows. A longer list says how many there are, so a huge list never rebuilds the
+# table on each tick.
+JOB_ROW_LIMIT = 200
 # A table never grows past this height. A longer list scrolls, so the rest of the page stays in view.
 TABLE_MAX_HEIGHT = 220
 GPU_COLUMNS = ("Host", "GPU", "Name", "Utilization", "Memory", "Temperature", "Power")
@@ -164,6 +167,8 @@ class GpuJobsPanel(QWidget):
         self._hosts: tuple[str, ...] = ()
         self._local: Reading | None = None
         self._remote: dict[str, Reading] = {}
+        # What the tables show now. A snapshot that renders to the same rows rebuilds nothing.
+        self._rendered: tuple[tuple, ...] | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -197,6 +202,9 @@ class GpuJobsPanel(QWidget):
         layout.addWidget(_label(self, "gpu-jobs-heading", JOBS_HEADING))
         self._jobs = _table(self, "gpu-jobs", JOB_COLUMNS)
         layout.addWidget(self._jobs)
+        self._jobs_cap = _label(self, "gpu-jobs-cap", "")
+        self._jobs_cap.setVisible(False)
+        layout.addWidget(self._jobs_cap)
         self._jobs_empty = _label(self, "gpu-jobs-empty", NO_JOBS_TEXT)
         layout.addWidget(self._jobs_empty)
 
@@ -306,11 +314,23 @@ class GpuJobsPanel(QWidget):
         checked = snapshot.checked_at.astimezone().strftime("%H:%M:%S")
         self._status.setText(f"{CHECKED_PREFIX} {checked} local time.")
         self._summary.setText(gpu_jobs.summary_text(snapshot))
-        _fill(self._gpus, gpu_jobs.gpu_table_rows(snapshot))
         self._gpus_empty.setVisible(not snapshot.gpus)
-        _fill(self._jobs, gpu_jobs.job_table_rows(snapshot))
         self._jobs_empty.setVisible(not snapshot.jobs)
-        _fill(self._statuses, gpu_jobs.status_table_rows(snapshot))
+        gpu_rows = gpu_jobs.gpu_table_rows(snapshot)
+        job_rows = gpu_jobs.job_table_rows(snapshot)
+        status_rows = gpu_jobs.status_table_rows(snapshot)
+        total = len(job_rows)
+        self._jobs_cap.setVisible(total > JOB_ROW_LIMIT)
+        if total > JOB_ROW_LIMIT:
+            self._jobs_cap.setText(f"Showing {JOB_ROW_LIMIT} of {total}.")
+        shown = job_rows[:JOB_ROW_LIMIT]
+        rendered = (tuple(gpu_rows), tuple(shown), tuple(status_rows))
+        if rendered == self._rendered:
+            return
+        self._rendered = rendered
+        _fill(self._gpus, gpu_rows)
+        _fill(self._jobs, shown)
+        _fill(self._statuses, status_rows)
 
     # ----------------------------------------------------------- timer
 

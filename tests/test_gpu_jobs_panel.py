@@ -423,6 +423,56 @@ def test_a_remote_host_is_read_no_more_often_than_every_thirty_seconds(qtbot):
     assert gpu_jobs.REMOTE_REFRESH_SECONDS == 30.0
 
 
+def _apps_text(count: int) -> str:
+    return "".join(
+        f"{1000 + index}, python.exe, 10, GPU-85b6c4db-6eba-ae6e-4a6f-b1c6ebff448d\n" for index in range(count)
+    )
+
+
+def test_the_job_table_shows_at_most_two_hundred_rows_and_says_how_many_there_are(qtbot):
+    run = RecordingRunner(
+        answers={
+            NVIDIA_GPU_ARGV: CommandResult(0, REAL_GPU_LINE),
+            NVIDIA_APPS_ARGV: CommandResult(0, _apps_text(250)),
+            SQUEUE_ARGV: CommandResult(None, missing=True),
+            BJOBS_ARGV: CommandResult(None, missing=True),
+        }
+    )
+    panel = make_panel(qtbot, run=run, runpod=None)
+    panel.show()
+    wait_checked(qtbot, panel)
+    assert table(panel, "gpu-jobs").rowCount() == 200
+    cap = label(panel, "gpu-jobs-cap")
+    assert cap.isHidden() is False
+    assert cap.text() == "Showing 200 of 250."
+
+
+def test_an_unchanged_snapshot_does_not_rebuild_the_tables(qtbot, monkeypatch):
+    run = RecordingRunner()
+    panel = make_panel(qtbot, run=run, runpod=None)
+    rebuilds = []
+    original = gpu_jobs_panel._fill
+
+    def counting(widget, rows):
+        rebuilds.append(widget.objectName())
+        original(widget, rows)
+
+    monkeypatch.setattr(gpu_jobs_panel, "_fill", counting)
+    panel.show()
+    wait_checked(qtbot, panel)
+    first = len(rebuilds)
+    assert first > 0
+    # The same read again, with nothing changed, rebuilds no table.
+    panel.findChild(QTimer).timeout.emit()
+    qtbot.waitUntil(lambda: run.calls == 2, timeout=5000)
+    qtbot.waitUntil(lambda: button(panel).isEnabled(), timeout=5000)
+    assert len(rebuilds) == first
+    # A changed read rebuilds again.
+    run.answers[NVIDIA_GPU_ARGV] = CommandResult(0, REAL_GPU_LINE.replace("79, 1734", "80, 1800"))
+    panel.findChild(QTimer).timeout.emit()
+    qtbot.waitUntil(lambda: len(rebuilds) > first, timeout=5000)
+
+
 def test_the_tab_opens_no_socket_and_starts_no_process_with_fakes(qtbot, monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("the GPUs tab must not reach the network or start a process in this test")
