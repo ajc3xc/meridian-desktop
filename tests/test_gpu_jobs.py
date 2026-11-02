@@ -7,6 +7,7 @@ fake runner. Two guards turn any real process start or network connection into a
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import threading
@@ -709,6 +710,66 @@ def test_an_os_error_is_reported_as_failed_to_start():
     assert result.failed_to_start is True
 
 
+class _Done:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def test_every_program_is_started_by_an_absolute_path(monkeypatch):
+    started = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(list(argv)) or _Done())
+    for name in ("nvidia-smi", "ssh", "squeue", "bjobs"):
+        started.clear()
+        result = gpu_jobs.run_command([name, "--probe"], 1.0)
+        if started:
+            assert os.path.isabs(started[0][0]), name
+        else:
+            # A program that is not on this machine is reported as missing, and nothing is started.
+            assert result.missing is True, name
+
+
+def test_a_program_planted_in_the_current_directory_is_never_run(monkeypatch, tmp_path):
+    (tmp_path / "squeue.exe").write_bytes(b"not a real program")
+    (tmp_path / "squeue").write_bytes(b"not a real program")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    gpu_jobs.clear_program_cache()
+    assert gpu_jobs.resolve_program("squeue") is None
+    started = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(argv) or _Done())
+    assert gpu_jobs.run_command(["squeue", "--me"], 1.0).missing is True
+    assert started == []
+
+
+def test_a_relative_path_entry_is_not_searched(monkeypatch, tmp_path):
+    (tmp_path / "bjobs.exe").write_bytes(b"not a real program")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join([".", "relative-bin"]))
+    gpu_jobs.clear_program_cache()
+    assert gpu_jobs.resolve_program("bjobs") is None
+
+
+def test_a_program_on_an_absolute_path_entry_resolves_to_that_absolute_file(monkeypatch, tmp_path):
+    program = tmp_path / ("squeue.exe" if os.name == "nt" else "squeue")
+    program.write_bytes(b"not a real program")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    gpu_jobs.clear_program_cache()
+    resolved = gpu_jobs.resolve_program("squeue")
+    assert resolved is not None
+    assert os.path.isabs(resolved)
+    assert os.path.normcase(resolved) == os.path.normcase(str(program))
+
+
+def test_a_program_is_resolved_once_and_the_answer_is_kept(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    gpu_jobs.clear_program_cache()
+    assert gpu_jobs.resolve_program("bjobs") is None
+    # A file that appears later is not picked up: the first answer stands until the cache is cleared.
+    (tmp_path / ("bjobs.exe" if os.name == "nt" else "bjobs")).write_bytes(b"late")
+    assert gpu_jobs.resolve_program("bjobs") is None
+
+
 def test_a_finished_program_returns_its_exit_code_and_text(monkeypatch):
     class Done:
         returncode = 0
@@ -723,9 +784,10 @@ def test_a_finished_program_returns_its_exit_code_and_text(monkeypatch):
         return Done()
 
     monkeypatch.setattr(subprocess, "run", finished)
+    monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: os.path.join("C:\\", "Windows", name + ".exe"))
     result = gpu_jobs.run_command(("nvidia-smi", "--version"), 2.0)
     assert result == CommandResult(returncode=0, stdout="out", stderr="err")
-    assert seen["argv"] == ["nvidia-smi", "--version"]
+    assert seen["argv"] == [os.path.join("C:\\", "Windows", "nvidia-smi.exe"), "--version"]
     assert seen["shell"] is False
     assert seen["timeout"] == 2.0
     assert seen["stdin"] == subprocess.DEVNULL

@@ -22,8 +22,10 @@ What each part reads, and what it says when it cannot read:
 from __future__ import annotations
 
 import csv
+import os
 import re
 import subprocess
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -172,14 +174,77 @@ class _Reading:
 # ----------------------------------------------------------------- the default runner
 
 
+# Where each program is looked for before PATH. A bare name is never run from the current directory, because on Windows
+# a bare name is searched there first. Only absolute folders are searched on PATH, and each answer is kept.
+PROGRAM_CANDIDATES = {
+    "nvidia-smi": (
+        r"%SystemRoot%\System32\nvidia-smi.exe",
+        r"%ProgramFiles%\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+    ),
+    "ssh": (r"%SystemRoot%\System32\OpenSSH\ssh.exe",),
+    "squeue": (),
+    "bjobs": (),
+}
+_RESOLVED: dict[str, str | None] = {}
+_RESOLVE_LOCK = threading.Lock()
+
+
+def _extensions() -> tuple[str, ...]:
+    if os.name != "nt":
+        return ("",)
+    return ("",) + tuple(os.environ.get("PATHEXT", ".EXE;.BAT;.CMD").lower().split(";"))
+
+
+def resolve_program(name: str) -> str | None:
+    """The absolute path of one program: a standard location first, then an absolute folder on PATH. None when it is
+    not found. The answer, found or not, is kept, so each program is resolved once per run of the app."""
+    with _RESOLVE_LOCK:
+        if name in _RESOLVED:
+            return _RESOLVED[name]
+        found = None
+        for candidate in PROGRAM_CANDIDATES.get(name, ()):
+            path = os.path.expandvars(candidate)
+            if os.path.isabs(path) and os.path.isfile(path):
+                found = path
+                break
+        if found is None:
+            for folder in os.environ.get("PATH", "").split(os.pathsep):
+                if not folder or not os.path.isabs(folder):
+                    continue
+                for extension in _extensions():
+                    path = os.path.join(folder, name + extension)
+                    if os.path.isfile(path):
+                        found = os.path.abspath(path)
+                        break
+                if found is not None:
+                    break
+        _RESOLVED[name] = found
+        return found
+
+
+def clear_program_cache() -> None:
+    """Forget the resolved programs, so the next call looks again. For tests only."""
+    with _RESOLVE_LOCK:
+        _RESOLVED.clear()
+
+
 def run_command(argv: Sequence[str], timeout: float) -> CommandResult:
-    """Start one program from an argument list. No shell, no input, no window, and a timeout. Never raises."""
+    """Start one program from an argument list. No shell, no input, no window, and a timeout. Never raises.
+
+    argv[0] is the program's bare name. It is started by its resolved absolute path, and a program that cannot be
+    resolved is reported as missing without anything being started.
+    """
+    if not argv:
+        return CommandResult(returncode=None, missing=True)
+    program = resolve_program(argv[0])
+    if program is None:
+        return CommandResult(returncode=None, missing=True)
     kwargs: dict[str, Any] = {}
     if _NO_WINDOW:
         kwargs["creationflags"] = _NO_WINDOW
     try:
         done = subprocess.run(
-            list(argv),
+            [program, *argv[1:]],
             capture_output=True,
             text=True,
             encoding="utf-8",
