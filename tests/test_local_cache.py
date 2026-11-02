@@ -126,8 +126,8 @@ def test_debug_and_latex_use_the_npm_launchers_from_the_core_catalogue(paths, co
     apply_local_cache(_plan(paths, core))
     claude, _ = paths
     servers = _claude(claude)["mcpServers"]
-    assert servers["mcp-debugger"] == {"command": "npx", "args": ["-y", "@debugmcp/mcp-debugger"]}
-    assert servers["meridian-latex"]["args"] == ["-y", "--package", "@meridianmcp/mcp", "meridian-latex", "mcp"]
+    assert servers["mcp-debugger"] == {"command": "npx", "args": ["-y", "@debugmcp/mcp-debugger@0.26.0"]}
+    assert servers["meridian-latex"]["args"] == ["-y", "--package", "@meridianmcp/mcp@0.1.9", "meridian-latex", "mcp"]
 
 
 def test_the_codex_file_is_one_managed_block_at_the_end(paths, core):
