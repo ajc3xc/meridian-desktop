@@ -45,7 +45,7 @@ from meridian_desktop.ui.home_tab import HomeTab
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.main_window import LATEX_SECTION, STATUS_MESSAGE, TAB_NAMES, MainWindow
-from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
+from meridian_desktop.ui.projects_tab import TREE_DEPTH_ROLE, ProjectsTab, default_sources
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.tools_panel import ToolsPanel
@@ -314,19 +314,23 @@ def test_projects_tab_lists_rows_and_has_no_write_controls(qtbot, settings_path,
     qtbot.waitUntil(lambda: table.rowCount() == 3, timeout=5000)
     headers = tuple(table.horizontalHeaderItem(column).text() for column in range(table.columnCount()))
     assert headers == ("Name", "Status", "Priority", "Created at")
-    # Newest first, as the reader orders the rows.
-    assert [table.item(row, 0).text() for row in range(3)] == ["Newest", "Middle", "Oldest"]
-    assert [table.item(0, column).text() for column in range(1, 4)] == ["parked", "P0", "2026-03-02 17:30:00"]
+    # Newest is a subproject of Oldest, so it nests under Oldest. The roots keep the reader's order,
+    # newest first (Middle, then Oldest), and Newest follows its parent Oldest.
+    assert [table.item(row, 0).text() for row in range(3)] == ["Middle", "Oldest", "Newest"]
+    assert [table.item(row, 0).data(TREE_DEPTH_ROLE) for row in range(3)] == [0, 0, 1]
+    assert [table.item(2, column).text() for column in range(1, 4)] == ["parked", "P0", "2026-03-02 17:30:00"]
 
     # The first row is selected on load, so its detail shows.
+    qtbot.waitUntil(lambda: "Name: Middle" in detail.text(), timeout=5000)
+    assert "ID: p-mid" in detail.text()
+    # An empty field reads as (none).
+    assert "Parent project: (none)" in detail.text()
+    # Selecting the subproject changes the detail, and it names its parent.
+    table.selectRow(2)
     qtbot.waitUntil(lambda: "Name: Newest" in detail.text(), timeout=5000)
     assert "ID: p-new" in detail.text()
     assert "Icon: rocket" in detail.text()
     assert "Parent project: p-old" in detail.text()
-    # Selecting another row changes the detail, and an empty field reads as (none).
-    table.selectRow(1)
-    qtbot.waitUntil(lambda: "Name: Middle" in detail.text(), timeout=5000)
-    assert "Parent project: (none)" in detail.text()
 
     # No write control on the tab, and the table cannot be edited.
     for widget_type in WRITE_CONTROLS:
@@ -566,7 +570,7 @@ def test_projects_tab_falls_back_to_the_file_when_the_server_is_down(qtbot, sett
 
     qtbot.waitUntil(lambda: table.rowCount() == 3, timeout=5000)
     assert status.text() == "Showing 3 project(s) from the database file."
-    assert [table.item(row, 0).text() for row in range(3)] == ["Newest", "Middle", "Oldest"]
+    assert [table.item(row, 0).text() for row in range(3)] == ["Middle", "Oldest", "Newest"]
     assert calls == []
 
 
