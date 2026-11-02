@@ -138,6 +138,8 @@ class SettingsUnreadable(Exception):
 SETTINGS_UNREADABLE_TEXT = (
     "settings.json could not be read, so nothing was saved. A copy is kept as settings.json.unreadable.bak."
 )
+# Said only when the copy could not be made, so the owner is never told a copy exists when it does not.
+SETTINGS_UNREADABLE_NO_COPY_TEXT = "settings.json could not be read and no copy could be kept, so nothing was saved."
 
 
 @dataclass(frozen=True)
@@ -529,12 +531,13 @@ class SettingsStore:
             return True
         return not isinstance(data, dict)
 
-    def _keep_copy(self) -> None:
-        """Best effort: copy the unreadable file to <name>.unreadable.bak. A failed copy is not reported as a save."""
+    def _keep_copy(self) -> bool:
+        """Copy the unreadable file to <name>.unreadable.bak. True only when the copy was made."""
         try:
             shutil.copyfile(self._path, self._path.with_name(self._path.name + ".unreadable.bak"))
         except OSError:
-            return
+            return False
+        return True
 
     def set_gpu_hosts(self, text: str) -> Settings:
         """Validate and save the GPUs tab's SSH host names, from one comma-separated line.
@@ -549,8 +552,8 @@ class SettingsStore:
         if problems:
             raise ValueError(" ".join(problems))
         if self.is_unreadable():
-            self._keep_copy()
-            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT)
+            copied = self._keep_copy()
+            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT if copied else SETTINGS_UNREADABLE_NO_COPY_TEXT)
         # A readable file with one bad value is copied aside before the write, as the other writers do.
         self.keep_unreadable_copy()
         updated = replace(self.load().settings, gpu_hosts=hosts)

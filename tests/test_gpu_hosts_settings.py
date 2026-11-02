@@ -81,6 +81,7 @@ CORRUPT = b'{"mode": "local", "local_url": "http://127.0.0.1:9999", "gpu_hosts":
 UNREADABLE_TEXT = (
     "settings.json could not be read, so nothing was saved. A copy is kept as settings.json.unreadable.bak."
 )
+NO_COPY_TEXT = "settings.json could not be read and no copy could be kept, so nothing was saved."
 
 
 def test_a_corrupt_file_with_a_working_copy_refuses_keeps_the_copy_and_leaves_the_file_as_it_was(settings_path):
@@ -105,7 +106,9 @@ def test_a_corrupt_file_with_a_read_only_copy_refuses_and_leaves_the_file_as_it_
     try:
         with pytest.raises(SettingsUnreadable) as caught:
             SettingsStore(settings_path).set_gpu_hosts("gpu-box")
-        assert str(caught.value) == UNREADABLE_TEXT
+        # The copy failed, so the message must not claim one was kept.
+        assert str(caught.value) == NO_COPY_TEXT
+        assert "copy is kept" not in str(caught.value)
         assert settings_path.read_bytes() == CORRUPT
     finally:
         os.chmod(backup, stat.S_IREAD | stat.S_IWRITE)
