@@ -75,6 +75,30 @@ def test_an_empty_line_clears_the_saved_hosts_and_the_key(settings_path):
     assert "gpu_hosts" not in _saved(settings_path)
 
 
+def test_a_corrupt_settings_file_is_copied_aside_before_the_hosts_are_written(settings_path):
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    original = b'{"mode": "local", "gpu_hosts": [ this is not json'
+    settings_path.write_bytes(original)
+    SettingsStore(settings_path).set_gpu_hosts("gpu-box")
+    backup = settings_path.with_name(settings_path.name + ".unreadable.bak")
+    assert backup.read_bytes() == original
+    assert SettingsStore(settings_path).load().settings.gpu_hosts == ("gpu-box",)
+
+
+def test_saving_hosts_keeps_the_other_fields_of_a_file_with_one_bad_value(qtbot, settings_path):
+    _write_raw(settings_path, {"mode": "local", "local_url": "http://127.0.0.1:9999", "check_updates": "maybe"})
+    original = settings_path.read_bytes()
+    tab = _tab(qtbot, settings_path)
+    tab.findChild(QLineEdit, "settings-gpu-hosts").setText("gpu-box")
+    tab.findChild(QPushButton, "settings-save-gpu-hosts").click()
+    backup = settings_path.with_name(settings_path.name + ".unreadable.bak")
+    assert backup.read_bytes() == original
+    saved = SettingsStore(settings_path).load().settings
+    assert saved.mode == "local"
+    assert saved.local_url == "http://127.0.0.1:9999"
+    assert saved.gpu_hosts == ("gpu-box",)
+
+
 def test_saving_hosts_keeps_every_other_field(settings_path):
     store = _store_with(settings_path, mode="local", local_url="http://127.0.0.1:9999", check_updates=False)
     store.set_gpu_hosts("gpu-box")

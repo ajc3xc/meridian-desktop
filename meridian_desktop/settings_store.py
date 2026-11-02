@@ -512,6 +512,8 @@ class SettingsStore:
         hosts, problems = parse_host_list(text)
         if problems:
             raise ValueError(" ".join(problems))
+        # A file that did not load cleanly is copied aside first, as the other writers do, so its content survives.
+        self.keep_unreadable_copy()
         updated = replace(self.load().settings, gpu_hosts=hosts)
         self.save(updated)
         return updated
