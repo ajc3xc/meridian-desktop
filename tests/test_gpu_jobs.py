@@ -80,7 +80,7 @@ class FakeRunner:
     """Answers each argument list from a table. Records every call. Safe to call from several threads."""
 
     def __init__(self, answers: dict[tuple[str, ...], CommandResult | Exception]) -> None:
-        self._answers = answers
+        self.answers = answers
         self.calls: list[tuple[str, ...]] = []
         self._lock = threading.Lock()
         self.threads: set[int] = set()
@@ -90,7 +90,7 @@ class FakeRunner:
         with self._lock:
             self.calls.append(key)
             self.threads.add(threading.get_ident())
-        answer = self._answers.get(key, CommandResult(None, missing=True))
+        answer = self.answers.get(key, CommandResult(None, missing=True))
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -685,6 +685,97 @@ def test_a_bad_saved_name_is_skipped_and_never_run():
     snapshot = collect(run, ("-oProxyCommand=x", "good"), None, now=NOW)
     assert [row.host for row in snapshot.gpus] == ["good"]
     assert not any("-oProxyCommand=x" in call for call in run.calls)
+
+
+class FakeClock:
+    """A clock the test moves by hand. The backoff reads it, so no test waits for real time."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+DENIED = CommandResult(returncode=255, stderr="user@gpu-box: Permission denied (publickey).")
+
+
+def _ssh_calls(run, alias):
+    return sum(1 for call in run.calls if call == ssh_key(alias))
+
+
+def test_a_failed_login_skips_the_host_for_one_minute_then_tries_again():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    run = FakeRunner({ssh_key("gpu-box"): DENIED})
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert _ssh_calls(run, "gpu-box") == 1
+
+    clock.advance(30)
+    snapshot = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert _ssh_calls(run, "gpu-box") == 1  # skipped: no second login attempt
+    (status,) = [s for s in snapshot.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
+    assert status.text == "Skipped for 1 min after a failed login."
+
+    clock.advance(31)  # now 61 seconds after the failure
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert _ssh_calls(run, "gpu-box") == 2
+
+
+def test_the_skip_grows_one_two_four_minutes_and_is_capped_at_ten():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    run = FakeRunner({ssh_key("gpu-box"): DENIED})
+    expected_minutes = [1, 2, 4, 8, 10, 10]
+    for minutes in expected_minutes:
+        collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)  # a login that fails
+        clock.advance(1)
+        skipped = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+        (status,) = [s for s in skipped.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
+        assert status.text == f"Skipped for {minutes} min after a failed login."
+        clock.advance(minutes * 60 - 1)  # now exactly at the retry time
+    assert _ssh_calls(run, "gpu-box") == len(expected_minutes)
+
+
+def test_a_successful_login_clears_the_skip():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    run = FakeRunner({ssh_key("gpu-box"): DENIED})
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    clock.advance(61)
+    run.answers = {ssh_key("gpu-box"): ok(remote_stdout())}
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert backoff.remaining("gpu-box") == 0
+    # The next failure starts again at one minute, not where the last skip left off.
+    run.answers = {ssh_key("gpu-box"): DENIED}
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    clock.advance(59)
+    snapshot = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    (status,) = [s for s in snapshot.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
+    assert status.text == "Skipped for 1 min after a failed login."
+
+
+def test_a_host_key_failure_starts_the_same_skip():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    changed = CommandResult(
+        returncode=255,
+        stderr="WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\r\nHost key verification failed.",
+    )
+    run = FakeRunner({ssh_key("gpu-box"): changed})
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert backoff.remaining("gpu-box") == 60
+
+
+def test_a_timeout_or_unreachable_host_is_not_skipped():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    run = FakeRunner({ssh_key("gpu-box"): CommandResult(returncode=None, timed_out=True)})
+    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    assert backoff.remaining("gpu-box") == 0
 
 
 def test_no_saved_hosts_means_no_ssh_call():

@@ -22,11 +22,13 @@ What each part reads, and what it says when it cannot read:
 from __future__ import annotations
 
 import csv
+import math
 import os
 import re
 import shlex
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -39,6 +41,13 @@ MAX_HOSTS = 8
 MAX_WORKERS = 4
 LOCAL_TIMEOUT_SECONDS = 10.0
 SSH_TIMEOUT_SECONDS = 20.0
+# A remote host is read no more often than this. The local GPUs are read on every tick of the tab's timer, which is 5 s.
+# The 30 s floor is the owner's to confirm, so it is one named value here.
+REMOTE_REFRESH_SECONDS = 30.0
+# After a failed login, a host is skipped for 1, 2, 4 ... minutes, and never longer than this.
+BACKOFF_CAP_MINUTES = 10
+# The stderr words that mean a login was refused, as opposed to a host that did not answer.
+LOGIN_FAILURE_WORDS = ("permission denied", "host key", "remote host identification has changed")
 # A saved host is an SSH alias from the owner's own ssh config: letters, digits, dot, dash, underscore and "@" for
 # user@host. It may not start with a dash, so it can never be read as an option.
 ALIAS_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,62}")
@@ -669,11 +678,29 @@ def _remote_scheduler(
     return _scheduler_status(alias, part, result, parser)
 
 
-def _read_remote(run: Runner, alias: str) -> _Reading:
+def _login_failed(result: CommandResult) -> bool:
+    """True for a failed login that a retry will not fix soon: a refused key or a host key that is not accepted."""
+    if result.returncode != 255:
+        return False
+    stderr = result.stderr.lower()
+    return any(word in stderr for word in LOGIN_FAILURE_WORDS)
+
+
+def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Reading:
+    if backoff is not None:
+        wait = backoff.remaining(alias)
+        if wait > 0:
+            minutes = max(1, math.ceil(wait / 60))
+            text = f"Skipped for {minutes} min after a failed login."
+            return _Reading(statuses=(SourceStatus(alias, PART_GPUS, STATE_FAILED, text),))
     result = run(ssh_argv(alias), SSH_TIMEOUT_SECONDS)
     # 255 is ssh's own failure. It is read before any section, so it is never mistaken for a remote command's status.
     if result.missing or result.timed_out or result.failed_to_start or result.returncode == 255:
+        if backoff is not None and _login_failed(result):
+            backoff.failed(alias)
         return _Reading(statuses=(_ssh_failure(alias, result),))
+    if backoff is not None:
+        backoff.succeeded(alias)
     sections = _sections(result.stdout)
     gpus, gpu_status = _remote_gpus(alias, sections["GPU"])
     apps, apps_status = _remote_apps(alias, sections["APPS"], gpus)
@@ -715,18 +742,20 @@ def collect(
     runpod: Callable[[], Mapping[str, Any]] | None = None,
     *,
     now: datetime | None = None,
+    backoff: HostBackoff | None = None,
 ) -> GpuSnapshot:
     """Read every part once and return one snapshot. Never raises: a part that fails says so in its status line.
 
     ``hosts`` are saved SSH host names, read in parallel. ``runpod`` returns the local server's pod list, or raises
-    when that server is not answering. Passing None means RunPod is not connected.
+    when that server is not answering. Passing None means RunPod is not connected. ``backoff`` keeps the skips for
+    hosts that failed to log in; the panel passes one that lives as long as the tab.
     """
     checked_at = now if now is not None else datetime.now(timezone.utc)
     names = [name for name in hosts[:MAX_HOSTS] if check_alias(name)]
     readings: list[_Reading] = [_read_local(run)]
     if names:
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(names))) as pool:
-            remote = list(pool.map(lambda alias: _guarded_remote(run, alias), names))
+            remote = list(pool.map(lambda alias: _guarded_remote(run, alias, backoff), names))
         readings.extend(remote)
     readings.append(_runpod_reading(runpod))
     gpus: list[GpuRow] = []
@@ -739,9 +768,43 @@ def collect(
     return GpuSnapshot(checked_at=checked_at, gpus=tuple(gpus), jobs=tuple(jobs), statuses=tuple(statuses))
 
 
-def _guarded_remote(run: Runner, alias: str) -> _Reading:
+class HostBackoff:
+    """Skips a host after a failed login, for a growing interval: 1, 2, 4 ... minutes, capped at BACKOFF_CAP_MINUTES.
+
+    A successful login clears the skip. The clock is injected, so tests move time without waiting. A lock keeps the
+    counts right when several host reads report at once.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures: dict[str, int] = {}
+        self._retry_at: dict[str, float] = {}
+
+    def remaining(self, alias: str) -> float:
+        """Seconds until the host may be tried again. Zero when it is not skipped."""
+        with self._lock:
+            retry_at = self._retry_at.get(alias)
+        if retry_at is None:
+            return 0.0
+        return max(0.0, retry_at - self._clock())
+
+    def failed(self, alias: str) -> None:
+        with self._lock:
+            count = self._failures.get(alias, 0) + 1
+            self._failures[alias] = count
+            minutes = min(2 ** (count - 1), BACKOFF_CAP_MINUTES)
+            self._retry_at[alias] = self._clock() + minutes * 60
+
+    def succeeded(self, alias: str) -> None:
+        with self._lock:
+            self._failures.pop(alias, None)
+            self._retry_at.pop(alias, None)
+
+
+def _guarded_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> _Reading:
     try:
-        return _read_remote(run, alias)
+        return _read_remote(run, alias, backoff)
     except Exception:  # noqa: BLE001 - one bad host never stops the others
         return _failed_reading(alias)
 
