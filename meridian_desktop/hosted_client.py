@@ -1,4 +1,4 @@
-"""Hosted Meridian client: GET /projects with a bearer token. Pure Python: stdlib urllib only, no Qt import.
+"""Hosted Meridian client: GET /projects with a bearer token. Pure Python: urllib, plus certifi for the default host's CA set. No Qt import.
 
 ``list_projects`` sends one GET to {hosted URL}/projects with ``Authorization: Bearer <token>`` and
 returns the parsed JSON list. The caller reads the token from the keychain and passes it in. This
@@ -25,6 +25,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -33,11 +34,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import certifi
+
 from meridian_desktop import __version__
 from meridian_desktop.local_client import LOOPBACK_HOSTS
 
 HOSTED_TIMEOUT = 10.0
 PROJECTS_PATH = "/projects"
+
+# The host that trusts only the certifi CA bundle. A custom hosted URL uses the system store, so a private CA works.
+DEFAULT_HOSTED_HOST = "usemeridian.us"
+
 
 _LOG = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -199,10 +206,15 @@ def _bounded_read(response: Any, deadline: float) -> bytes:
             raise HostedError("too_large", TOO_LARGE_TEXT)
 
 
-def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
-    """The real transport: urllib, no redirects, a bounded body. A non-2xx status is returned, not raised."""
-    deadline = time.monotonic() + timeout
-    opener = urllib.request.build_opener(_NoRedirects())
+class _CertificateRefused(OSError):
+    """The trust store refused the server's certificate. Raised inside the transport only; _send maps it."""
+
+
+def _open_exchange(
+    request: urllib.request.Request, timeout: float, deadline: float, context: ssl.SSLContext | None
+) -> Reply:
+    """One request with the given TLS context (None means the system default). No redirects, a bounded body."""
+    opener = urllib.request.build_opener(_NoRedirects(), urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open(request, timeout=timeout) as response:
             return Reply(response.status, _bounded_read(response, deadline))
@@ -213,7 +225,29 @@ def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise TimeoutError("hosted connection timed out") from None
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            raise _CertificateRefused() from None
         raise
+
+
+def _tls_context_for(request: urllib.request.Request) -> ssl.SSLContext | None:
+    """The TLS context for one request, or None for the system default.
+
+    The default host trusts only the certifi CA bundle, so a machine's own certificate store cannot break it.
+    Other hosts keep the system default, so a private CA still works there. Chain and hostname are verified either way.
+    """
+    if _host_of(request) == DEFAULT_HOSTED_HOST:
+        return ssl.create_default_context(cafile=certifi.where())
+    return None
+
+
+def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
+    """The real transport: urllib, no redirects, a bounded body. A non-2xx status is returned, not raised.
+
+    The TLS context comes from _tls_context_for, so the default host always uses the certifi bundle.
+    """
+    deadline = time.monotonic() + timeout
+    return _open_exchange(request, timeout, deadline, context=_tls_context_for(request))
 
 
 def _failure_detail(exc: BaseException) -> str:
