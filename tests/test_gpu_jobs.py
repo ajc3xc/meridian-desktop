@@ -1126,3 +1126,15 @@ def test_a_strict_checking_unknown_key_gets_the_changed_key_wording_that_never_s
     assert status.state == STATE_FAILED
     assert status.text == CHANGED_TEXT
     assert _no_accept_instruction(status.text)
+
+
+def test_too_many_authentication_failures_backs_the_host_off():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    refused = CommandResult(
+        returncode=255,
+        stderr="Received disconnect from 10.0.0.5 port 22:2: Too many authentication failures",
+    )
+    run = FakeRunner({ssh_key("busy"): refused})
+    gpu_jobs.read_host(run, "busy", backoff)
+    assert backoff.remaining("busy") == 60

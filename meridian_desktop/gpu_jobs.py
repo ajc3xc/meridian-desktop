@@ -51,6 +51,7 @@ LOGIN_FAILURE_WORDS = (
     "permission denied",
     "host key",
     "remote host identification has changed",
+    "too many authentication failures",
 )
 # The owner-facing text for a host whose key is not accepted, and for a changed key. Neither tells anyone to accept a key.
 KEY_TYPE_TEXT = "The host offers no SSH key type this computer accepts. This needs a change on the host, not here."
