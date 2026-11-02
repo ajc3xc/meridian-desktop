@@ -68,6 +68,11 @@ def _finish_staged_update() -> None:
         return
 
 
+def _refuse_request(request: object, timeout: float) -> object:
+    """The transport a --smoke run gives the connection bar. It sends nothing; the check reads it as unreachable."""
+    raise OSError("a --smoke run makes no hosted request")
+
+
 def main(argv: list[str] | None = None, *, settings_path: Path | None = None, first_run: bool = True) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     smoke = SMOKE_FLAG in args
@@ -103,6 +108,8 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         update_root=None if smoke else install.install_dir(os.environ),
         record_apps_entry=None if smoke else install.apps_entry_recorder(os.environ),
         runner_actions=actions,
+        # A --smoke run makes no hosted request, so the connection bar's check is refused as an unreachable host would be.
+        connection_transport=_refuse_request if smoke else None,
     )
     tray = MeridianTray(window, app)
     window.show()

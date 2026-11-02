@@ -349,10 +349,11 @@ def test_hosted_url_refusal_is_shown_in_plain_words(db_file):
     assert result.message == f"Hosted Meridian projects could not be loaded. {hosted_client.BAD_SCHEME_TEXT}"
 
 
-def test_not_signed_in_message_says_where_to_save_the_token():
+def test_not_signed_in_message_says_to_sign_in_with_the_browser_in_settings():
     assert "Settings" in NOT_SIGNED_IN_MESSAGE
-    assert "Save token" in NOT_SIGNED_IN_MESSAGE
-    assert "sign in" not in NOT_SIGNED_IN_MESSAGE.lower()
+    assert "Sign in with your browser" in NOT_SIGNED_IN_MESSAGE
+    assert "paste" not in NOT_SIGNED_IN_MESSAGE.lower()
+    assert "Save token" not in NOT_SIGNED_IN_MESSAGE
 
 
 def test_default_hosted_reader_is_the_hosted_client(db_file, monkeypatch):

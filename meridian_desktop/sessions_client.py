@@ -82,12 +82,11 @@ MISSING_ROUTE_MESSAGE = (
     "or the project is not on this server. Pick another project, or update Meridian."
 )
 REJECTED_MESSAGE = (
-    "Meridian did not accept the request (HTTP 401). For hosted Meridian, paste a current token in Settings "
-    "and press Save token."
+    "Meridian did not accept the request (HTTP 401). For hosted Meridian, sign in again with your browser in Settings."
 )
 FORBIDDEN_MESSAGE = "Meridian refused this project for the saved token (HTTP 403). Use a token that can read this project."
-NO_TOKEN_MESSAGE = "No hosted token is saved. Paste your hosted token in Settings and press Save token."
-BAD_TOKEN_MESSAGE = "The saved hosted token has a space or non-ASCII text. Paste the token again in Settings."
+NO_TOKEN_MESSAGE = "No hosted token is saved. Sign in with your browser in Settings."
+BAD_TOKEN_MESSAGE = "The saved hosted token has a space or non-ASCII text. Sign in again with your browser in Settings."
 BAD_HOSTED_URL_MESSAGE = "The hosted URL in Settings is not usable. Use an https address such as https://usemeridian.us."
 HOSTED_TIMEOUT_MESSAGE = "Hosted Meridian did not answer in time. Check your network connection, then try again."
 HOSTED_UNREACHABLE_MESSAGE = "Hosted Meridian could not be reached. Check the hosted URL and your network connection."

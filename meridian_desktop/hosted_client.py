@@ -51,10 +51,10 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 USER_AGENT = f"MeridianDesktop/{__version__} (hosted client)"
 
-NOT_SIGNED_IN_TEXT = "No hosted token is saved. Paste your hosted token in Settings and press Save token."
+NOT_SIGNED_IN_TEXT = "No hosted token is saved. Sign in with your browser in Settings."
 REJECTED_TEXT = (
     "Hosted Meridian did not accept the saved token (HTTP 401). "
-    "Paste a current token in Settings and press Save token."
+    "Sign in again with your browser in Settings."
 )
 FORBIDDEN_TEXT = "Hosted Meridian refused the saved token for projects (HTTP 403). Check that the token can read projects."
 NOT_FOUND_TEXT = "Hosted Meridian has no projects page at this URL (HTTP 404). Check the hosted URL in Settings."
@@ -63,7 +63,7 @@ UNREACHABLE_TEXT = "Hosted Meridian could not be reached. Check the hosted URL a
 BAD_RESPONSE_TEXT = "Hosted Meridian sent a response the desktop could not read."
 TOO_LARGE_TEXT = f"Hosted Meridian sent more than {MAX_RESPONSE_BYTES} bytes, which the desktop does not read."
 REDIRECT_TEXT = "Hosted Meridian sent a redirect, which the desktop does not follow. Check the hosted URL in Settings."
-TOKEN_FORMAT_TEXT = "A hosted token has no spaces and only plain ASCII characters. Paste the token again."
+TOKEN_FORMAT_TEXT = "A hosted token has no spaces and only plain ASCII characters. Sign in again in Settings."
 BAD_URL_TEXT = "The hosted URL is not a valid URL."
 BAD_SCHEME_TEXT = "The hosted URL must use https, or http on 127.0.0.1, localhost or ::1."
 
@@ -210,6 +210,17 @@ class _CertificateRefused(OSError):
     """The trust store refused the server's certificate. Raised inside the transport only; _send maps it."""
 
 
+MAX_ERROR_BYTES = 16 * 1024
+
+
+def _error_body(exc: urllib.error.HTTPError) -> bytes:
+    """At most MAX_ERROR_BYTES of an error reply's body. A body that cannot be read leaves the status alone."""
+    try:
+        return exc.read(MAX_ERROR_BYTES)
+    except (OSError, http.client.HTTPException):
+        return b""
+
+
 def _open_exchange(
     request: urllib.request.Request, timeout: float, deadline: float, context: ssl.SSLContext | None
 ) -> Reply:
@@ -219,9 +230,11 @@ def _open_exchange(
         with opener.open(request, timeout=timeout) as response:
             return Reply(response.status, _bounded_read(response, deadline))
     except urllib.error.HTTPError as exc:
-        # urllib raises for a non-2xx status and for the refused redirect. Only the status is kept.
+        # urllib raises for a non-2xx status and for the refused redirect. The status and a short body are kept: the
+        # device flow reads the error name from the body. Headers are never kept.
+        body = _error_body(exc)
         exc.close()
-        return Reply(exc.code, b"")
+        return Reply(exc.code, body)
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise TimeoutError("hosted connection timed out") from None

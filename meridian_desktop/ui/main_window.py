@@ -1,4 +1,11 @@
-"""Main window: a mode selector on top, then five tabs: Home, Projects, Sessions, Search and Settings.
+"""Main window: a connection bar on top, then a mode selector, then five tabs: Home, Projects, Sessions, Search and Settings.
+
+The connection bar (ui/connection_bar.py) is the strip at the very top. It states who is signed in and until when, what
+the desktop is connected to (the hosted URL, with connected, reconnecting or not connected), and the local server when
+one is live. It checks when the window opens, every five minutes, and after a sign-in or sign-out. With no token saved
+it makes no hosted call. With one saved, it calls GET /me on the hosted URL, and it renews the token only when a refresh
+token was saved and under 14 days remain. Sign in with browser in Settings calls the hosted device flow only when the
+owner presses it.
 
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
@@ -11,7 +18,7 @@ Sessions tabs are read-only.
 
 Qt code lives in meridian_desktop/ui/ (and the listed exception tray.py). Settings go through settings_store and the
 RunPod key goes through secret_store, and neither imports Qt. The only network calls, apart from the update check
-below, are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
+below and the hosted calls of the connection bar and Sign in with browser (described at the top), are loopback calls: to the local Meridian server at the local_url setting, to the local LaTeX engine at the
 engine_url setting, to the local Zotero API on 127.0.0.1:23119, and to 127.0.0.1 slot ports for a connect-only check.
 A check makes its call when the window first shows, on the Home tab's five-minute timer while it is showing, or when
 its button is pressed. The Search tab calls the local server only when Search or Enter is pressed. Hosted mode calls
@@ -58,11 +65,13 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import token_store, updater, zotero_client
 from meridian_desktop.data_source import STATE_OK, DataSources, resolve
+from meridian_desktop.hosted_client import Transport
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
+from meridian_desktop.ui.connection_bar import ConnectionBar
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
@@ -231,12 +240,15 @@ class MainWindow(QMainWindow):
         runner_actions: RunnerActions | None = None,
         update_root: Path | None = None,
         record_apps_entry: updater.AppsEntryWriter | None = None,
+        connection_transport: Transport | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
         self._secrets = secret_store if secret_store is not None else KeyringSecretStore()
         # The Projects tab reads through these. Tests pass fakes. The app uses the real sources.
         self._sources = data_sources if data_sources is not None else default_sources(self._secrets)
+        # The connection bar's hosted check (GET /me) and its local probe. Tests pass a fake transport. None is the live one.
+        self._connection_transport = connection_transport
         # The Zotero cards and panel call this object. Tests pass a fake. The app uses the zotero_client module.
         self._zotero = zotero if zotero is not None else zotero_client
         # The tunnel status call (a status(scope) method). Tests pass a fake. The app builds the client
@@ -257,6 +269,16 @@ class MainWindow(QMainWindow):
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
+        # The connection bar is the first strip in the window, above the mode selector. It is built before the tabs,
+        # because Settings connects its sign-in signal to it.
+        self._connection_bar = ConnectionBar(
+            settings_store=self._store,
+            secrets=self._secrets,
+            probe=self._sources.probe,
+            transport=self._connection_transport,
+            parent=central,
+        )
+        layout.addWidget(self._connection_bar)
         layout.addLayout(self._build_mode_bar(central))
 
         # The status-bar notice holds the one update check of this window, and Home's Updates card reads its result, so
@@ -312,6 +334,7 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
+        self._connection_bar.start()
         # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
         self._apply_mode_view(self._saved_mode)
         # The core search at start, and any later search or chosen core folder, changes what the tunnel check can reach.
@@ -355,6 +378,8 @@ class MainWindow(QMainWindow):
             actions=self._runner_actions,
             tools_status=self._tools_status_read,
         )
+        # A sign-in or sign-out in Settings checks the top bar again at once.
+        self._settings_tab.signedInChanged.connect(self._connection_bar.refresh)
         runpod.layout().insertWidget(0, self._settings_tab)
 
         container = QWidget(self.tabs)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import urllib.parse
 from http.server import ThreadingHTTPServer
 
 from keyring.backend import KeyringBackend
@@ -65,3 +66,32 @@ class FailingKeyring:
 
     def delete_password(self, service: str, username: str) -> None:
         raise OSError(f"delete failed for {self._secret}")
+
+
+class ScriptedTransport:
+    """A transport that answers by path from a queue per path. The last item of a queue repeats. An exception is raised."""
+
+    def __init__(self, replies: dict[str, list]) -> None:
+        self._queues = {path: list(items) for path, items in replies.items()}
+        self.requests: list[dict] = []
+
+    def __call__(self, request, timeout):
+        path = urllib.parse.urlsplit(request.full_url).path
+        self.requests.append(
+            {
+                "method": request.get_method(),
+                "path": path,
+                "headers": dict(request.header_items()),
+                "body": request.data,
+            }
+        )
+        queue = self._queues.get(path)
+        if not queue:
+            raise AssertionError(f"unscripted request to {path}")
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def paths(self) -> list[str]:
+        return [request["path"] for request in self.requests]
