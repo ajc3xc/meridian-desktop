@@ -474,15 +474,24 @@ def test_an_unchanged_snapshot_does_not_rebuild_the_tables(qtbot, monkeypatch):
 
 
 def test_the_tab_opens_no_socket_and_starts_no_process_with_fakes(qtbot, monkeypatch):
-    def refuse(*args, **kwargs):
-        raise AssertionError("the GPUs tab must not reach the network or start a process in this test")
+    # The production code catches errors on purpose, so a raised exception alone could pass silently. Every attempt is
+    # recorded as a hit, and the test fails on any hit, whether or not the code swallowed the error.
+    hits = []
 
-    monkeypatch.setattr(socket, "socket", refuse)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(subprocess, "run", refuse)
-    monkeypatch.setattr(subprocess, "Popen", refuse)
+    def recording(name):
+        def refuse(*args, **kwargs):
+            hits.append(name)
+            raise AssertionError("the GPUs tab must not reach the network or start a process in this test")
+
+        return refuse
+
+    monkeypatch.setattr(socket, "socket", recording("socket"))
+    monkeypatch.setattr(socket, "create_connection", recording("create_connection"))
+    monkeypatch.setattr(subprocess, "run", recording("subprocess.run"))
+    monkeypatch.setattr(subprocess, "Popen", recording("subprocess.Popen"))
     run = RecordingRunner()
     panel = make_panel(qtbot, run=run)
     panel.show()
     wait_checked(qtbot, panel)
     assert run.calls == 1
+    assert hits == []
