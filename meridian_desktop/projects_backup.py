@@ -18,6 +18,7 @@ Nothing in this module sends anything to the hosted service, and nothing reads a
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -55,6 +56,10 @@ NO_TOKEN_TEXT = (
 )
 NO_PROJECTS_TEXT = "Hosted Meridian returned no projects, so no backup was written. Earlier backups are kept."
 NOTHING_CHECKED_TEXT = "No project is checked, so no backup was written. Earlier backups are kept."
+ACCOUNT_CHANGED_TEXT = (
+    "The hosted account changed after its project list was read, so nothing was written. "
+    "Choose the projects again."
+)
 
 ListHosted = Callable[[str, str], list[dict[str, Any]]]  # (hosted URL, token) -> the hosted client's project rows
 
@@ -119,6 +124,14 @@ def backup_name(taken_at: datetime, *, subset: bool = False) -> str:
 def backed_up_text(count: int, taken_at: datetime) -> str:
     noun = "project" if count == 1 else "projects"
     return f"Backed up {count} {noun} on {day_text(taken_at)}."
+
+
+def account_key(hosted_url: str, token: str) -> str:
+    """A fingerprint of the hosted URL and token, so a checklist is tied to the account it was read for.
+
+    It is a SHA-256 digest of both. The token itself is never kept, only the digest.
+    """
+    return hashlib.sha256(f"{hosted_url}\n{token}".encode("utf-8")).hexdigest()
 
 
 def destination_text(folder: Path) -> str:
@@ -252,6 +265,7 @@ __all__ = [
     "BACKUPS_KEPT",
     "SUBSET_BACKUPS_KEPT",
     "KEPT_FIELDS",
+    "ACCOUNT_CHANGED_TEXT",
     "NOTHING_CHECKED_TEXT",
     "NO_PROJECTS_TEXT",
     "NO_TOKEN_TEXT",
@@ -261,6 +275,7 @@ __all__ = [
     "backed_up_text",
     "backup_dir",
     "backup_hosted",
+    "account_key",
     "backup_name",
     "day_text",
     "destination_text",

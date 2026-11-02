@@ -170,6 +170,8 @@ class _Loaded:
     generation: int
     outcome: Resolution
     token_saved: bool | None = None
+    # A fingerprint of the hosted URL and token this load read, so a checklist for another account is cleared.
+    account_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,9 +183,16 @@ class _Backed:
 
 @dataclass(frozen=True)
 class _Chosen:
-    """The hosted projects a Choose read found, as the kept fields only (projects_backup.kept_projects). No token."""
+    """One finished Choose read: its generation, the account it was read for, and the kept fields of its projects.
 
+    ``message`` is set when the read found no project, failed, or had no token. Then ``rows`` is empty and the checklist is
+    cleared. The key is a fingerprint (projects_backup.account_key), so no token is held here.
+    """
+
+    generation: int
+    key: str | None
     rows: tuple[dict[str, Any], ...]
+    message: str = ""
 
 
 @dataclass
@@ -206,9 +215,9 @@ def _usable_token(token: object) -> bool:
     return isinstance(token, str) and bool(token.strip())
 
 
-def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool]:
+def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool, str | None]:
     """Runs on a worker: reads the saved settings, resolves the one source the mode uses, and says whether a hosted
-    token is saved.
+    token is saved, with the account fingerprint when one is.
 
     The token is read at most once. The resolve's own read is reused. A load whose resolve never reads it reads it here.
     """
@@ -219,12 +228,15 @@ def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool]
             read.append(sources.get_token())
         return read[0]
 
-    outcome = resolve(store.load().settings, replace(sources, get_token=get_token))
+    settings = store.load().settings
+    outcome = resolve(settings, replace(sources, get_token=get_token))
     try:
         token = get_token()
     except Exception:  # noqa: BLE001 - an unreadable token only hides the backup button
         token = None
-    return outcome, _usable_token(token)
+    if not _usable_token(token):
+        return outcome, False, None
+    return outcome, True, projects_backup.account_key(settings.hosted_url, str(token))
 
 
 def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
@@ -247,20 +259,45 @@ def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
     return _Backed(written.message)
 
 
-def _choose_work(store: SettingsStore, sources: DataSources) -> _Chosen | _Backed:
-    """Runs on a worker: reads the hosted project list once, for the checklist. It writes nothing."""
+def _choose_work(store: SettingsStore, sources: DataSources, generation: int) -> _Chosen:
+    """Runs on a worker: reads the hosted project list once, for the checklist. It writes nothing.
+
+    Every outcome is a _Chosen, so the tab never receives a raw exception from this read. A read that fails or finds no
+    project has no rows and a message. A missing token reads nothing at all.
+    """
+    try:
+        settings = store.load().settings
+        token = sources.get_token()
+        if not _usable_token(token):
+            return _Chosen(generation, None, (), projects_backup.NO_TOKEN_TEXT)
+        rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
+    except hosted_client.HostedError as exc:
+        return _Chosen(generation, None, (), f"{BACKUP_FAILED_TEXT}. {exc}")
+    except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
+        return _Chosen(generation, None, (), f"{BACKUP_FAILED_TEXT} ({exc.__class__.__name__}).")
+    if not rows:
+        return _Chosen(generation, None, (), projects_backup.NO_PROJECTS_TEXT)
+    return _Chosen(generation, projects_backup.account_key(settings.hosted_url, str(token)), tuple(rows))
+
+
+def _write_checked(
+    rows: tuple[dict[str, Any], ...],
+    ids: tuple[str, ...],
+    key: str,
+    store: SettingsStore,
+    sources: DataSources,
+) -> _Backed:
+    """Runs on a worker: writes only the checked projects, from the list the owner chose. It reads no project list.
+
+    Before it writes, it checks that the saved account is still the one the list was read for. A different account, or no
+    token, writes nothing.
+    """
     settings = store.load().settings
     token = sources.get_token()
     if not _usable_token(token):
         return _Backed(projects_backup.NO_TOKEN_TEXT)
-    rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
-    if not rows:
-        return _Backed(projects_backup.NO_PROJECTS_TEXT)
-    return _Chosen(tuple(rows))
-
-
-def _write_checked(rows: tuple[dict[str, Any], ...], ids: tuple[str, ...]) -> _Backed:
-    """Runs on a worker: writes only the checked projects, from the list the owner chose. It reads nothing."""
+    if projects_backup.account_key(settings.hosted_url, str(token)) != key:
+        return _Backed(projects_backup.ACCOUNT_CHANGED_TEXT)
     try:
         written = projects_backup.write_backup(
             list(rows),
@@ -287,7 +324,7 @@ class _LoadJob(QRunnable):
         self,
         owner: object,
         generation: int,
-        work: Callable[[], tuple[Resolution, bool]],
+        work: Callable[[], tuple[Resolution, bool, str | None]],
         delivery: Delivery,
     ) -> None:
         super().__init__()
@@ -299,14 +336,16 @@ class _LoadJob(QRunnable):
 
     def run(self) -> None:
         token_saved: bool | None
+        account_key: str | None = None
         try:
-            outcome, token_saved = self._work()
+            outcome, token_saved, account_key = self._work()
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failed = f"Projects could not be loaded ({exc.__class__.__name__})."
             outcome = Resolution(STATE_READ_FAILED, None, message=failed)
             token_saved = None
         try:
-            self._delivery.delivered.emit(Delivered(self._owner, _Loaded(self._generation, outcome, token_saved)))
+            loaded = _Loaded(self._generation, outcome, token_saved, account_key)
+            self._delivery.delivered.emit(Delivered(self._owner, loaded))
         except RuntimeError:
             pass  # the shared delivery object is gone, for example at shutdown
 
@@ -356,6 +395,11 @@ class ProjectsTab(QWidget):
         self._backup_row: _BackupRow | None = None
         self._backup_running = False
         self._chosen: tuple[dict[str, Any], ...] = ()
+        # The account (URL and token fingerprint) the checklist was read for, or None when no checklist is shown.
+        self._chosen_key: str | None = None
+        # Each Choose takes the next number, and removing the token takes one too. A Choose result with an older number
+        # is dropped, so a list read before the token was removed can never show again.
+        self._choice_generation = 0
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
@@ -426,6 +470,7 @@ class ProjectsTab(QWidget):
             return
         if loaded.token_saved is not None:
             self._offer_backup(loaded.token_saved)
+            self._sync_account(loaded.account_key)
         self._show(loaded.outcome)
 
     def _show(self, outcome: Resolution) -> None:
@@ -475,7 +520,13 @@ class ProjectsTab(QWidget):
 
         The widgets are built the first time a token is seen saved. A tab that never sees one never builds them. The
         destination line is set on each call, so it names the folder the backup would be written to now.
+
+        A removed token also clears the checklist and drops any Choose still in flight (a newer generation number), so its
+        answer cannot show the checklist again.
         """
+        if not saved:
+            self._choice_generation += 1
+            self._clear_choice()
         if self._backup_row is None:
             if not saved:
                 return
@@ -486,6 +537,25 @@ class ProjectsTab(QWidget):
             widget.setVisible(saved)
         if not saved:
             row.choice.setVisible(False)
+
+    def _sync_account(self, account_key: str | None) -> None:
+        """Clear a checklist that was read for another hosted URL or token, and drop a Choose still in flight for it."""
+        if self._chosen_key is not None and account_key != self._chosen_key:
+            self._choice_generation += 1
+            self._clear_choice()
+
+    def _clear_choice(self) -> None:
+        """Empty the checklist, forget its projects, and disable its write button. The checklist box is hidden."""
+        self._chosen = ()
+        self._chosen_key = None
+        row = self._backup_row
+        if row is None:
+            return
+        row.checklist.blockSignals(True)
+        row.checklist.clear()
+        row.checklist.blockSignals(False)
+        row.choice.setVisible(False)
+        row.write.setEnabled(False)
 
     def _build_backup_row(self) -> _BackupRow:
         column = QVBoxLayout()
@@ -554,8 +624,29 @@ class ProjectsTab(QWidget):
     def _on_checklist_changed(self, _item: object = None) -> None:
         # The write button is off while nothing is checked, so an empty backup is never started.
         row = self._backup_row
-        if row is not None:
-            row.write.setEnabled(not self._backup_running and bool(self._checked_ids()))
+        if row is None:
+            return
+        row.write.setEnabled(not self._backup_running and bool(self._checked_ids()))
+        if not self._backup_running:
+            self._update_choice_status()
+
+    def _update_choice_status(self) -> None:
+        """Say how many projects are checked. Nothing checked is said plainly, never as "All are checked"."""
+        row = self._backup_row
+        if row is None or row.checklist.count() == 0:
+            return
+        total = row.checklist.count()
+        checked = len(self._checked_ids())
+        if checked == 0:
+            text = "No project is checked, so there is nothing to back up. Check a project to back it up."
+        elif checked == total:
+            text = (
+                f"All {total} hosted project(s) are checked. Uncheck any to leave out, "
+                "then press Back up checked projects."
+            )
+        else:
+            text = f"{checked} of {total} hosted project(s) are checked. Press Back up checked projects to back up those."
+        row.status.setText(text)
 
     def _start_backup(self, _checked: bool = False) -> None:
         """Start the one backup, which reads every hosted project in one run. A press while one runs does nothing."""
@@ -573,15 +664,29 @@ class ProjectsTab(QWidget):
             return
         self._set_busy(True)
         self._backup_row.status.setText(CHOOSING_TEXT)
-        work = functools.partial(_choose_work, self._settings, self._sources)
+        self._choice_generation += 1
+        work = functools.partial(_choose_work, self._settings, self._sources, self._choice_generation)
         QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
 
     def _show_choices(self, chosen: _Chosen) -> None:
-        """Fill the checklist with the projects the Choose read found, every one checked, and show it."""
+        """Fill the checklist with the projects the Choose read found, every one checked, and show it.
+
+        A result from an older generation is dropped: the token was removed, or a newer Choose started, after it began.
+        A read that found nothing, or failed, clears the checklist and shows its message.
+        """
         row = self._backup_row
         if row is None:
             return
+        if chosen.generation != self._choice_generation:
+            self._set_busy(False)
+            return
+        if not chosen.rows:
+            self._clear_choice()
+            self._set_busy(False)
+            row.status.setText(chosen.message)
+            return
         self._chosen = chosen.rows
+        self._chosen_key = chosen.key
         row.checklist.blockSignals(True)
         row.checklist.clear()
         for project in chosen.rows:
@@ -592,19 +697,18 @@ class ProjectsTab(QWidget):
         row.checklist.blockSignals(False)
         row.choice.setVisible(True)
         self._set_busy(False)
-        row.status.setText(
-            f"Found {len(chosen.rows)} hosted project(s). All are checked. Uncheck any to leave out, "
-            "then press Back up checked projects."
-        )
+        self._update_choice_status()
 
     def _start_checked_backup(self, _checked: bool = False) -> None:
         """Write only the checked projects, from the list the Choose read found. Nothing is read again."""
         ids = tuple(self._checked_ids())
-        if self._backup_running or self._backup_row is None or not ids:
+        if self._backup_running or self._backup_row is None or not ids or self._chosen_key is None:
             return
         self._set_busy(True)
         self._backup_row.status.setText(BACKUP_RUNNING_TEXT)
-        work = functools.partial(_write_checked, self._chosen, ids)
+        work = functools.partial(
+            _write_checked, self._chosen, ids, self._chosen_key, self._settings, self._sources
+        )
         QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
 
     def _show_backup(self, report: _Backed) -> None:

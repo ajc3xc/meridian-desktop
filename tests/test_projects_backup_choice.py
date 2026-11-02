@@ -11,6 +11,7 @@ LOCALAPPDATA at its own temp folder. FAKE_TOKEN is an obviously fake value, so a
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -271,3 +272,197 @@ def test_the_settings_connection_section_states_the_backup_folder(qtbot, setting
 
     assert destination is not None
     assert destination.text() == projects_backup.destination_text(local_folder)
+
+
+# ----------------------------------------------------------------- a stale checklist never stays writable
+
+
+def _tab_with_token(qtbot, settings_path, holder, list_hosted):
+    """A Projects tab whose saved token is read from ``holder``, so a test can change or remove it between loads."""
+    SettingsStore(settings_path).save(Settings(mode="local", hosted_url=HOSTED_URL, local_url=LOCAL_URL))
+    sources = DataSources(
+        probe=lambda url: local_client.HEALTH_NOT_RUNNING,
+        read_server=lambda url: [],
+        read_file=lambda path: [],
+        get_token=lambda: holder["token"],
+        list_hosted=list_hosted,
+    )
+    tab = ProjectsTab(SettingsStore(settings_path), sources)
+    qtbot.addWidget(tab)
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return tab
+
+
+def _press_choose(qtbot, tab, expected_status: str) -> None:
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+    qtbot.waitUntil(lambda: backup_status.text().startswith(expected_status), timeout=5000)
+
+
+def _write_button(tab) -> QPushButton:
+    return tab.findChild(QPushButton, "projects-backup-write-checked")
+
+
+def test_an_empty_choose_clears_the_checklist_and_disables_write(qtbot, settings_path, local_folder):
+    answers = iter([list(HOSTED_ROWS), []])
+    tab = _tab_with_token(qtbot, settings_path, {"token": FAKE_TOKEN}, lambda url, token: next(answers))
+    _choose(qtbot, tab)
+    assert _checklist(tab).count() == 3 and _write_button(tab).isEnabled()
+
+    _press_choose(qtbot, tab, projects_backup.NO_PROJECTS_TEXT)
+
+    assert _checklist(tab).count() == 0
+    assert _choice_box(tab).isHidden()
+    assert not _write_button(tab).isEnabled()
+    assert list(local_folder.glob("projects-*.json")) == []
+
+
+def test_a_failed_choose_clears_the_checklist_and_disables_write(qtbot, settings_path, local_folder):
+    answers = iter([list(HOSTED_ROWS), hosted_client.HostedUnreachable()])
+
+    def list_hosted(url, token):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    tab = _tab_with_token(qtbot, settings_path, {"token": FAKE_TOKEN}, list_hosted)
+    _choose(qtbot, tab)
+
+    _press_choose(qtbot, tab, "Projects could not be backed up")
+
+    assert _checklist(tab).count() == 0
+    assert _choice_box(tab).isHidden()
+    assert not _write_button(tab).isEnabled()
+
+
+def test_a_refresh_for_a_different_hosted_url_clears_the_checklist(qtbot, settings_path, local_folder):
+    tab = _tab_with_token(qtbot, settings_path, {"token": FAKE_TOKEN}, lambda url, token: list(HOSTED_ROWS))
+    _choose(qtbot, tab)
+
+    SettingsStore(settings_path).save(Settings(mode="local", hosted_url="https://other.test", local_url=LOCAL_URL))
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    assert _checklist(tab).count() == 0
+    assert _choice_box(tab).isHidden()
+    assert not _write_button(tab).isEnabled()
+
+
+def test_a_refresh_for_a_different_token_clears_the_checklist(qtbot, settings_path, local_folder):
+    holder = {"token": FAKE_TOKEN}
+    tab = _tab_with_token(qtbot, settings_path, holder, lambda url, token: list(HOSTED_ROWS))
+    _choose(qtbot, tab)
+
+    holder["token"] = "sk_meridian_fake-other-account-0009"
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    assert _checklist(tab).count() == 0
+    assert not _write_button(tab).isEnabled()
+
+
+def test_a_choose_that_finishes_after_the_token_is_removed_stays_hidden(qtbot, settings_path, local_folder):
+    """The race: a Choose is in flight, the saved token is removed, and then the Choose answers. Its checklist must not show."""
+    release = threading.Event()
+    holder = {"token": FAKE_TOKEN}
+
+    def slow_list(url, token):
+        release.wait(timeout=5)
+        return list(HOSTED_ROWS)
+
+    tab = _tab_with_token(qtbot, settings_path, holder, slow_list)
+    tab.findChild(QPushButton, "projects-backup-choose").click()
+
+    holder["token"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    release.set()
+    qtbot.waitUntil(lambda: not tab._backup_running, timeout=5000)
+
+    assert _checklist(tab).count() == 0
+    assert _choice_box(tab).isHidden()
+    assert list(local_folder.glob("projects-*.json")) == []
+
+
+def test_the_no_token_branch_of_choose_reads_nothing_and_says_so(settings_path):
+    from meridian_desktop.ui.projects_tab import _choose_work
+
+    SettingsStore(settings_path).save(Settings(mode="local", hosted_url=HOSTED_URL, local_url=LOCAL_URL))
+    reads: list[str] = []
+
+    def list_hosted(url, token):
+        reads.append(url)
+        return list(HOSTED_ROWS)
+
+    sources = _sources(list_hosted=list_hosted)
+    sources = DataSources(
+        probe=sources.probe,
+        read_server=sources.read_server,
+        read_file=sources.read_file,
+        get_token=lambda: None,
+        list_hosted=list_hosted,
+    )
+
+    chosen = _choose_work(SettingsStore(settings_path), sources, 1)
+
+    assert reads == []
+    assert chosen.rows == ()
+    assert chosen.message == projects_backup.NO_TOKEN_TEXT
+
+
+def test_unchecking_every_project_says_so_in_the_status_line(qtbot, settings_path, local_folder):
+    tab = _tab(qtbot, settings_path, lambda url, token: list(HOSTED_ROWS))
+    checklist = _choose(qtbot, tab)
+    status = tab.findChild(QLabel, "projects-backup-status")
+    assert status.text().startswith("All 3 hosted project(s) are checked")
+
+    for row in range(checklist.count()):
+        checklist.item(row).setCheckState(Qt.CheckState.Unchecked)
+
+    assert "No project is checked" in status.text()
+    assert "All" not in status.text()
+
+
+def test_write_after_choose_reads_the_hosted_list_only_once(qtbot, settings_path, local_folder):
+    reads: list[str] = []
+
+    def list_hosted(url, token):
+        reads.append(url)
+        return list(HOSTED_ROWS)
+
+    tab = _tab(qtbot, settings_path, list_hosted)
+    _choose(qtbot, tab)
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+
+    _write_button(tab).click()
+    qtbot.waitUntil(lambda: backup_status.text().startswith("Backed up"), timeout=5000)
+
+    assert reads == [HOSTED_URL]
+
+
+def test_a_write_after_the_saved_account_changed_writes_nothing(qtbot, settings_path, local_folder):
+    """Even with the checklist still on screen, a write re-checks the account and writes nothing for another one."""
+    holder = {"token": FAKE_TOKEN}
+    reads: list[str] = []
+
+    def list_hosted(url, token):
+        reads.append(url)
+        return list(HOSTED_ROWS)
+
+    tab = _tab_with_token(qtbot, settings_path, holder, list_hosted)
+    _choose(qtbot, tab)
+    holder["token"] = "sk_meridian_fake-other-account-0010"
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+
+    _write_button(tab).click()
+    qtbot.waitUntil(lambda: backup_status.text().startswith("The hosted account changed"), timeout=5000)
+
+    assert list(local_folder.glob("projects-*.json")) == [] and list(local_folder.glob("subset-projects-*.json")) == []
+    assert reads == [HOSTED_URL]
