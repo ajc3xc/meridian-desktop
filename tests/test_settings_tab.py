@@ -12,6 +12,7 @@ import functools
 import gc
 import json
 import threading
+import urllib.parse
 import weakref
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from meridian_desktop.hosted_client import (
     Reply,
 )
 from meridian_desktop.core_locator import FOUND, NOT_FOUND, SOURCE_SEARCHED, LocatedCore
+from meridian_desktop.hosted_session import REFRESH_ACCOUNT, SESSION_ACCOUNT
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE, get_token, set_token
@@ -42,14 +44,14 @@ from meridian_desktop.ui.runner_actions import CHOSEN_TEXT, RunnerActions
 from meridian_desktop.ui.settings_tab import (
     DB_SAVED_TEXT,
     HOSTED_URL_SAVED_TEXT,
+    SIGN_IN_DONE_NO_NAME_TEXT,
+    SIGN_IN_DONE_TEXT,
     TEST_CONNECTED_TEXT,
     TEST_RUNNING_TEXT,
     TEST_UNEXPECTED_TEXT,
-    TOKEN_EMPTY_TEXT,
     TOKEN_NOT_SET_TEXT,
     TOKEN_NOTHING_REMOVED_TEXT,
     TOKEN_REMOVED_TEXT,
-    TOKEN_SAVED_TEXT,
     TOKEN_SET_TEXT,
     SettingsTab,
 )
@@ -96,12 +98,29 @@ def secrets(backend):
     return KeyringSecretStore(backend=backend)
 
 
-def _tab(qtbot, settings_path, secrets, *, list_hosted=_unexpected_list, choose_database=_no_dialog):
+def _tab(
+    qtbot,
+    settings_path,
+    secrets,
+    *,
+    list_hosted=_unexpected_list,
+    choose_database=_no_dialog,
+    sign_in_transport=None,
+    open_browser=None,
+    sleep=None,
+    clock=None,
+):
+    # The sign-in's opener, sleep and clock default to fakes, so a test never opens a browser or waits in real time.
+    fake_clock = FakeClock()
     tab = SettingsTab(
         SettingsStore(settings_path),
         choose_database=choose_database,
         secrets=secrets,
         list_hosted=list_hosted,
+        sign_in_transport=sign_in_transport,
+        open_browser=open_browser if open_browser is not None else FakeBrowser(),
+        sleep=sleep if sleep is not None else fake_clock.sleep,
+        clock=clock if clock is not None else fake_clock,
     )
     qtbot.addWidget(tab)
     return tab
@@ -191,13 +210,108 @@ def test_save_hosted_url_accepts_http_on_loopback(qtbot, settings_path, secrets)
     assert SettingsStore(settings_path).load().settings.hosted_url == "http://127.0.0.1:7878"
 
 
-# ----------------------------------------------------------- hosted token
+# ----------------------------------------------------------- hosted sign-in (browser device flow)
+
+DEVICE_CODE = "device-code-fake-settings-0007"
+USER_CODE = "WDJB-MJHT"
+VERIFY_URI = "https://hosted.test/activate?code=WDJB-MJHT"
+ACCOUNT_EMAIL = "owner@example.test"
+GRANT_BODY = {"access_token": FAKE_TOKEN, "token_type": "bearer", "expires_in": 7776000}
 
 
-def test_token_field_hides_the_value_with_password_echo(qtbot, settings_path, secrets):
+def _json_reply(status: int, data: dict) -> Reply:
+    return Reply(status, json.dumps(data).encode("utf-8"))
+
+
+class FakeClock:
+    """Time that moves only when the sign-in sleeps, so the poll loop runs in no real time."""
+
+    def __init__(self) -> None:
+        self.now = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeBrowser:
+    """Records each address the sign-in opens. It opens nothing."""
+
+    def __init__(self) -> None:
+        self.opened: list[str] = []
+
+    def __call__(self, uri: str) -> bool:
+        self.opened.append(uri)
+        return True
+
+
+class FakeHosted:
+    """The hosted device flow, scripted by path. POST /oauth/device gives the codes. Each POST /oauth/token takes the
+    next reply from ``polls``, and the last one repeats. GET /me gives ``me``. ``gate``, when set, holds the second poll
+    until the test sets it, so the test can look at the screen while the sign-in waits."""
+
+    def __init__(self, polls: list[Reply] | None = None, me: Reply | None = None, gate: threading.Event | None = None):
+        self.polls = polls if polls is not None else [_json_reply(200, GRANT_BODY)]
+        self.me = me if me is not None else _json_reply(200, {"email": ACCOUNT_EMAIL, "plan": "standard"})
+        self.gate = gate
+        self.paths: list[str] = []
+        self.poll_bodies: list[str] = []
+
+    def __call__(self, request, timeout):
+        path = urllib.parse.urlsplit(request.full_url).path
+        self.paths.append(path)
+        if path == "/oauth/device":
+            return _json_reply(
+                200,
+                {
+                    "device_code": DEVICE_CODE,
+                    "user_code": USER_CODE,
+                    "verification_uri": "https://hosted.test/activate",
+                    "verification_uri_complete": VERIFY_URI,
+                    "expires_in": 300,
+                    "interval": 5,
+                },
+            )
+        if path == "/oauth/token":
+            seen = self.paths.count("/oauth/token")
+            self.poll_bodies.append((request.data or b"").decode("ascii"))
+            if seen == 2 and self.gate is not None:
+                self.gate.wait(5)
+            return self.polls[min(seen, len(self.polls)) - 1]
+        if path == "/me":
+            return self.me
+        raise AssertionError(f"the sign-in made an unexpected request to {path}")
+
+
+def _sign_in_tab(qtbot, settings_path, secrets, hosted: FakeHosted, *, browser: FakeBrowser | None = None):
+    """A Settings tab wired to the scripted hosted flow, a fake browser and a fake clock."""
+    SettingsStore(settings_path).save(Settings(hosted_url=HOSTED_URL))
+    clock = FakeClock()
+    browser = browser if browser is not None else FakeBrowser()
+    tab = _tab(
+        qtbot,
+        settings_path,
+        secrets,
+        sign_in_transport=hosted,
+        open_browser=browser,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    return tab, browser
+
+
+def _message(tab) -> str:
+    return _label(tab, "settings-token-message").text()
+
+
+def test_the_paste_box_is_gone_and_sign_in_with_the_browser_is_offered(qtbot, settings_path, secrets):
     tab = _tab(qtbot, settings_path, secrets)
 
-    assert _field(tab, "settings-token-input").echoMode() == QLineEdit.EchoMode.Password
+    assert _field(tab, "settings-token-input") is None
+    assert _button(tab, "settings-save-token") is None
+    assert _button(tab, "settings-sign-in").text() == "Sign in with browser"
 
 
 def test_token_status_starts_not_set(qtbot, settings_path, secrets):
@@ -206,71 +320,111 @@ def test_token_status_starts_not_set(qtbot, settings_path, secrets):
     assert _label(tab, "settings-token-status").text() == TOKEN_NOT_SET_TEXT
 
 
-def test_saving_the_token_stores_it_in_the_keychain_and_shows_only_set(qtbot, settings_path, secrets, backend):
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText(FAKE_TOKEN)
+def test_sign_in_stores_the_token_and_session_and_names_the_account(qtbot, settings_path, secrets, backend):
+    hosted = FakeHosted()
+    tab, browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
+    saved_events: list[bool] = []
+    tab.signedInChanged.connect(lambda: saved_events.append(True))
 
-    _button(tab, "settings-save-token").click()
+    _button(tab, "settings-sign-in").click()
 
-    assert backend.snapshot() == {(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT): FAKE_TOKEN}
+    expected = SIGN_IN_DONE_TEXT.format(account=ACCOUNT_EMAIL)
+    qtbot.waitUntil(lambda: _message(tab) == expected, timeout=5000)
+    stored = backend.snapshot()
+    assert stored[(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT)] == FAKE_TOKEN
+    assert (TOKEN_SERVICE, REFRESH_ACCOUNT) not in stored, "the device grant issues no refresh token"
+    record = json.loads(stored[(TOKEN_SERVICE, SESSION_ACCOUNT)])
+    assert record["account"] == ACCOUNT_EMAIL
+    assert record["expires_at"] - record["issued_at"] == 7776000, "the server's 90-day expires_in is kept"
+    assert browser.opened == [VERIFY_URI]
+    assert hosted.paths == ["/oauth/device", "/oauth/token", "/me"]
     assert _label(tab, "settings-token-status").text() == TOKEN_SET_TEXT
-    assert _field(tab, "settings-token-input").text() == "", "the box is cleared after a save"
-    assert _label(tab, "settings-token-message").text() == TOKEN_SAVED_TEXT
+    assert _button(tab, "settings-sign-in").isEnabled()
+    assert _label(tab, "settings-sign-in-code").isHidden()
+    assert saved_events == [True], "the top bar is told at once"
     assert FAKE_TOKEN not in _all_visible_text(tab)
+    assert DEVICE_CODE not in _all_visible_text(tab)
 
 
-def test_saved_token_never_reaches_the_settings_file(qtbot, settings_path, secrets):
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText(FAKE_TOKEN)
-    _button(tab, "settings-save-token").click()
-    _field(tab, "settings-hosted-url").setText(HOSTED_URL)
-    _button(tab, "settings-save-hosted-url").click()
-    SettingsStore(settings_path).set_mode("hosted")  # a later save through the store must not pick it up either
+def test_the_user_code_shows_while_the_sign_in_waits_and_the_device_code_never_does(qtbot, settings_path, secrets):
+    gate = threading.Event()
+    hosted = FakeHosted(polls=[_json_reply(200, {"error": "authorization_pending"}), _json_reply(200, GRANT_BODY)], gate=gate)
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
+    code = _label(tab, "settings-sign-in-code")
 
-    assert settings_path.exists(), "the settings file should exist, or the scan proves nothing"
-    needles = (FAKE_TOKEN.encode("utf-8"), FAKE_TOKEN.encode("utf-16-le"))
-    for path in [p for p in settings_path.parent.rglob("*") if p.is_file()]:
-        data = path.read_bytes()
-        for needle in needles:
-            assert needle not in data, f"token text found in {path.name}"
-    saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert set(saved) == {"mode", "hosted_url", "local_url", "engine_url", "db_path"}
+    _button(tab, "settings-sign-in").click()
+
+    qtbot.waitUntil(lambda: USER_CODE in code.text() and not code.isHidden(), timeout=5000)
+    assert not _button(tab, "settings-sign-in").isEnabled(), "a second sign-in cannot start while one waits"
+    assert DEVICE_CODE not in code.text()
+    gate.set()
+    expected = SIGN_IN_DONE_TEXT.format(account=ACCOUNT_EMAIL)
+    qtbot.waitUntil(lambda: _message(tab) == expected, timeout=5000)
+    assert _button(tab, "settings-sign-in").isEnabled()
+    assert code.isHidden()
+    assert hosted.poll_bodies[0] == f"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code={DEVICE_CODE}"
 
 
-def test_empty_token_is_refused_and_nothing_is_stored(qtbot, settings_path, secrets, backend):
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText("   ")
+def test_a_denied_sign_in_saves_nothing(qtbot, settings_path, secrets, backend):
+    hosted = FakeHosted(polls=[_json_reply(400, {"error": "access_denied"})])
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
 
-    _button(tab, "settings-save-token").click()
+    _button(tab, "settings-sign-in").click()
 
-    assert _label(tab, "settings-token-message").text() == TOKEN_EMPTY_TEXT
+    qtbot.waitUntil(lambda: _message(tab).startswith("Not signed in. "), timeout=5000)
+    assert "refused in the browser" in _message(tab)
+    assert backend.snapshot() == {}
+    assert _button(tab, "settings-sign-in").isEnabled()
+
+
+def test_an_expired_code_saves_nothing_and_polling_stops_at_five_minutes(qtbot, settings_path, secrets, backend):
+    hosted = FakeHosted(polls=[_json_reply(200, {"error": "authorization_pending"})])
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
+
+    _button(tab, "settings-sign-in").click()
+
+    qtbot.waitUntil(lambda: _message(tab).startswith("Not signed in. "), timeout=5000)
+    assert "ran out" in _message(tab)
+    assert backend.snapshot() == {}
+    assert hosted.paths.count("/oauth/token") == 60, "300 seconds at the 5-second interval, then the code is over"
+
+
+def test_a_token_the_server_rejects_on_me_is_not_saved(qtbot, settings_path, secrets, backend):
+    hosted = FakeHosted(me=_json_reply(401, {"detail": "invalid API token"}))
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
+
+    _button(tab, "settings-sign-in").click()
+
+    expected = "Not signed in. Hosted Meridian rejected the new sign-in. Nothing was saved. Sign in again."
+    qtbot.waitUntil(lambda: _message(tab) == expected, timeout=5000)
     assert backend.snapshot() == {}
 
 
-def test_token_with_a_space_is_refused_and_not_stored(qtbot, settings_path, secrets, backend):
-    tab = _tab(qtbot, settings_path, secrets)
-    value = f"{FAKE_TOKEN} with a space"
-    _field(tab, "settings-token-input").setText(value)
+def test_a_failed_account_check_still_saves_the_token_with_no_name_yet(qtbot, settings_path, secrets, backend):
+    hosted = FakeHosted(me=Reply(503, b""))
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, hosted)
 
-    _button(tab, "settings-save-token").click()
+    _button(tab, "settings-sign-in").click()
 
-    message = _label(tab, "settings-token-message").text()
-    assert message.startswith("Not saved. ")
-    assert value not in message
-    assert backend.snapshot() == {}
+    qtbot.waitUntil(lambda: _message(tab) == SIGN_IN_DONE_NO_NAME_TEXT, timeout=5000)
+    stored = backend.snapshot()
+    assert stored[(TOKEN_SERVICE, HOSTED_TOKEN_ACCOUNT)] == FAKE_TOKEN
+    assert json.loads(stored[(TOKEN_SERVICE, SESSION_ACCOUNT)])["account"] == ""
 
 
-def test_remove_token_clears_the_keychain_entry(qtbot, settings_path, secrets, backend):
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText(FAKE_TOKEN)
-    _button(tab, "settings-save-token").click()
+def test_sign_out_removes_the_token_refresh_and_session_from_the_keychain(qtbot, settings_path, secrets, backend):
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, FakeHosted())
+    _button(tab, "settings-sign-in").click()
+    qtbot.waitUntil(lambda: _message(tab).startswith("Signed in as "), timeout=5000)
+    changed: list[bool] = []
+    tab.signedInChanged.connect(lambda: changed.append(True))
 
     _button(tab, "settings-remove-token").click()
 
     assert backend.snapshot() == {}
     assert _label(tab, "settings-token-status").text() == TOKEN_NOT_SET_TEXT
     assert _label(tab, "settings-token-message").text() == TOKEN_REMOVED_TEXT
-
+    assert changed == [True]
     _button(tab, "settings-remove-token").click()
     assert _label(tab, "settings-token-message").text() == TOKEN_NOTHING_REMOVED_TEXT
 
@@ -278,16 +432,30 @@ def test_remove_token_clears_the_keychain_entry(qtbot, settings_path, secrets, b
 def test_a_keychain_failure_on_save_is_shown_without_the_token(qtbot, settings_path):
     # FailingKeyring puts the value in every error it raises, on purpose.
     secrets = KeyringSecretStore(backend=FailingKeyring(FAKE_TOKEN))
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText(FAKE_TOKEN)
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, FakeHosted())
 
-    _button(tab, "settings-save-token").click()
+    _button(tab, "settings-sign-in").click()
 
-    message = _label(tab, "settings-token-message").text()
-    assert message.startswith("Not saved. ")
-    assert "keyring save failed (ValueError)" in message
+    qtbot.waitUntil(lambda: _message(tab).startswith("Not saved. "), timeout=5000)
+    assert "keyring save failed (ValueError)" in _message(tab)
     assert FAKE_TOKEN not in _all_visible_text(tab)
     assert _label(tab, "settings-token-status").text() == TOKEN_NOT_SET_TEXT
+
+
+def test_the_signed_in_token_never_reaches_the_settings_file(qtbot, settings_path, secrets):
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, FakeHosted())
+    _button(tab, "settings-sign-in").click()
+    qtbot.waitUntil(lambda: _message(tab).startswith("Signed in as "), timeout=5000)
+    SettingsStore(settings_path).set_mode("hosted")  # a later save through the store must not pick it up either
+
+    assert settings_path.exists(), "the settings file should exist, or the scan proves nothing"
+    needles = (FAKE_TOKEN.encode("utf-8"), FAKE_TOKEN.encode("utf-16-le"), DEVICE_CODE.encode("utf-8"))
+    for path in [p for p in settings_path.parent.rglob("*") if p.is_file()]:
+        data = path.read_bytes()
+        for needle in needles:
+            assert needle not in data, f"sign-in text found in {path.name}"
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert set(saved) == {"mode", "hosted_url", "local_url", "engine_url", "db_path"}
 
 
 def test_refresh_reflects_a_token_saved_elsewhere(qtbot, settings_path, secrets):
@@ -514,10 +682,10 @@ def test_every_label_on_the_settings_tab_is_selectable(qtbot, settings_path, sec
     assert missing == []
 
 
-def test_token_text_is_never_in_the_settings_file_after_remove(qtbot, settings_path, secrets, backend):
-    tab = _tab(qtbot, settings_path, secrets)
-    _field(tab, "settings-token-input").setText(FAKE_TOKEN)
-    _button(tab, "settings-save-token").click()
+def test_token_text_is_never_in_the_settings_file_after_sign_out(qtbot, settings_path, secrets, backend):
+    tab, _browser = _sign_in_tab(qtbot, settings_path, secrets, FakeHosted())
+    _button(tab, "settings-sign-in").click()
+    qtbot.waitUntil(lambda: _message(tab).startswith("Signed in as "), timeout=5000)
     _button(tab, "settings-remove-token").click()
 
     assert get_token(store=secrets) is None

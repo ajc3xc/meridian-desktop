@@ -85,6 +85,19 @@ def drain_pool_jobs():
     QThreadPool.globalInstance().waitForDone(5000)
 
 
+@pytest.fixture(autouse=True)
+def no_hosted_network(monkeypatch):
+    """The connection bar's check and the Settings sign-in reach the hosted host through hosted_session.live_transport.
+    No test may reach it, so that transport is replaced here by one that fails as an unreachable host would. A test
+    that drives the hosted flow passes its own fake transport instead."""
+    from meridian_desktop import hosted_session
+
+    def offline(request, timeout):
+        raise OSError("network is off in tests")
+
+    monkeypatch.setattr(hosted_session, "live_transport", offline)
+
+
 @pytest.fixture
 def settings_path(tmp_path):
     """A settings file in pytest's temp dir. Tests never touch the real one."""

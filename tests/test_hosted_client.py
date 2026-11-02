@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from _fakes import QuietServer
+from meridian_desktop import hosted_client
 from meridian_desktop.hosted_client import (
     BAD_RESPONSE_TEXT,
     FORBIDDEN_TEXT,
@@ -334,6 +335,28 @@ def test_default_transport_sends_the_bearer_header_to_a_loopback_stub(stub):
 
     assert rows == PROJECT_ROWS
     assert stub.hits == [("/projects", f"Bearer {FAKE_TOKEN}")]
+
+
+def test_default_transport_keeps_the_status_and_a_short_body_of_an_error_reply(stub):
+    # The device flow reads the error name from a 400 body, so the transport keeps it. A body is bounded.
+    body = json.dumps({"error": "access_denied"}).encode("utf-8")
+    stub.routes["/oauth/token"] = (400, {"Content-Type": "application/json"}, body, 0.0)
+    request = urllib.request.Request(stub.base + "/oauth/token")
+
+    reply = hosted_client._urllib_transport(request, 5.0)
+
+    assert reply.status == 400
+    assert reply.body == body
+
+
+def test_default_transport_bounds_the_body_of_an_error_reply(stub):
+    stub.routes["/oauth/token"] = (400, {"Content-Type": "application/json"}, b"x" * (64 * 1024), 0.0)
+    request = urllib.request.Request(stub.base + "/oauth/token")
+
+    reply = hosted_client._urllib_transport(request, 5.0)
+
+    assert reply.status == 400
+    assert len(reply.body) == hosted_client.MAX_ERROR_BYTES
 
 
 def test_default_transport_does_not_follow_a_redirect(stub):

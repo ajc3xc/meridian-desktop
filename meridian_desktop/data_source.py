@@ -55,7 +55,7 @@ NO_LOCAL_DATA_MESSAGE = (
 )
 NOT_SIGNED_IN_MESSAGE = (
     "No hosted token is saved, so no hosted projects are loaded. "
-    "Paste your hosted token in Settings and press Save token."
+    "Sign in with your browser in Settings."
 )
 _READ_FAILED_TEXT = {
     SOURCE_SERVER: "The local Meridian server could not be read",

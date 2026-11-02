@@ -819,10 +819,12 @@ def test_settings_tab_never_shows_or_takes_the_hosted_token(qtbot, settings_path
     qtbot.addWidget(window)
     tab = _settings_tab(window)
 
-    # The token field is for entering a new token. It never shows the stored one, and the tab reports only "set".
+    # Sign-in is by the browser: the tab has no token field and offers a sign-in button. It never shows the stored
+    # token, and the tab reports only "set".
     names = {field.objectName() for field in tab.findChildren(QLineEdit)}
-    assert {"settings-local-url", "settings-hosted-url", "settings-token-input"} <= names
-    assert tab.findChild(QLineEdit, "settings-token-input").text() == ""
+    assert {"settings-local-url", "settings-hosted-url"} <= names
+    assert "settings-token-input" not in names
+    assert tab.findChild(QPushButton, "settings-sign-in") is not None
     assert FAKE_TOKEN not in _all_text(window)
     assert FAKE_TOKEN not in tab.findChild(QLabel, "settings-mode").text()
 

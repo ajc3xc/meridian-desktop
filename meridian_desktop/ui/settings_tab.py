@@ -1,7 +1,7 @@
 """The Settings tab: six collapsible groups in one scrolling column, in this order.
 
-1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
-   Save and Remove, the Test connection and Try again buttons, the local URL and the database file.
+1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted sign-in (Sign in with browser
+   and Sign out), the Test connection and Try again buttons, the local URL and the database file.
 2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
    launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
 3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
@@ -11,10 +11,12 @@
 6. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
    It starts folded. The Logs view reads nothing until its Refresh is pressed.
 
-The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token is typed into
-a password field, saved to the keychain through token_store, and never written to the settings file. The tab shows only
-whether a token is set. Test connection makes one GET /projects with the saved URL and token, on a worker thread, and
-shows the result in plain words. Try again runs the same test, from the button beside it.
+The hosted URL is checked with hosted_client.validate_base_url before anything is written. Sign in with browser runs the
+server's device flow (hosted_session.sign_in) on a worker thread: it shows the sign-in code, opens the browser, and saves
+the token to the keychain through token_store when the owner approves. No token is typed or pasted. The tab shows only
+whether a token is set. Sign out removes the token and the saved session. Test connection makes one GET /projects with
+the saved URL and token, on a worker thread, and shows the result in plain words. Try again runs the same test, from
+the button beside it.
 
 The local URL is checked with local_client.assert_loopback before anything is written. A value that is not an http
 loopback URL is refused inline, and the settings file is not touched. The database file is picked with a file dialog, and
@@ -30,12 +32,14 @@ parent, the tab has no RunPod card, and the Keys group lists only the names the 
 
 from __future__ import annotations
 
+import time
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Slot
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -52,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, token_store
+from meridian_desktop import hosted_client, hosted_session, token_store
 from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
@@ -103,10 +107,15 @@ NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
 HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
 TOKEN_SET_TEXT = "Hosted token: set"
 TOKEN_NOT_SET_TEXT = "Hosted token: not set"
-TOKEN_EMPTY_TEXT = "Paste the hosted token into the box, then press Save token."
-TOKEN_SAVED_TEXT = "Hosted token saved in the keychain. The box is cleared."
-TOKEN_REMOVED_TEXT = "Hosted token removed from the keychain."
-TOKEN_NOTHING_REMOVED_TEXT = "No hosted token was saved, so nothing was removed."
+SIGN_IN_STARTING_TEXT = "Starting the sign-in with Hosted Meridian..."
+SIGN_IN_OPENED_TEXT = "Approve the sign-in in the browser that opened. It shows the code {code}. Waiting up to five minutes."
+SIGN_IN_NO_BROWSER_TEXT = "The browser did not open. Go to {uri} and check that it shows the code {code}."
+SIGN_IN_DONE_TEXT = "Signed in as {account}. The token is in the keychain."
+SIGN_IN_DONE_NO_NAME_TEXT = "Signed in. The account name shows once Hosted Meridian answers."
+SIGN_IN_FAILED_TEXT = "Not signed in. {reason}"
+SIGN_IN_UNEXPECTED_TEXT = "Sign-in failed ({name}). Nothing was saved."
+TOKEN_REMOVED_TEXT = "Signed out. The hosted token was removed from the keychain."
+TOKEN_NOTHING_REMOVED_TEXT = "No hosted token was saved, so there was nothing to sign out of."
 TEST_RUNNING_TEXT = "Testing the saved hosted URL and token..."
 TEST_CONNECTED_TEXT = "Connected to {url}. Hosted Meridian returned {count} project(s)."
 TEST_UNEXPECTED_TEXT = "Connection test failed ({name})."
@@ -252,8 +261,99 @@ class _ConnectionTestJob(QRunnable):
         self._delivery.delivered.emit(Delivered(self._owner, _TestDone(self._generation, text)))
 
 
+@dataclass(frozen=True)
+class _SignInEvent:
+    """One step of a browser sign-in, from its job. done False carries the code to show; done True the final outcome."""
+
+    generation: int
+    done: bool
+    ok: bool
+    text: str
+
+
+def _try_open(open_browser: Callable[[str], bool], uri: str) -> bool:
+    """Open the browser at uri. False when it did not open, or the opener raised."""
+    try:
+        return bool(open_browser(uri))
+    except Exception:  # noqa: BLE001 - a browser that will not open is reported, never raised
+        return False
+
+
+class _SignInJob(QRunnable):
+    """Run the browser sign-in on the thread pool. Each step goes to the shared delivery object as a _SignInEvent.
+
+    The job holds the hosted URL, the secret store, the transport, the opener, the timing functions, the owner token,
+    the generation and the shared delivery object. It never holds the tab. The events carry the user code and fixed
+    wording only, never the device code or a token.
+    """
+
+    def __init__(
+        self,
+        generation: int,
+        base_url: str,
+        secrets: SecretStore,
+        transport: hosted_client.Transport | None,
+        open_browser: Callable[[str], bool],
+        sleep: Callable[[float], None],
+        clock: Callable[[], float],
+        owner: object,
+        delivery: Delivery,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._generation = generation
+        self._base_url = base_url
+        self._secrets = secrets
+        self._transport = transport
+        self._open_browser = open_browser
+        self._sleep = sleep
+        self._clock = clock
+        self._owner = owner
+        self._delivery = delivery
+
+    def _emit(self, event: _SignInEvent) -> None:
+        try:
+            self._delivery.delivered.emit(Delivered(self._owner, event))
+        except RuntimeError:
+            pass  # the shared delivery object is gone, for example at shutdown
+
+    def run(self) -> None:
+        def announce(auth: hosted_session.DeviceAuth) -> None:
+            self._emit(_SignInEvent(self._generation, False, True, SIGN_IN_OPENED_TEXT.format(code=auth.user_code)))
+            if not _try_open(self._open_browser, auth.verification_uri):
+                text = SIGN_IN_NO_BROWSER_TEXT.format(uri=auth.verification_uri, code=auth.user_code)
+                self._emit(_SignInEvent(self._generation, False, True, text))
+
+        try:
+            session = hosted_session.sign_in(
+                self._base_url,
+                secrets=self._secrets,
+                transport=self._transport,
+                announce=announce,
+                sleep=self._sleep,
+                clock=self._clock,
+            )
+        except hosted_session.SignInError as exc:
+            outcome = _SignInEvent(self._generation, True, False, SIGN_IN_FAILED_TEXT.format(reason=str(exc)))
+        except HostedError as exc:
+            outcome = _SignInEvent(self._generation, True, False, SIGN_IN_FAILED_TEXT.format(reason=str(exc)))
+        except TokenStoreError as exc:
+            # TokenStoreError text names the step and the error class only, never the token.
+            outcome = _SignInEvent(self._generation, True, False, f"Not saved. {exc}")
+        except Exception as exc:  # noqa: BLE001 - a worker never raises into the pool; only the class name is shown
+            outcome = _SignInEvent(self._generation, True, False, SIGN_IN_UNEXPECTED_TEXT.format(name=exc.__class__.__name__))
+        else:
+            text = SIGN_IN_DONE_TEXT.format(account=session.account) if session.account else SIGN_IN_DONE_NO_NAME_TEXT
+            outcome = _SignInEvent(self._generation, True, True, text)
+        self._emit(outcome)
+
+
 class SettingsTab(QWidget):
     """The five Settings groups: connection, local server and startup, keys, client setup, and diagnostics."""
+
+    # Emitted on the GUI thread after a sign-in is saved or a sign-out removes the token. The main window's top bar
+    # listens, so it checks again at once.
+    signedInChanged = Signal()
 
     def __init__(
         self,
@@ -264,6 +364,10 @@ class SettingsTab(QWidget):
         list_hosted: ListHostedFn | None = None,
         actions: RunnerActions | None = None,
         tools_status: Callable[[], ToolsStatus] | None = None,
+        sign_in_transport: hosted_client.Transport | None = None,
+        open_browser: Callable[[str], bool] = webbrowser.open,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings-tab")
@@ -271,6 +375,12 @@ class SettingsTab(QWidget):
         self._choose_database = choose_database
         self._secrets = secrets if secrets is not None else KeyringSecretStore()
         self._list_hosted = list_hosted if list_hosted is not None else hosted_client.list_projects
+        # The sign-in's transport, opener and timing. Tests pass fakes. The app passes none, so the live transport is used.
+        self._sign_in_transport = sign_in_transport
+        self._open_browser = open_browser
+        self._sign_in_sleep = sleep
+        self._sign_in_clock = clock
+        self._sign_in_generation = 0
         self._actions = actions if actions is not None else RunnerActions(settings_store)
         # The one tools read the full tools table shows. None leaves the table out (a tab built without the window).
         self._tools_status = tools_status
@@ -345,24 +455,25 @@ class SettingsTab(QWidget):
         self._hosted_url_message.setVisible(False)
         grid.addWidget(self._hosted_url_message, 1, 0, 1, 3)
 
-        # Hosted token: the status line, then the box with Save and Remove. The value is never shown.
+        # Hosted sign-in: the status line, then Sign in with browser and Sign out. The code to approve and the result
+        # are shown under them. The token value is never shown.
         self._token_status = _label(body, "settings-token-status")
         grid.addWidget(self._token_status, 2, 0, 1, 4)
-        grid.addWidget(_caption(body, "Token:"), 3, 0)
-        self._token_input = QLineEdit(body)
-        self._token_input.setObjectName("settings-token-input")
-        self._token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._token_input.setPlaceholderText("Paste the hosted token")
-        grid.addWidget(self._token_input, 3, 1)
-        self._save_token = QPushButton("Save token", body)
-        self._save_token.setObjectName("settings-save-token")
-        grid.addWidget(self._save_token, 3, 2)
-        self._remove_token = QPushButton("Remove token", body)
+        grid.addWidget(_caption(body, "Account:"), 3, 0)
+        self._sign_in = QPushButton("Sign in with browser", body)
+        self._sign_in.setObjectName("settings-sign-in")
+        grid.addWidget(self._sign_in, 3, 1)
+        self._remove_token = QPushButton("Sign out", body)
         self._remove_token.setObjectName("settings-remove-token")
-        grid.addWidget(self._remove_token, 3, 3)
+        grid.addWidget(self._remove_token, 3, 2)
+        self._sign_in_code = _label(body, "settings-sign-in-code")
+        self._sign_in_code.setVisible(False)
         self._token_message = _label(body, "settings-token-message")
         self._token_message.setVisible(False)
-        grid.addWidget(self._token_message, 4, 0, 1, 4)
+        sign_in_lines = QVBoxLayout()
+        sign_in_lines.addWidget(self._sign_in_code)
+        sign_in_lines.addWidget(self._token_message)
+        grid.addLayout(sign_in_lines, 4, 0, 1, 4)
 
         # Test connection and Try again, side by side, then their result. Try again runs the same test.
         self._test_button = QPushButton("Test connection", body)
@@ -470,8 +581,7 @@ class SettingsTab(QWidget):
     def _wire(self) -> None:
         self._save_hosted_url.clicked.connect(self._on_save_hosted_url_clicked)
         self._hosted_url.returnPressed.connect(self._on_save_hosted_url_clicked)
-        self._save_token.clicked.connect(self._on_save_token_clicked)
-        self._token_input.returnPressed.connect(self._on_save_token_clicked)
+        self._sign_in.clicked.connect(self._on_sign_in_clicked)
         self._remove_token.clicked.connect(self._on_remove_token_clicked)
         self._test_button.clicked.connect(self._on_test_clicked)
         self._try_again_button.clicked.connect(self._on_test_clicked)
@@ -551,35 +661,57 @@ class SettingsTab(QWidget):
         _set_message(self._hosted_url_message, HOSTED_URL_SAVED_TEXT)
 
     @Slot()
-    def _on_save_token_clicked(self) -> None:
-        value = self._token_input.text()
-        if not value.strip():
-            _set_message(self._token_message, TOKEN_EMPTY_TEXT)
-            return
+    def _on_sign_in_clicked(self) -> None:
+        """Start the browser sign-in on the pool. The button stays off until the sign-in finishes."""
         try:
-            hosted_client.usable_token(value)  # refuses a value with spaces before the keychain sees it
-        except HostedError as exc:
-            _set_message(self._token_message, f"Not saved. {exc}")
+            base = hosted_client.validate_base_url(self._store.load().settings.hosted_url)
+        except BadBaseUrl as exc:
+            _set_message(self._token_message, f"Not signed in. {exc}")
             return
-        try:
-            token_store.set_token(value, store=self._secrets)
-        except TokenStoreError as exc:
-            # TokenStoreError text names the step and the error class only, never the token.
-            _set_message(self._token_message, f"Not saved. {exc}")
-            return
-        self._token_input.clear()
-        self._refresh_token_status()
-        _set_message(self._token_message, TOKEN_SAVED_TEXT)
+        self._sign_in.setEnabled(False)
+        self._sign_in_generation += 1
+        self._sign_in_code.setVisible(False)
+        _set_message(self._token_message, SIGN_IN_STARTING_TEXT)
+        # The job holds the URL, the secret store, the owner token and the shared delivery object, never the tab.
+        job = _SignInJob(
+            self._sign_in_generation,
+            base,
+            self._secrets,
+            self._sign_in_transport,
+            self._open_browser,
+            self._sign_in_sleep,
+            self._sign_in_clock,
+            self._owner,
+            shared_delivery(),
+        )
+        QThreadPool.globalInstance().start(job)
 
     @Slot()
     def _on_remove_token_clicked(self) -> None:
+        """Sign out: remove the token, any refresh token and the saved session from the keychain."""
         try:
-            removed = token_store.delete_token(store=self._secrets)
+            removed = hosted_session.sign_out(self._secrets)
         except TokenStoreError as exc:
             _set_message(self._token_message, f"Not removed. {exc}")
             return
         self._refresh_token_status()
         _set_message(self._token_message, TOKEN_REMOVED_TEXT if removed else TOKEN_NOTHING_REMOVED_TEXT)
+        self.signedInChanged.emit()
+
+    def _on_sign_in_event(self, event: _SignInEvent) -> None:
+        """Runs on the GUI thread. An event from an earlier sign-in is dropped; the code line shows until the outcome."""
+        if event.generation != self._sign_in_generation:
+            return
+        if not event.done:
+            self._sign_in_code.setText(event.text)
+            self._sign_in_code.setVisible(True)
+            return
+        self._sign_in_code.setVisible(False)
+        self._sign_in.setEnabled(True)
+        self._refresh_token_status()
+        _set_message(self._token_message, event.text)
+        if event.ok:
+            self.signedInChanged.emit()
 
     # ----------------------------------------------------------- connection test
 
@@ -599,6 +731,9 @@ class SettingsTab(QWidget):
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
         done = item.value
+        if isinstance(done, _SignInEvent):
+            self._on_sign_in_event(done)
+            return
         if not isinstance(done, _TestDone) or done.generation != self._generation:
             return
         self._test_button.setEnabled(True)
