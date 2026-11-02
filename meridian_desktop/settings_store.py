@@ -111,6 +111,12 @@ class Settings:
     # The MCP tools the owner switched off, as "group:tool" keys (meridian_desktop/tool_catalog.py). Every tool is on by
     # default, so an empty tuple is the default. save() writes the key only when it is not empty.
     disabled_tools: tuple[str, ...] = ()
+    # The owner's own MCP connectors, one saved object each (meridian_desktop/custom_connectors.py). Each entry is checked
+    # when it is read, so nothing in this list is trusted. save() writes the key only when there is an entry.
+    custom_connectors: tuple[dict, ...] = ()
+    # The owner's opt-in for claude.ai to reach custom connectors through the tunnel, while the tunnel is up. Off by default,
+    # and save() writes it only when it is on.
+    custom_tunnel_opt_in: bool = False
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -256,6 +262,23 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["disabled_tools"] = tuple(dict.fromkeys(item.strip() for item in value))
         else:
             problems.append("disabled_tools must be a list of tool keys; using none")
+
+    # custom_connectors: an absent key means none, with no warning. Only a list of objects is accepted here. Each object is
+    # checked by custom_connectors.py, so one bad entry is shown on its own row and does not stop the rest.
+    if "custom_connectors" in data:
+        value = data["custom_connectors"]
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            values["custom_connectors"] = tuple(value)
+        else:
+            problems.append("custom_connectors must be a list of connector objects; using none")
+
+    # custom_tunnel_opt_in: an absent key means off, with no warning. Only a real true or false is accepted.
+    if "custom_tunnel_opt_in" in data:
+        value = data["custom_tunnel_opt_in"]
+        if isinstance(value, bool):
+            values["custom_tunnel_opt_in"] = value
+        else:
+            problems.append("custom_tunnel_opt_in must be true or false; using false")
 
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
@@ -404,6 +427,12 @@ class SettingsStore:
         if not settings.disabled_tools:
             # Every tool on is the default, so a file with no switched-off tool has no such key.
             del data["disabled_tools"]
+        if not settings.custom_connectors:
+            # No connectors is the default, so a file with none has no such key.
+            del data["custom_connectors"]
+        if not settings.custom_tunnel_opt_in:
+            # Off is the default, so the tunnel opt-in is written only once the owner turns it on.
+            del data["custom_tunnel_opt_in"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]

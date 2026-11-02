@@ -20,7 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from meridian_desktop import install, local_cache, token_store, updater
+from meridian_desktop import custom_connectors, install, local_cache, token_store, updater
 from meridian_desktop.desktop_log import start_desktop_log
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
@@ -47,7 +47,10 @@ def _sync_local_cache(store: SettingsStore) -> None:
             log.warning("local cache not updated: the settings file has a problem (%s)", result.warning)
             return
         settings = result.settings
-        for line in local_cache.sync_local_cache(disabled=settings.disabled_tools, core_checkout=settings.core_checkout):
+        custom = custom_connectors.cache_entries(settings.custom_connectors, resolve=local_cache.find_command)
+        for line in local_cache.sync_local_cache(
+            disabled=settings.disabled_tools, core_checkout=settings.core_checkout, custom=custom
+        ):
             log.info("%s", line)
     except Exception as exc:  # the app must start even when the cache cannot be written
         log.warning("local cache not updated (%s)", exc.__class__.__name__)
