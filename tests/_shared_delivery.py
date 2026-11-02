@@ -17,27 +17,61 @@ from contextlib import contextmanager
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTableWidget, QWidget
 
-from meridian_desktop.ui.delivery import shared_delivery
+from meridian_desktop.ui.delivery import Delivery, shared_delivery
+
+# Every delivery the running test has seen, in arrival order. start_recording resets it for each test.
+_recorded: list[object] = []
+
+
+def start_recording(delivery: Delivery) -> None:
+    """Connect the recorder to a test's shared delivery object. conftest calls this before the test makes any page.
+
+    Qt calls the connections of one signal in the order they were made. A page's connection is queued, so an emit only
+    posts the delivery to the GUI thread. The recorder is a direct connection, so it runs on the emitting thread, during
+    the emit. The recorder must therefore be the first connection: connected after a page, it can still be unrecorded
+    while the GUI thread has already let the page act on the delivery.
+    """
+    global _recorded
+    _recorded = []
+    delivery.delivered.connect(_record, Qt.ConnectionType.DirectConnection)
+
+
+def _record(item: object) -> None:
+    _recorded.append(item)
+
+
+class _Window:
+    """A live view of the deliveries that arrived while one recording_deliveries block was open."""
+
+    def __init__(self) -> None:
+        self._start = len(_recorded)
+        self._stop: int | None = None
+
+    def _items(self) -> list[object]:
+        return _recorded[self._start : self._stop]
+
+    def __len__(self) -> int:
+        return len(self._items())
+
+    def __getitem__(self, index):
+        return self._items()[index]
+
+    def __iter__(self):
+        return iter(self._items())
 
 
 @contextmanager
 def recording_deliveries():
-    """Yields a list that gains each object emitted to the shared delivery object while the block runs.
+    """Yields a view that gains each object delivered to the shared delivery object while the block runs.
 
-    The recorder is a direct connection, so it runs on the thread that emits, before the page's own handler is
-    queued. A test can therefore read the list as soon as the page has shown a result.
+    The recorder is connected before any page of the test exists, so each delivery is recorded before a page can act
+    on it. A test can therefore read the view as soon as the page has shown a result.
     """
-    emitted: list[object] = []
-
-    def record(item: object) -> None:
-        emitted.append(item)
-
-    delivery = shared_delivery()
-    delivery.delivered.connect(record, Qt.ConnectionType.DirectConnection)
+    window = _Window()
     try:
-        yield emitted
+        yield window
     finally:
-        delivery.delivered.disconnect(record)
+        window._stop = len(_recorded)
 
 
 def emit(item: object) -> None:
