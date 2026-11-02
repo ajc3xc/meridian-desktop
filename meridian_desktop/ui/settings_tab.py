@@ -108,6 +108,13 @@ LOCAL_URL_SAVED_TEXT = "Local URL saved."
 DB_SAVED_TEXT = "Database file saved."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written"
 HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
+GPU_HOSTS_TITLE = "GPU hosts over SSH"
+GPU_HOSTS_INTRO = (
+    "SSH host names from your ssh config, separated by commas, for example gpu-box, lab-a100. The GPUs tab reads each "
+    "one in batch mode: no password prompt, and an unknown host key is refused. Hosts are never scanned from your ssh config."
+)
+GPU_HOSTS_SAVED_TEXT = "Saved. The GPUs tab reads these hosts on its next refresh."
+GPU_HOSTS_CLEARED_TEXT = "Saved. No SSH hosts are read by the GPUs tab."
 TOKEN_SET_TEXT = "Hosted token: set"
 TOKEN_NOT_SET_TEXT = "Hosted token: not set"
 SIGN_IN_STARTING_TEXT = "Starting the sign-in with Hosted Meridian..."
@@ -427,6 +434,7 @@ class SettingsTab(QWidget):
         column.addWidget(self._build_client_setup(content))
         column.addWidget(self._build_tools(content))
         column.addWidget(self._build_connections(content))
+        column.addWidget(self._build_gpu_hosts(content))
         column.addWidget(self._build_diagnostics(content))
         column.addStretch(1)
 
@@ -567,6 +575,27 @@ class SettingsTab(QWidget):
         # The owner's own MCP connectors. The block reads the saved list on refresh and saves each change.
         self._connections = ConnectionsSection(self._store, group.body())
         group.add_widget(self._connections)
+        return group
+
+    def _build_gpu_hosts(self, parent: QWidget) -> CollapsibleGroup:
+        """The SSH host names the GPUs tab reads. Only names are saved. The tab reads them once per refresh."""
+        group = CollapsibleGroup("gpu-hosts", GPU_HOSTS_TITLE, parent, expanded=False)
+        body = group.body()
+        group.add_widget(_label(body, "settings-gpu-hosts-intro", GPU_HOSTS_INTRO))
+        row = QHBoxLayout()
+        self._gpu_hosts = QLineEdit(", ".join(self._store.load().settings.gpu_hosts), body)
+        self._gpu_hosts.setObjectName("settings-gpu-hosts")
+        self._gpu_hosts.setPlaceholderText("SSH host names, for example gpu-box, lab-a100")
+        self._gpu_hosts.setAccessibleName("SSH host names for the GPUs tab")
+        row.addWidget(self._gpu_hosts, 1)
+        self._save_gpu_hosts = QPushButton("Save SSH hosts", body)
+        self._save_gpu_hosts.setObjectName("settings-save-gpu-hosts")
+        self._save_gpu_hosts.clicked.connect(self._on_save_gpu_hosts_clicked)
+        row.addWidget(self._save_gpu_hosts)
+        group.add_layout(row)
+        self._gpu_hosts_message = _label(body, "settings-gpu-hosts-message")
+        self._gpu_hosts_message.setVisible(False)
+        group.add_widget(self._gpu_hosts_message)
         return group
 
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
@@ -784,6 +813,20 @@ class SettingsTab(QWidget):
             return
         self.refresh()  # show the path back from the saved file
         _set_message(self._db_message, DB_SAVED_TEXT)
+
+    @Slot()
+    def _on_save_gpu_hosts_clicked(self) -> None:
+        try:
+            saved = self._store.set_gpu_hosts(self._gpu_hosts.text())
+        except ValueError as exc:
+            # The text is fixed wording from parse_host_list. A refused name is shown only as far as it was typed.
+            _set_message(self._gpu_hosts_message, f"Not saved. {exc}")
+            return
+        except OSError:
+            _set_message(self._gpu_hosts_message, f"{NOT_WRITTEN_TEXT}.")
+            return
+        self._gpu_hosts.setText(", ".join(saved.gpu_hosts))
+        _set_message(self._gpu_hosts_message, GPU_HOSTS_SAVED_TEXT if saved.gpu_hosts else GPU_HOSTS_CLEARED_TEXT)
 
 
 __all__ = [

@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
+from meridian_desktop.gpu_jobs import MAX_HOSTS, check_alias, parse_host_list
+
 # local: the Meridian server or database file on this computer. hosted: the hosted Meridian account.
 # tunnel: the hosted account, which reaches this computer through the tunnel. Its projects are read
 # the same way as hosted. A saved file with local or hosted reads exactly as it did before.
@@ -120,6 +122,9 @@ class Settings:
     # The owner's opt-in for claude.ai to reach custom connectors through the tunnel, while the tunnel is up. Off by default,
     # and save() writes it only when it is on.
     custom_tunnel_opt_in: bool = False
+    # The SSH host names the GPUs tab reads over ssh (meridian_desktop/gpu_jobs.py). Only names from the owner's own ssh
+    # config, never a key or a password. save() writes the key only when there is a name.
+    gpu_hosts: tuple[str, ...] = ()
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -291,6 +296,15 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("custom_tunnel_opt_in must be true or false; using false")
 
+    # gpu_hosts: an absent key means none, with no warning. Only a list of valid SSH host names is accepted, and a bad
+    # list is ignored with a warning, so no host is read from a file that does not check out.
+    if "gpu_hosts" in data:
+        value = data["gpu_hosts"]
+        if isinstance(value, list) and len(value) <= MAX_HOSTS and all(check_alias(item) for item in value):
+            values["gpu_hosts"] = tuple(dict.fromkeys(value))
+        else:
+            problems.append("gpu_hosts must be a list of SSH host names; using none")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -447,6 +461,9 @@ class SettingsStore:
         if not settings.custom_tunnel_opt_in:
             # Off is the default, so the tunnel opt-in is written only once the owner turns it on.
             del data["custom_tunnel_opt_in"]
+        if not settings.gpu_hosts:
+            # No saved hosts is the default, so a file with none has no such key.
+            del data["gpu_hosts"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -485,6 +502,19 @@ class SettingsStore:
                 shutil.copyfile(self._path, self._path.with_name(self._path.name + ".unreadable.bak"))
         except OSError:
             return
+
+    def set_gpu_hosts(self, text: str) -> Settings:
+        """Validate and save the GPUs tab's SSH host names, from one comma-separated line.
+
+        Raises ValueError with plain words when a name is refused. A refused line writes nothing. An empty line clears
+        the list. Every other field in the saved file is kept.
+        """
+        hosts, problems = parse_host_list(text)
+        if problems:
+            raise ValueError(" ".join(problems))
+        updated = replace(self.load().settings, gpu_hosts=hosts)
+        self.save(updated)
+        return updated
 
     def set_mode(self, mode: str) -> Settings:
         if mode not in VALID_MODES:
