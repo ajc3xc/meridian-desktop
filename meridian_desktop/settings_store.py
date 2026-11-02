@@ -131,6 +131,15 @@ class Settings:
 CONTROL_FLAG_DEFAULTS = {key: getattr(Settings(), key) for key in CONTROL_FLAG_KEYS}
 
 
+class SettingsUnreadable(Exception):
+    """The settings file could not be read, so a write was refused. The message is the owner's text."""
+
+
+SETTINGS_UNREADABLE_TEXT = (
+    "settings.json could not be read, so nothing was saved. A copy is kept as settings.json.unreadable.bak."
+)
+
+
 @dataclass(frozen=True)
 class LoadResult:
     settings: Settings
@@ -503,16 +512,46 @@ class SettingsStore:
         except OSError:
             return
 
+    def is_unreadable(self) -> bool:
+        """True when the settings file is there but is not a JSON object, so no field in it can be trusted.
+
+        A file with one bad value still reads as an object, and is not unreadable. A missing file is not unreadable.
+        """
+        try:
+            text = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        except (OSError, UnicodeDecodeError):
+            return True
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return True
+        return not isinstance(data, dict)
+
+    def _keep_copy(self) -> None:
+        """Best effort: copy the unreadable file to <name>.unreadable.bak. A failed copy is not reported as a save."""
+        try:
+            shutil.copyfile(self._path, self._path.with_name(self._path.name + ".unreadable.bak"))
+        except OSError:
+            return
+
     def set_gpu_hosts(self, text: str) -> Settings:
         """Validate and save the GPUs tab's SSH host names, from one comma-separated line.
 
         Raises ValueError with plain words when a name is refused. A refused line writes nothing. An empty line clears
         the list. Every other field in the saved file is kept.
+
+        A settings file that is not a JSON object is never rebuilt from defaults. It is copied aside when that works,
+        nothing is written, and SettingsUnreadable is raised with the message the owner sees.
         """
         hosts, problems = parse_host_list(text)
         if problems:
             raise ValueError(" ".join(problems))
-        # A file that did not load cleanly is copied aside first, as the other writers do, so its content survives.
+        if self.is_unreadable():
+            self._keep_copy()
+            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT)
+        # A readable file with one bad value is copied aside before the write, as the other writers do.
         self.keep_unreadable_copy()
         updated = replace(self.load().settings, gpu_hosts=hosts)
         self.save(updated)

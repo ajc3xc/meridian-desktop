@@ -63,7 +63,7 @@ from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore
+from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore, SettingsUnreadable
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
@@ -818,6 +818,10 @@ class SettingsTab(QWidget):
     def _on_save_gpu_hosts_clicked(self) -> None:
         try:
             saved = self._store.set_gpu_hosts(self._gpu_hosts.text())
+        except SettingsUnreadable as exc:
+            # Nothing was saved. The text is the owner's message: a copy of the unreadable file is kept, never rebuilt.
+            _set_message(self._gpu_hosts_message, str(exc))
+            return
         except ValueError as exc:
             # The text is fixed wording from parse_host_list. A refused name is shown only as far as it was typed.
             _set_message(self._gpu_hosts_message, f"Not saved. {exc}")

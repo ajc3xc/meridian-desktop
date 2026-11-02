@@ -4,13 +4,15 @@ search that is a fake. Nothing starts a process, opens a socket or reads the rea
 """
 
 import json
+import os
+import stat
 
 import pytest
 from PySide6.QtWidgets import QLineEdit, QPushButton, QLabel
 
 from _fakes import MemoryKeyring
 from meridian_desktop.secret_store import KeyringSecretStore
-from meridian_desktop.settings_store import Settings, SettingsStore
+from meridian_desktop.settings_store import Settings, SettingsStore, SettingsUnreadable
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.settings_tab import (
     GPU_HOSTS_CLEARED_TEXT,
@@ -75,14 +77,49 @@ def test_an_empty_line_clears_the_saved_hosts_and_the_key(settings_path):
     assert "gpu_hosts" not in _saved(settings_path)
 
 
-def test_a_corrupt_settings_file_is_copied_aside_before_the_hosts_are_written(settings_path):
+CORRUPT = b'{"mode": "local", "local_url": "http://127.0.0.1:9999", "gpu_hosts": [ this is not json'
+UNREADABLE_TEXT = (
+    "settings.json could not be read, so nothing was saved. A copy is kept as settings.json.unreadable.bak."
+)
+
+
+def test_a_corrupt_file_with_a_working_copy_refuses_keeps_the_copy_and_leaves_the_file_as_it_was(settings_path):
+    # Nothing is rebuilt from defaults. The copy is kept, the file is not written, and the other settings it holds stay.
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    original = b'{"mode": "local", "gpu_hosts": [ this is not json'
-    settings_path.write_bytes(original)
-    SettingsStore(settings_path).set_gpu_hosts("gpu-box")
+    settings_path.write_bytes(CORRUPT)
+    with pytest.raises(SettingsUnreadable) as caught:
+        SettingsStore(settings_path).set_gpu_hosts("gpu-box")
+    assert str(caught.value) == UNREADABLE_TEXT
     backup = settings_path.with_name(settings_path.name + ".unreadable.bak")
-    assert backup.read_bytes() == original
-    assert SettingsStore(settings_path).load().settings.gpu_hosts == ("gpu-box",)
+    assert backup.read_bytes() == CORRUPT
+    assert settings_path.read_bytes() == CORRUPT
+
+
+def test_a_corrupt_file_with_a_read_only_copy_refuses_and_leaves_the_file_as_it_was(settings_path):
+    # The copy cannot be written over the read-only copy already there. Even so, nothing is saved and the same message shows.
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_bytes(CORRUPT)
+    backup = settings_path.with_name(settings_path.name + ".unreadable.bak")
+    backup.write_bytes(b"older copy")
+    os.chmod(backup, stat.S_IREAD)
+    try:
+        with pytest.raises(SettingsUnreadable) as caught:
+            SettingsStore(settings_path).set_gpu_hosts("gpu-box")
+        assert str(caught.value) == UNREADABLE_TEXT
+        assert settings_path.read_bytes() == CORRUPT
+    finally:
+        os.chmod(backup, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_the_settings_tab_shows_the_unreadable_message_and_writes_nothing(qtbot, settings_path):
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_bytes(CORRUPT)
+    tab = _tab(qtbot, settings_path)
+    tab.findChild(QLineEdit, "settings-gpu-hosts").setText("gpu-box")
+    tab.findChild(QPushButton, "settings-save-gpu-hosts").click()
+    message = tab.findChild(QLabel, "settings-gpu-hosts-message")
+    assert message.text() == UNREADABLE_TEXT
+    assert settings_path.read_bytes() == CORRUPT
 
 
 def test_saving_hosts_keeps_the_other_fields_of_a_file_with_one_bad_value(qtbot, settings_path):
