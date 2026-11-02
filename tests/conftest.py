@@ -1,8 +1,10 @@
 """Shared test setup. Qt runs on the offscreen platform, so no display is needed.
 
 For the whole session the keyring module uses an in-memory backend, and HOME,
-USERPROFILE and LOCALAPPDATA point at a temp directory. So no test can reach the
-real OS credential store or the real user home directory, even by accident.
+USERPROFILE, LOCALAPPDATA and APPDATA point at a temp directory. CODEX_HOME is unset,
+so Codex's config falls under that temp home too. So no test can reach the real OS
+credential store, the real user home directory, or the real Claude Desktop and Codex
+config files, even by accident.
 """
 
 import os
@@ -24,6 +26,8 @@ def isolated_keyring_and_home(tmp_path_factory):
         mp.setenv("HOME", str(home))
         mp.setenv("USERPROFILE", str(home))
         mp.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+        mp.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+        mp.delenv("CODEX_HOME", raising=False)
         keyring.set_keyring(backend)
         yield backend
 

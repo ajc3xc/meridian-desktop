@@ -108,6 +108,9 @@ class Settings:
     # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
     # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
     key_names: tuple[str, ...] = ()
+    # The MCP tools the owner switched off, as "group:tool" keys (meridian_desktop/tool_catalog.py). Every tool is on by
+    # default, so an empty tuple is the default. save() writes the key only when it is not empty.
+    disabled_tools: tuple[str, ...] = ()
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -244,6 +247,15 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["key_names"] = tuple(item.strip() for item in value)
         else:
             problems.append("key_names must be a list of names; using none")
+
+    # disabled_tools: an absent key means every tool is on, with no warning. Only a list of non-empty text is accepted.
+    # A value that is not such a list is ignored with a warning, so no tool is switched off by a bad file.
+    if "disabled_tools" in data:
+        value = data["disabled_tools"]
+        if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+            values["disabled_tools"] = tuple(dict.fromkeys(item.strip() for item in value))
+        else:
+            problems.append("disabled_tools must be a list of tool keys; using none")
 
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
@@ -389,6 +401,9 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
+        if not settings.disabled_tools:
+            # Every tool on is the default, so a file with no switched-off tool has no such key.
+            del data["disabled_tools"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
