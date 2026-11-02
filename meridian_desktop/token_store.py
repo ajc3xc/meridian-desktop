@@ -9,8 +9,6 @@ example) share the store without sharing an entry.
 Contract:
 - get_token returns None when nothing is stored. It also returns None when the backend
   fails, so a failed read reads as "no token" and never raises.
-- read_token is the same read, but a failed read raises TokenReadError, so "could not read" is never mistaken for
-  "no token".
 - set_token and delete_token raise TokenStoreError when the backend fails. Nothing is
   silently dropped on a write.
 - No function here writes a file. The token is in the keychain only.
@@ -34,13 +32,6 @@ _ACCOUNT = re.compile(r"[a-z][a-z0-9-]{0,63}")
 
 class TokenStoreError(SecretStoreError):
     """A token could not be saved or removed. The message holds no token text."""
-
-
-class TokenReadError(Exception):
-    """The keychain could not be read. This is not the same as "no token": the caller keeps what it knows.
-
-    The message holds no token text. The exception is raised without a chained cause, so no traceback holds a value.
-    """
 
 
 def _account(account: object) -> str:
@@ -67,19 +58,6 @@ def get_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None 
         return _store(store).get_secret(TOKEN_SERVICE, name)
     except Exception:  # noqa: BLE001 - a backend failure reads as "no token"; the error is dropped
         return None
-
-
-def read_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None = None) -> str | None:
-    """Return the stored token, or None when nothing is stored. Raise TokenReadError when the keychain read fails.
-
-    Unlike get_token, a failed read is never reported as "no token".
-    """
-    name = _account(account)
-    try:
-        return _store(store).get_secret(TOKEN_SERVICE, name)
-    except Exception as exc:  # noqa: BLE001 - every failure is reported by class, never by its text
-        detail = _describe(exc)
-    raise TokenReadError(f"token could not be read: {detail}") from None
 
 
 def has_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | None = None) -> bool:
@@ -119,11 +97,9 @@ def delete_token(account: str = HOSTED_TOKEN_ACCOUNT, *, store: SecretStore | No
 __all__ = [
     "HOSTED_TOKEN_ACCOUNT",
     "TOKEN_SERVICE",
-    "TokenReadError",
     "TokenStoreError",
     "delete_token",
     "get_token",
     "has_token",
-    "read_token",
     "set_token",
 ]
