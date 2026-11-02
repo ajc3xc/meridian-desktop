@@ -61,8 +61,8 @@ def test_settings_page_holds_the_writing_area_and_still_five_tabs(qtbot, setting
                         data_sources=_sources())
     qtbot.addWidget(window)
     # The Writing area is a section of Settings, never a sixth main tab.
-    assert TAB_NAMES == ("Home", "Projects", "Sessions", "Search", "Settings")
-    assert window.tabs.count() == 5
+    assert TAB_NAMES == ("Home", "Projects", "Sessions", "GPUs", "Search", "Settings")
+    assert window.tabs.count() == 6
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
     page = window.tabs.widget(names.index("Settings"))
     body = page.findChild(QWidget, "settings-page")

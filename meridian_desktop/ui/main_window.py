@@ -66,7 +66,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import token_store, updater, zotero_client
+from meridian_desktop import local_client, token_store, updater, zotero_client
 from meridian_desktop.data_source import STATE_OK, DataSources, resolve
 from meridian_desktop.hosted_client import Transport
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
@@ -76,6 +76,7 @@ from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.connection_bar import ConnectionBar
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.gpu_jobs_panel import GpuJobsPanel
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.runner_actions import RunnerActions
@@ -97,6 +98,7 @@ TAB_SPECS = (
     ("Home", 7),
     ("Projects", 2),
     ("Sessions", 3),
+    ("GPUs", 3),
     ("Search", 6),
     ("Settings", 2),
 )
@@ -146,6 +148,25 @@ def _saved_local_url(store: SettingsStore) -> Callable[[], str]:
 
     def read() -> str:
         return store.load().settings.local_url
+
+    return read
+
+
+def _saved_gpu_hosts(store: SettingsStore) -> Callable[[], tuple[str, ...]]:
+    """The SSH host names saved for the GPUs tab, read on the worker thread at each read. Holds the store, not the window."""
+
+    def read() -> tuple[str, ...]:
+        return store.load().settings.gpu_hosts
+
+    return read
+
+
+def _saved_runpod_pods(store: SettingsStore) -> Callable[[], dict[str, Any]]:
+    """The RunPod pods the local Meridian server lists, read on the worker thread. Raises when that server is not
+    answering, and the GPUs tab then says RunPod is not connected. Holds the store, not the window."""
+
+    def read() -> dict[str, Any]:
+        return local_client.runpod_list_pods(store.load().settings.local_url)
 
     return read
 
@@ -330,6 +351,14 @@ class MainWindow(QMainWindow):
                     _saved_hosted(self._store, self._secrets),
                     _saved_projects(self._store, self._sources),
                     _saved_mode(self._store),
+                    parent=self.tabs,
+                )
+            elif name == "GPUs":
+                # Nothing is read on build. The first show and the Refresh button read the GPUs. While the tab stays
+                # visible, a 5-second timer reads them again. The saved SSH hosts and the RunPod list are read on the worker thread.
+                page = GpuJobsPanel(
+                    _saved_gpu_hosts(self._store),
+                    _saved_runpod_pods(self._store),
                     parent=self.tabs,
                 )
             elif name == "Search":
