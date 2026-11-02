@@ -1,0 +1,770 @@
+"""Tests for the GPU jobs module (meridian_desktop/gpu_jobs.py). Pure Python, no Qt.
+
+The parsers run on text recorded from this computer's own nvidia-smi (the RTX 3080 line and the process line that shows
+"[Insufficient Permissions]"), and on squeue and bjobs text written in their documented formats. Every outside call is a
+fake runner. Two guards turn any real process start or network connection into a test failure.
+"""
+
+from __future__ import annotations
+
+import socket
+import subprocess
+import threading
+from datetime import datetime, timezone
+
+import pytest
+
+from meridian_desktop import gpu_jobs
+from meridian_desktop.gpu_jobs import (
+    BJOBS_ARGV,
+    LOCAL_HOST,
+    NVIDIA_APPS_ARGV,
+    NVIDIA_GPU_ARGV,
+    PART_GPUS,
+    PART_LSF,
+    PART_PROCESSES,
+    PART_RUNPOD,
+    PART_SLURM,
+    SOURCE_GPU_PROCESS,
+    SOURCE_LSF,
+    SOURCE_RUNPOD,
+    SOURCE_SLURM,
+    STATE_ABSENT,
+    STATE_EMPTY,
+    STATE_FAILED,
+    STATE_OK,
+    SQUEUE_ARGV,
+    CommandResult,
+    GpuRow,
+    collect,
+)
+
+NOW = datetime(2026, 11, 2, 16, 0, tzinfo=timezone.utc)
+GPU_UUID = "GPU-85b6c4db-6eba-ae6e-4a6f-b1c6ebff448d"
+
+# Recorded from this computer: nvidia-smi --query-gpu=... and --query-compute-apps=... with the csv, noheader and nounits format.
+REAL_GPU_LINE = "0, NVIDIA GeForce RTX 3080, GPU-85b6c4db-6eba-ae6e-4a6f-b1c6ebff448d, 79, 1734, 20480, 59, 272.21, 320.00\n"
+REAL_APPS_LINE = "4, [Insufficient Permissions], [N/A], GPU-85b6c4db-6eba-ae6e-4a6f-b1c6ebff448d\n"
+
+TWO_GPU_TEXT = (
+    "0, NVIDIA A100, GPU-aaaa, 0, 0, 40960, 31, 52.10, 400.00\n"
+    "1, NVIDIA A100, GPU-bbbb, 98, 30000, 40960, 74, 380.55, 400.00\n"
+)
+
+SQUEUE_TEXT = (
+    "123456|alice|train|RUNNING|01:02:03|1|gpu:2\n"
+    "123457|bob|cpu-only|PENDING|0:00|1|N/A\n"
+    "124000|carol|pipe|in|name|RUNNING|0:10|2|gpu:a100:4\n"
+)
+
+BJOBS_TEXT = (
+    "4242 RUN carol 00:05 2 train_model\n"
+    "4243 PEND dave 0 - cpu_job\n"
+    "4244 RUN erin 01:00 1 llm finetune run\n"
+)
+
+RUNPOD_PAYLOAD = {
+    "ok": True,
+    "pods": [
+        {"id": "pod-1", "name": "trainer", "status": "RUNNING", "gpu": {"id": "NVIDIA A100", "count": 2}},
+        {"id": "pod-2", "status": "EXITED", "gpu": {"id": "RTX 4090"}},
+        {"name": "no id"},
+        "not a pod",
+    ],
+}
+
+
+class FakeRunner:
+    """Answers each argument list from a table. Records every call. Safe to call from several threads."""
+
+    def __init__(self, answers: dict[tuple[str, ...], CommandResult | Exception]) -> None:
+        self._answers = answers
+        self.calls: list[tuple[str, ...]] = []
+        self._lock = threading.Lock()
+        self.threads: set[int] = set()
+
+    def __call__(self, argv, timeout):
+        key = tuple(argv)
+        with self._lock:
+            self.calls.append(key)
+            self.threads.add(threading.get_ident())
+        answer = self._answers.get(key, CommandResult(None, missing=True))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def ok(stdout: str = "") -> CommandResult:
+    return CommandResult(returncode=0, stdout=stdout)
+
+
+def ssh_key(alias: str) -> tuple[str, ...]:
+    return tuple(gpu_jobs.ssh_argv(alias))
+
+
+def remote_stdout(gpu: str = REAL_GPU_LINE, apps: str = "", slurm: str | None = None, lsf: str | None = None) -> str:
+    parts = [gpu, gpu_jobs.APPS_MARKER, apps]
+    if slurm is not None:
+        parts += [gpu_jobs.SLURM_MARKER, slurm]
+    if lsf is not None:
+        parts += [gpu_jobs.LSF_MARKER, lsf]
+    return "\n".join(part for part in parts if part is not None)
+
+
+@pytest.fixture(autouse=True)
+def no_process_and_no_socket(monkeypatch):
+    """No test in this file may start a process or open a connection. A fake runner is the only way out."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("this test must not start a process")
+
+    def refuse_socket(*args, **kwargs):
+        raise AssertionError("this test must not open a socket")
+
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(socket, "socket", refuse_socket)
+    monkeypatch.setattr(socket, "create_connection", refuse_socket)
+
+
+# ----------------------------------------------------------------- GPU rows
+
+
+def test_the_recorded_gpu_line_parses_to_every_field():
+    rows, unmatched = gpu_jobs.parse_gpus(REAL_GPU_LINE, LOCAL_HOST)
+    assert unmatched == 0
+    assert rows == (
+        GpuRow(
+            host=LOCAL_HOST,
+            index="0",
+            name="NVIDIA GeForce RTX 3080",
+            uuid=GPU_UUID,
+            utilization=79,
+            memory_used_mib=1734,
+            memory_total_mib=20480,
+            temperature_c=59,
+            power_w=272.21,
+            power_limit_w=320.0,
+        ),
+    )
+
+
+def test_unreported_values_become_none_and_keep_the_row():
+    text = "0, NVIDIA A100, GPU-x, [N/A], [N/A], 40960, [Not Supported], [N/A], 400.00\n"
+    (row,), unmatched = gpu_jobs.parse_gpus(text, "box")
+    assert unmatched == 0
+    assert row.utilization is None
+    assert row.memory_used_mib is None
+    assert row.memory_total_mib == 40960
+    assert row.temperature_c is None
+    assert row.power_w is None
+    assert row.power_limit_w == 400.0
+
+
+def test_a_value_that_is_not_a_number_becomes_none_not_an_error():
+    text = "0, A100, GPU-x, busy, 1, 2, 3, soon, 400\n"
+    (row,), unmatched = gpu_jobs.parse_gpus(text, "box")
+    assert unmatched == 0
+    assert row.utilization is None
+    assert row.power_w is None
+    assert row.power_limit_w == 400.0
+
+
+def test_process_output_this_desktop_does_not_read_is_a_failure_not_empty():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: ok("not a process line\n")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_PROCESSES]
+    assert status.state == STATE_FAILED
+    assert status.text == "GPU processes printed output this desktop does not read."
+
+
+def test_lines_with_the_wrong_field_count_are_counted_not_shown():
+    text = "0, A100, GPU-x\n" + REAL_GPU_LINE + "\n\n"
+    rows, unmatched = gpu_jobs.parse_gpus(text, "box")
+    assert len(rows) == 1
+    assert unmatched == 1
+
+
+def test_two_gpus_parse_in_order_on_one_host():
+    rows, unmatched = gpu_jobs.parse_gpus(TWO_GPU_TEXT, "box")
+    assert unmatched == 0
+    assert [row.index for row in rows] == ["0", "1"]
+    assert rows[1].utilization == 98
+
+
+# ----------------------------------------------------------------- GPU processes
+
+
+def test_the_recorded_process_line_maps_its_gpu_and_flags_the_hidden_name():
+    gpus, _ = gpu_jobs.parse_gpus(REAL_GPU_LINE, LOCAL_HOST)
+    jobs, unmatched, hidden = gpu_jobs.parse_apps(REAL_APPS_LINE, LOCAL_HOST, gpus)
+    assert unmatched == 0
+    assert hidden is True
+    (job,) = jobs
+    assert job.source == SOURCE_GPU_PROCESS
+    assert job.job_id == "4"
+    assert job.name == "(not readable: Insufficient Permissions)"
+    assert job.gpu == "0"
+    assert job.gpu_memory_mib is None
+    assert job.state == "running"
+
+
+def test_a_process_name_is_shortened_to_its_program_file_name():
+    apps = "10, C:\\Python312\\python.exe, 512, GPU-zzz\n11, /usr/bin/python3, 256, GPU-zzz\n"
+    jobs, _, hidden = gpu_jobs.parse_apps(apps, "box", ())
+    assert [job.name for job in jobs] == ["python.exe", "python3"]
+    assert hidden is False
+    # A GPU whose uuid is unknown shows the uuid itself, so nothing is dropped.
+    assert jobs[0].gpu == "GPU-zzz"
+    assert jobs[0].gpu_memory_mib == 512
+
+
+def test_a_blank_process_name_says_no_name():
+    jobs, _, _ = gpu_jobs.parse_apps("12, , 64, GPU-q\n", "box", ())
+    assert jobs[0].name == "(no name)"
+
+
+def test_a_process_line_with_the_wrong_field_count_is_counted():
+    jobs, unmatched, hidden = gpu_jobs.parse_apps("oops\n", "box", ())
+    assert jobs == ()
+    assert unmatched == 1
+    assert hidden is False
+
+
+# ----------------------------------------------------------------- Slurm and LSF
+
+
+def test_squeue_keeps_only_gpu_jobs_and_survives_a_pipe_in_the_name():
+    jobs, unmatched = gpu_jobs.parse_squeue(SQUEUE_TEXT, "login")
+    assert unmatched == 0
+    assert [job.job_id for job in jobs] == ["123456", "124000"]
+    assert jobs[0].user == "alice"
+    assert jobs[0].name == "train"
+    assert jobs[0].state == "RUNNING"
+    assert jobs[0].gpu == "gpu:2"
+    assert jobs[1].name == "pipe|in|name"
+    assert jobs[1].gpu == "gpu:a100:4"
+    assert all(job.source == SOURCE_SLURM for job in jobs)
+
+
+def test_squeue_lines_that_are_too_short_are_counted():
+    jobs, unmatched = gpu_jobs.parse_squeue("short|line\n", "login")
+    assert jobs == ()
+    assert unmatched == 1
+
+
+def test_bjobs_keeps_only_jobs_with_a_gpu_count_and_keeps_the_name_whole():
+    jobs, unmatched = gpu_jobs.parse_bjobs(BJOBS_TEXT, "lsf-host")
+    assert unmatched == 0
+    assert [job.job_id for job in jobs] == ["4242", "4244"]
+    assert jobs[0].gpu == "2"
+    assert jobs[0].user == "carol"
+    assert jobs[1].name == "llm finetune run"
+    assert all(job.source == SOURCE_LSF for job in jobs)
+
+
+def test_bjobs_short_lines_are_counted():
+    jobs, unmatched = gpu_jobs.parse_bjobs("4242 RUN carol\n", "lsf-host")
+    assert jobs == ()
+    assert unmatched == 1
+
+
+# ----------------------------------------------------------------- RunPod
+
+
+def test_runpod_pods_parse_and_bad_entries_are_skipped():
+    jobs = gpu_jobs.parse_runpod_pods(RUNPOD_PAYLOAD)
+    assert [job.job_id for job in jobs] == ["pod-1", "pod-2"]
+    assert jobs[0].name == "trainer"
+    assert jobs[0].gpu == "NVIDIA A100 x2"
+    assert jobs[0].state == "RUNNING"
+    assert jobs[1].name == "pod-2"
+    assert jobs[1].gpu == "RTX 4090"
+    assert all(job.source == SOURCE_RUNPOD for job in jobs)
+
+
+def test_runpod_with_no_pod_list_has_no_jobs():
+    assert gpu_jobs.parse_runpod_pods({"ok": True}) == ()
+    assert gpu_jobs.parse_runpod_pods({"pods": "nope"}) == ()
+
+
+# ----------------------------------------------------------------- host names
+
+
+@pytest.mark.parametrize("name", ["gpu-box", "lab_a100", "a", "user@lab.example", "node.7"])
+def test_safe_host_names_are_accepted(name):
+    assert gpu_jobs.check_alias(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "-oProxyCommand=x", "a b", "a;rm", "a$(x)", "x" * 64, "tab\there", None],
+)
+def test_unsafe_host_names_are_refused(name):
+    assert not gpu_jobs.check_alias(name)
+
+
+def test_the_host_list_splits_trims_and_drops_repeats():
+    hosts, problems = gpu_jobs.parse_host_list(" gpu-box, lab_a100 ,gpu-box,, ")
+    assert hosts == ("gpu-box", "lab_a100")
+    assert problems == []
+
+
+def test_an_empty_host_list_is_no_hosts_and_no_problem():
+    assert gpu_jobs.parse_host_list("   ") == ((), [])
+
+
+def test_a_bad_name_is_a_problem_and_the_good_ones_are_kept():
+    hosts, problems = gpu_jobs.parse_host_list("gpu-box, -oX=y, lab")
+    assert hosts == ("gpu-box", "lab")
+    assert len(problems) == 1
+    assert "-oX=y" in problems[0]
+
+
+def test_more_than_the_limit_keeps_the_first_names_and_says_so():
+    names = ",".join(f"host{index}" for index in range(gpu_jobs.MAX_HOSTS + 2))
+    hosts, problems = gpu_jobs.parse_host_list(names)
+    assert len(hosts) == gpu_jobs.MAX_HOSTS
+    assert hosts[0] == "host0"
+    assert problems == [f"Save at most {gpu_jobs.MAX_HOSTS} SSH hosts. The first {gpu_jobs.MAX_HOSTS} are kept."]
+
+
+def test_the_ssh_call_is_fixed_and_the_alias_comes_after_double_dash():
+    argv = gpu_jobs.ssh_argv("gpu-box")
+    assert argv[0] == "ssh"
+    assert "BatchMode=yes" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert argv[argv.index("--") + 1] == "gpu-box"
+    assert argv[-1] == gpu_jobs.REMOTE_COMMAND
+    assert "-c" not in argv
+
+
+def test_the_remote_command_asks_only_for_read_only_queries():
+    command = gpu_jobs.REMOTE_COMMAND
+    for word in ("kill", "scancel", "bkill", "rm ", "sbatch", "bsub", "> ", "| sh"):
+        assert word not in command
+    assert "nvidia-smi --query-gpu=" in command
+    assert "command -v squeue" in command
+    assert "command -v bjobs" in command
+
+
+# ----------------------------------------------------------------- collect: this computer
+
+
+def test_a_clean_local_read_reports_each_part_and_no_remote_work():
+    run = FakeRunner(
+        {
+            NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE),
+            NVIDIA_APPS_ARGV: ok(REAL_APPS_LINE),
+            SQUEUE_ARGV: ok(SQUEUE_TEXT),
+            BJOBS_ARGV: ok(BJOBS_TEXT),
+        }
+    )
+    snapshot = collect(run, (), None, now=NOW)
+    assert snapshot.checked_at == NOW
+    assert len(snapshot.gpus) == 1
+    sources = [job.source for job in snapshot.jobs]
+    assert sources.count(SOURCE_GPU_PROCESS) == 1
+    assert sources.count(SOURCE_SLURM) == 2
+    assert sources.count(SOURCE_LSF) == 2
+    states = {(status.part, status.state) for status in snapshot.statuses}
+    assert (PART_GPUS, STATE_OK) in states
+    assert (PART_PROCESSES, STATE_OK) in states
+    assert (PART_SLURM, STATE_OK) in states
+    assert (PART_LSF, STATE_OK) in states
+    assert (PART_RUNPOD, STATE_ABSENT) in states
+    assert not any(call[0] == "ssh" for call in run.calls)
+
+
+def test_missing_nvidia_smi_says_so_plainly_and_the_other_parts_still_read():
+    run = FakeRunner({SQUEUE_ARGV: ok(""), BJOBS_ARGV: ok("")})
+    snapshot = collect(run, (), None, now=NOW)
+    assert snapshot.gpus == ()
+    (gpu_status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert gpu_status.state == STATE_ABSENT
+    assert gpu_status.text == "nvidia-smi is not on this computer, so its GPUs cannot be read."
+    assert gpu_jobs.summary_text(snapshot) == "No GPUs were read."
+
+
+def test_slurm_and_lsf_missing_here_say_not_on_this_machine():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE)})
+    snapshot = collect(run, (), None, now=NOW)
+    texts = {s.part: s.text for s in snapshot.statuses if s.part in (PART_SLURM, PART_LSF)}
+    assert texts == {PART_SLURM: "Slurm: not on this machine.", PART_LSF: "LSF: not on this machine."}
+
+
+def test_an_nvidia_smi_failure_names_its_exit_code():
+    run = FakeRunner({NVIDIA_GPU_ARGV: CommandResult(returncode=9, stderr="driver not loaded")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert status.state == STATE_FAILED
+    assert status.text == "nvidia-smi could not read the GPUs (exit code 9)."
+    assert "driver" not in status.text
+
+
+def test_a_timed_out_nvidia_smi_says_so():
+    run = FakeRunner({NVIDIA_GPU_ARGV: CommandResult(returncode=None, timed_out=True)})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert status.text == "nvidia-smi timed out."
+
+
+def test_gpu_output_this_desktop_does_not_read_is_a_failure_not_empty():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("this is not csv at all\n")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert status.state == STATE_FAILED
+    assert "does not read" in status.text
+
+
+def test_an_empty_gpu_answer_is_reported_as_no_gpus():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_GPUS]
+    assert status.state == STATE_EMPTY
+    assert status.text == "No GPUs reported."
+
+
+def test_a_process_query_failure_does_not_hide_the_gpus():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: CommandResult(returncode=3)})
+    snapshot = collect(run, (), None, now=NOW)
+    assert len(snapshot.gpus) == 1
+    (status,) = [s for s in snapshot.statuses if s.part == PART_PROCESSES]
+    assert status.text == "GPU processes could not be read."
+
+
+def test_a_timed_out_process_query_says_timed_out():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: CommandResult(None, timed_out=True)})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_PROCESSES]
+    assert status.text == "GPU processes timed out."
+
+
+def test_no_processes_is_an_empty_state_and_hidden_names_are_explained():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: ok("")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_PROCESSES]
+    assert status.state == STATE_EMPTY
+    assert status.text == "No GPU processes are running."
+
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: ok(REAL_APPS_LINE)})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_PROCESSES]
+    assert status.text == "1 GPU process listed. Some names need admin rights to read."
+
+
+def test_a_scheduler_that_fails_says_it_could_not_be_read():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), SQUEUE_ARGV: CommandResult(returncode=1)})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_SLURM]
+    assert status.state == STATE_FAILED
+    assert status.text == "Slurm could not be read."
+
+
+def test_scheduler_output_this_desktop_does_not_read_is_a_failure():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), SQUEUE_ARGV: ok("bad\n")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_SLURM]
+    assert status.state == STATE_FAILED
+    assert status.text == "Slurm printed output this desktop does not read."
+
+
+def test_a_scheduler_with_no_gpu_jobs_is_an_empty_state():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), SQUEUE_ARGV: ok("123|a|b|RUNNING|0:01|1|N/A\n")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_SLURM]
+    assert status.state == STATE_EMPTY
+    assert status.text == "No Slurm GPU jobs."
+
+
+# ----------------------------------------------------------------- collect: saved SSH hosts
+
+
+def test_a_saved_host_reports_its_gpus_processes_and_schedulers():
+    answer = ok(remote_stdout(gpu=TWO_GPU_TEXT, apps=REAL_APPS_LINE, slurm=SQUEUE_TEXT, lsf=BJOBS_TEXT))
+    run = FakeRunner({ssh_key("gpu-box"): answer, NVIDIA_GPU_ARGV: ok(""), NVIDIA_APPS_ARGV: ok("")})
+    snapshot = collect(run, ("gpu-box",), None, now=NOW)
+    remote_gpus = [row for row in snapshot.gpus if row.host == "gpu-box"]
+    assert [row.index for row in remote_gpus] == ["0", "1"]
+    remote_jobs = [job for job in snapshot.jobs if job.host == "gpu-box"]
+    assert {job.source for job in remote_jobs} == {SOURCE_GPU_PROCESS, SOURCE_SLURM, SOURCE_LSF}
+    gpu_status = [s for s in snapshot.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
+    assert gpu_status[0].text == "2 GPUs read."
+
+
+def test_a_host_without_squeue_or_bjobs_says_not_on_this_host():
+    run = FakeRunner({ssh_key("plain"): ok(remote_stdout())})
+    snapshot = collect(run, ("plain",), None, now=NOW)
+    texts = {s.part: s.text for s in snapshot.statuses if s.where == "plain" and s.part in (PART_SLURM, PART_LSF)}
+    assert texts == {PART_SLURM: "Slurm: not on this host.", PART_LSF: "LSF: not on this host."}
+
+
+def test_a_host_without_nvidia_smi_says_so_from_its_error_text():
+    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu=""), stderr="bash: nvidia-smi: command not found")
+    run = FakeRunner({ssh_key("cpu-only"): answer})
+    snapshot = collect(run, ("cpu-only",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "cpu-only" and s.part == PART_GPUS]
+    assert status.state == STATE_ABSENT
+    assert status.text == "nvidia-smi is not on this host, so its GPUs cannot be read."
+
+
+def test_a_host_where_nvidia_smi_errors_says_it_could_not_read():
+    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu=""), stderr="NVIDIA-SMI has failed")
+    run = FakeRunner({ssh_key("broken"): answer})
+    snapshot = collect(run, ("broken",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "broken" and s.part == PART_GPUS]
+    assert status.text == "nvidia-smi could not read the GPUs on this host."
+
+
+def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
+    run = FakeRunner({ssh_key("quiet"): ok(remote_stdout(gpu=""))})
+    snapshot = collect(run, ("quiet",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "quiet" and s.part == PART_GPUS]
+    assert status.state == STATE_EMPTY
+    assert status.text == "No GPUs reported."
+
+
+@pytest.mark.parametrize(
+    ("answer", "state", "expected"),
+    [
+        (
+            CommandResult(returncode=255, stderr="Host key verification failed."),
+            STATE_FAILED,
+            "Host key unknown. Connect to it once in a terminal to accept its key.",
+        ),
+        (
+            CommandResult(returncode=255, stderr="user@x: Permission denied (publickey)."),
+            STATE_FAILED,
+            "Auth failed. The key for this host is not accepted without a password.",
+        ),
+        (
+            CommandResult(returncode=255, stderr="ssh: connect to host x port 22: Connection timed out"),
+            STATE_FAILED,
+            "Timed out. The host did not answer in time.",
+        ),
+        (
+            CommandResult(returncode=255, stderr="ssh: Could not resolve hostname x"),
+            STATE_FAILED,
+            "Unreachable. The host name or the network did not answer.",
+        ),
+        (CommandResult(returncode=None, timed_out=True), STATE_FAILED, "Timed out. The host did not answer in time."),
+        (
+            CommandResult(returncode=None, missing=True),
+            STATE_ABSENT,
+            "ssh is not on this computer, so this host cannot be read.",
+        ),
+        (CommandResult(returncode=None, failed_to_start=True), STATE_FAILED, "ssh could not be started."),
+    ],
+)
+def test_each_host_failure_names_its_reason(answer, state, expected):
+    run = FakeRunner({ssh_key("bad"): answer})
+    snapshot = collect(run, ("bad",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "bad"]
+    assert status.state == state
+    assert status.text == expected
+    assert snapshot.gpus == ()
+
+
+def test_one_failing_host_never_blocks_the_others():
+    good = ok(remote_stdout(gpu=REAL_GPU_LINE))
+    run = FakeRunner({ssh_key("good"): good, ssh_key("boom"): RuntimeError("secret detail")})
+    snapshot = collect(run, ("boom", "good"), None, now=NOW)
+    assert [row.host for row in snapshot.gpus] == ["good"]
+    (boom,) = [s for s in snapshot.statuses if s.where == "boom"]
+    assert boom.state == STATE_FAILED
+    assert boom.text == "This could not be read."
+    assert "secret" not in boom.text
+
+
+def test_hosts_are_read_in_parallel_and_keep_their_order_in_the_snapshot():
+    answers = {ssh_key(f"h{index}"): ok(remote_stdout(gpu=REAL_GPU_LINE)) for index in range(3)}
+    run = FakeRunner(answers)
+    snapshot = collect(run, ("h0", "h1", "h2"), None, now=NOW)
+    assert [row.host for row in snapshot.gpus] == ["h0", "h1", "h2"]
+    assert sum(1 for call in run.calls if call[0] == "ssh") == 3
+
+
+def test_a_bad_saved_name_is_skipped_and_never_run():
+    run = FakeRunner({ssh_key("good"): ok(remote_stdout(gpu=REAL_GPU_LINE))})
+    snapshot = collect(run, ("-oProxyCommand=x", "good"), None, now=NOW)
+    assert [row.host for row in snapshot.gpus] == ["good"]
+    assert not any("-oProxyCommand=x" in call for call in run.calls)
+
+
+def test_no_saved_hosts_means_no_ssh_call():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE)})
+    collect(run, (), None, now=NOW)
+    assert not any(call[0] == "ssh" for call in run.calls)
+
+
+# ----------------------------------------------------------------- collect: RunPod
+
+
+def test_runpod_pods_appear_when_the_local_server_lists_them():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), lambda: RUNPOD_PAYLOAD, now=NOW)
+    runpod_jobs = [job for job in snapshot.jobs if job.source == SOURCE_RUNPOD]
+    assert len(runpod_jobs) == 2
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.state == STATE_OK
+    assert status.text == "2 RunPod pods."
+
+
+def test_runpod_with_no_pods_is_an_empty_state():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), lambda: {"ok": True, "pods": []}, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.state == STATE_EMPTY
+    assert status.text == "No RunPod pods."
+
+
+def test_runpod_not_connected_when_the_server_is_not_answering():
+    def unreachable():
+        raise OSError("connection refused at 127.0.0.1")
+
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), unreachable, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.text == gpu_jobs.RUNPOD_NOT_CONNECTED_TEXT
+    assert "refused" not in status.text
+
+
+def test_runpod_not_listed_when_the_server_says_not_ok():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), lambda: {"ok": False, "error": "x"}, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.state == STATE_FAILED
+    assert status.text == gpu_jobs.RUNPOD_NOT_LISTED_TEXT
+
+
+def test_runpod_not_connected_when_there_is_no_provider_at_all():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok("")})
+    snapshot = collect(run, (), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.part == PART_RUNPOD]
+    assert status.state == STATE_ABSENT
+    assert status.text == gpu_jobs.RUNPOD_NOT_CONNECTED_TEXT
+
+
+# ----------------------------------------------------------------- the default runner
+
+
+def test_a_missing_program_is_reported_as_missing_not_raised():
+    def absent(*args, **kwargs):
+        raise FileNotFoundError("no such program")
+
+    original = subprocess.run
+    subprocess.run = absent
+    try:
+        result = gpu_jobs.run_command(("definitely-missing-program",), 1.0)
+    finally:
+        subprocess.run = original
+    assert result == CommandResult(returncode=None, missing=True)
+
+
+def test_a_timeout_is_reported_as_timed_out():
+    def slow(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    original = subprocess.run
+    subprocess.run = slow
+    try:
+        result = gpu_jobs.run_command(("nvidia-smi",), 1.0)
+    finally:
+        subprocess.run = original
+    assert result.timed_out is True
+    assert result.returncode is None
+
+
+def test_an_os_error_is_reported_as_failed_to_start():
+    def denied(*args, **kwargs):
+        raise PermissionError("denied")
+
+    original = subprocess.run
+    subprocess.run = denied
+    try:
+        result = gpu_jobs.run_command(("nvidia-smi",), 1.0)
+    finally:
+        subprocess.run = original
+    assert result.failed_to_start is True
+
+
+def test_a_finished_program_returns_its_exit_code_and_text(monkeypatch):
+    class Done:
+        returncode = 0
+        stdout = "out"
+        stderr = "err"
+
+    seen = {}
+
+    def finished(argv, **kwargs):
+        seen.update(kwargs)
+        seen["argv"] = argv
+        return Done()
+
+    monkeypatch.setattr(subprocess, "run", finished)
+    result = gpu_jobs.run_command(("nvidia-smi", "--version"), 2.0)
+    assert result == CommandResult(returncode=0, stdout="out", stderr="err")
+    assert seen["argv"] == ["nvidia-smi", "--version"]
+    assert seen["shell"] is False
+    assert seen["timeout"] == 2.0
+    assert seen["stdin"] == subprocess.DEVNULL
+
+
+# ----------------------------------------------------------------- display text
+
+
+def test_the_summary_counts_gpus_hosts_busy_and_memory():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE)})
+    snapshot = collect(run, (), None, now=NOW)
+    assert gpu_jobs.summary_text(snapshot) == "1 GPU on 1 host. 1 busy. 1.7 of 20.0 GB GPU memory in use."
+
+
+def test_the_summary_with_several_hosts_uses_plural_words():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(TWO_GPU_TEXT), ssh_key("box"): ok(remote_stdout(gpu=REAL_GPU_LINE))})
+    snapshot = collect(run, ("box",), None, now=NOW)
+    assert gpu_jobs.summary_text(snapshot) == "3 GPUs on 2 hosts. 2 busy. 31.0 of 100.0 GB GPU memory in use."
+
+
+def test_the_table_rows_show_dashes_for_missing_values():
+    text = "0, A100, GPU-x, [N/A], [N/A], [N/A], [N/A], [N/A], [N/A]\n"
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(text)})
+    snapshot = collect(run, (), None, now=NOW)
+    (row,) = gpu_jobs.gpu_table_rows(snapshot)
+    assert row == (LOCAL_HOST, "0", "A100", "-", "-", "-", "-")
+
+
+def test_the_table_rows_format_values_and_jobs():
+    run = FakeRunner({NVIDIA_GPU_ARGV: ok(REAL_GPU_LINE), NVIDIA_APPS_ARGV: ok(REAL_APPS_LINE)})
+    snapshot = collect(run, (), lambda: RUNPOD_PAYLOAD, now=NOW)
+    (gpu_row,) = gpu_jobs.gpu_table_rows(snapshot)
+    assert gpu_row == (LOCAL_HOST, "0", "NVIDIA GeForce RTX 3080", "79%", "1734 / 20480 MiB", "59 °C", "272 / 320 W")
+    job_rows = gpu_jobs.job_table_rows(snapshot)
+    assert job_rows[0] == (
+        SOURCE_GPU_PROCESS,
+        LOCAL_HOST,
+        "4",
+        "-",
+        "(not readable: Insufficient Permissions)",
+        "running",
+        "0",
+        "-",
+    )
+    assert job_rows[1][0] == SOURCE_RUNPOD
+    assert job_rows[1][6] == "NVIDIA A100 x2"
+    status_rows = gpu_jobs.status_table_rows(snapshot)
+    assert status_rows[0] == (LOCAL_HOST, PART_GPUS, "1 GPU read.")
+
+
+def test_power_and_memory_text_handle_partial_values():
+    assert gpu_jobs.power_text(None, None) == "-"
+    assert gpu_jobs.power_text(100.4, None) == "100 W"
+    assert gpu_jobs.memory_text(None, 100) == "-"
+    assert gpu_jobs.temperature_text(None) == "-"
+
+
+def test_a_failed_whole_read_is_a_plain_status():
+    snapshot = gpu_jobs.failed_snapshot(now=NOW)
+    assert snapshot.checked_at == NOW
+    (status,) = snapshot.statuses
+    assert status.state == STATE_FAILED
+    assert status.text == "The GPU read failed. Press Refresh to try again."
