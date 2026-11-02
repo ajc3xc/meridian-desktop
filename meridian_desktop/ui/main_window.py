@@ -202,9 +202,11 @@ def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], 
     return read
 
 
-def _saved_tools_status(store: SettingsStore) -> Callable[[], ToolsStatus]:
+def _saved_tools_status(store: SettingsStore, probe: Callable[[str], str]) -> Callable[[], ToolsStatus]:
     """One tools read, through the core Python and checkout saved in Settings. Runs on the worker thread.
 
+    The local server row asks ``probe``, the window's own probe, the same one Home's local card and the connection bar
+    use. A window built with fake sources therefore never opens a socket from this read.
     The tunnel row uses only the status call of a RunnerClient built from those two settings. With either one
     unset, that call is None and the tunnel row says Not checked. No tool is started or stopped.
     """
@@ -215,7 +217,7 @@ def _saved_tools_status(store: SettingsStore) -> Callable[[], ToolsStatus]:
         if settings.core_python.strip() and settings.core_checkout.strip():
             client = RunnerClient(python=settings.core_python, cwd=settings.core_checkout)
             tunnel_call = client.status
-        return read_tools_status(store, tunnel_status_call=tunnel_call)
+        return read_tools_status(store, probe=probe, tunnel_status_call=tunnel_call)
 
     return read
 
@@ -271,7 +273,9 @@ class MainWindow(QMainWindow):
         self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
         # The tools read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
-        self._tools_status_read = tools_status if tools_status is not None else _saved_tools_status(self._store)
+        self._tools_status_read = (
+            tools_status if tools_status is not None else _saved_tools_status(self._store, self._sources.probe)
+        )
         # Each tunnel check takes the next number. A result with an older number is dropped.
         self._tunnel_generation = 0
         # A plain token that identifies this window's checks. A result carries it, so the window keeps only its own.

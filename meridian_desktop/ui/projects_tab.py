@@ -13,6 +13,11 @@ A pool worker never touches a Qt object. It emits its result to one shared deliv
 lives on the GUI thread and is never deleted. Each tab receives on the GUI thread and keeps only
 its own results, so a tab deleted while its load runs is never touched by the worker.
 
+Subprojects are nested. A row whose parent_project_id names another listed project is drawn under
+that project, indented one step per level, as project_tree.arrange orders them. The name cell keeps
+the plain name, so copy and selection see the same text as before. The tree is read-only: nothing
+on the tab edits a row or a parent link.
+
 Only the fields in projects_reader.PROJECT_COLUMNS reach the table or the detail pane. The
 detail pane is built from those fields alone, so executor_config and agent_instructions never
 appear, even if a source returned them. Every label and cell is plain text.
@@ -25,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QRunnable, QSize, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -34,13 +39,15 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from meridian_desktop import hosted_client, local_client, projects_backup, projects_reader, token_store
+from meridian_desktop import hosted_client, local_client, project_tree, projects_backup, projects_reader, token_store
 from meridian_desktop.data_source import (
     SOURCE_FILE,
     SOURCE_HOSTED,
@@ -77,6 +84,9 @@ FIELD_LABELS = {
 }
 # The table columns, in display order. Each one is in PROJECT_COLUMNS.
 TABLE_FIELDS = ("name", "status", "priority", "created_at")
+# The name cell stores its tree depth under this role. The delegate reads it to indent the name.
+TREE_DEPTH_ROLE = Qt.ItemDataRole.UserRole + 1
+TREE_INDENT_PX = 18
 
 SOURCE_TEXT = {
     SOURCE_SERVER: "the local Meridian server",
@@ -120,6 +130,28 @@ def detail_text(row: dict[str, Any]) -> str:
         text = NONE_TEXT if value is None or value == "" else str(value)
         lines.append(f"{FIELD_LABELS[key]}: {text}")
     return "\n".join(lines)
+
+
+class _TreeNameDelegate(QStyledItemDelegate):
+    """Draws a child's name indented by its depth. The cell text is not changed, only where it is drawn.
+
+    The size hint includes the same indent, so the name column is wide enough for an indented name and its text
+    is not clipped on the right.
+    """
+
+    def paint(self, painter: Any, option: QStyleOptionViewItem, index: Any) -> None:
+        depth = index.data(TREE_DEPTH_ROLE)
+        if isinstance(depth, int) and depth > 0:
+            option = QStyleOptionViewItem(option)
+            option.rect = option.rect.adjusted(depth * TREE_INDENT_PX, 0, 0, 0)
+        super().paint(painter, option, index)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: Any) -> QSize:
+        size = super().sizeHint(option, index)
+        depth = index.data(TREE_DEPTH_ROLE)
+        if isinstance(depth, int) and depth > 0:
+            size.setWidth(size.width() + depth * TREE_INDENT_PX)
+        return size
 
 
 @dataclass(frozen=True)
@@ -263,6 +295,7 @@ class ProjectsTab(QWidget):
         # Identifies this tab's loads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._rows: list[dict[str, Any]] = []
+        self._depths: list[int] = []
         # The backup controls exist only once a hosted token has been seen saved, so a tab without a token has none.
         # A backup runs one at a time.
         self._backup_widgets: tuple[QPushButton, QLabel, QLabel] | None = None
@@ -291,6 +324,7 @@ class ProjectsTab(QWidget):
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(True)
+        self._table.setItemDelegateForColumn(0, _TreeNameDelegate(self._table))
         self._table.itemSelectionChanged.connect(self._show_detail)
         enable_table_copy(self._table)
 
@@ -339,10 +373,13 @@ class ProjectsTab(QWidget):
         if outcome.state != STATE_OK:
             # Every non-ok state shows the resolver's message, and no rows.
             self._rows = []
+            self._depths = []
             self._fill()
             self._status.setText(outcome.message)
             return
-        self._rows = [visible_row(row) for row in outcome.rows]
+        arranged = project_tree.arrange([visible_row(row) for row in outcome.rows])
+        self._rows = [row for row, _depth in arranged]
+        self._depths = [depth for _row, depth in arranged]
         self._fill()
         where = SOURCE_TEXT.get(outcome.source or "", "Meridian")
         if self._rows:
@@ -352,9 +389,12 @@ class ProjectsTab(QWidget):
 
     def _fill(self) -> None:
         self._table.setRowCount(len(self._rows))
-        for row_index, row in enumerate(self._rows):
+        for row_index, (row, depth) in enumerate(zip(self._rows, self._depths)):
             for column, field in enumerate(TABLE_FIELDS):
-                self._table.setItem(row_index, column, QTableWidgetItem(_table_text(row.get(field))))
+                item = QTableWidgetItem(_table_text(row.get(field)))
+                if column == 0:
+                    item.setData(TREE_DEPTH_ROLE, depth)
+                self._table.setItem(row_index, column, item)
         if self._rows:
             self._table.selectRow(0)
         self._show_detail()
@@ -440,6 +480,7 @@ class ProjectsTab(QWidget):
 __all__ = [
     "FIELD_LABELS",
     "TABLE_FIELDS",
+    "TREE_DEPTH_ROLE",
     "ProjectsTab",
     "default_sources",
     "detail_text",
