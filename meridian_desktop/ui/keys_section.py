@@ -5,6 +5,10 @@ they did before. Every other name is a card of its own: its status, a password b
 A name is added with the form at the foot of the block. The search box above the list shows only the cards whose name
 contains its text, ignoring case. It searches names only, never values or statuses.
 
+Each card, RunPod's included, has a Mark critical box and a Set as Windows user variable button. A critical name is listed
+first and shows a Critical badge. The mark is saved in settings by name. Setting a user variable asks first, and then writes
+the saved value to the Windows user environment.
+
 Values go to the keychain through api_keys. This block never shows a value, never reads one back into a control, and never
 writes one to the settings file. A status is read only to test whether a value is set. A failed read shows as unreadable.
 Remove asks first, because the saved value is deleted from the keychain.
@@ -18,6 +22,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -42,6 +47,7 @@ from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import submit
 from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.user_environment import UserEnvironmentError
 
 INTRO_TEXT = (
     "Keys are kept in the OS keychain, one entry for each name. This list shows each name and whether a value is set. "
@@ -77,6 +83,26 @@ NOT_REMOVED_OS_TEXT = "Not removed. The key could not be deleted or its name cou
 NAMES_NOT_READ_TEXT = "The saved key names could not be read. Reopen Settings to try again."
 NOT_WRITTEN_TEXT = "Not saved: the settings file could not be written."
 RUNPOD_HEADING_TEXT = RUNPOD_NAME
+CRITICAL_BADGE_TEXT = "Critical"
+CRITICAL_BOX_TEXT = "Mark critical"
+CRITICAL_TEXT = "{name} is marked critical. It is listed first."
+UNCRITICAL_TEXT = "{name} is no longer marked critical."
+USER_ENV_TEXT = "Set as Windows user variable"
+USER_ENV_TITLE = "Set this key as a Windows user variable?"
+# The question names the variable and says where the value goes. It never shows the value.
+USER_ENV_BODY = (
+    "The saved value for {name} is written to your Windows user environment as {variable}. Programs you start after this "
+    "can read it. The value is not shown here. It stays there until you remove it in Windows environment settings."
+)
+USER_ENV_CANCELLED_TEXT = "Cancelled. Nothing was written to your Windows user environment."
+USER_ENV_NO_VALUE_TEXT = "No value is saved for {name} yet. Save a value first, then set it as a Windows user variable."
+USER_ENV_SET_TEXT = (
+    "Set {variable} in your Windows user environment. The value is not shown. "
+    "Programs already open do not see it until they restart."
+)
+USER_ENV_UNANNOUNCED_TEXT = "Windows did not confirm the change to running programs, so sign out and back in if one does not see it."
+USER_ENV_NOT_SET_TEXT = "Not set. {detail}"
+USER_ENV_OS_TEXT = "Not set. The Windows user environment could not be written. Try again."
 
 # A confirmation: (parent, title, text) -> True only when the owner clicks Yes.
 Confirm = Callable[[QWidget, str, str], bool]
@@ -102,6 +128,36 @@ def _ask_remove(parent: QWidget, title: str, text: str) -> bool:
     return ask_yes_no(parent, title, text)
 
 
+def _ask_user_env(parent: QWidget, title: str, text: str) -> bool:
+    """The Yes or No before a value is written to the Windows user environment. No is the default."""
+    return ask_yes_no(parent, title, text)
+
+
+@dataclass
+class _Mark:
+    """The Critical badge, the Mark critical box and the user-variable button of one name. RunPod has one too."""
+
+    badge: QLabel
+    critical: QCheckBox
+    user_env: QPushButton
+
+
+def _show_mark(mark: _Mark, critical: bool) -> None:
+    """Show the badge and set the box to the saved mark. The box's own signal does not run again for this."""
+    mark.badge.setVisible(critical)
+    mark.critical.blockSignals(True)
+    mark.critical.setChecked(critical)
+    mark.critical.blockSignals(False)
+
+
+def _action_row(mark: _Mark) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.addWidget(mark.critical)
+    row.addStretch(1)
+    row.addWidget(mark.user_env)
+    return row
+
+
 @dataclass
 class _Card:
     """One saved name's card and the widgets the section reads and changes."""
@@ -109,6 +165,7 @@ class _Card:
     frame: QFrame
     status: QLabel
     value: QLineEdit
+    mark: _Mark
 
 
 class KeysSection(QWidget):
@@ -129,8 +186,10 @@ class KeysSection(QWidget):
         # None means the Yes/No dialog. It is looked up when Remove is pressed, not here, so a test can swap it.
         self._confirm = confirm
         self._cards: dict[str, _Card] = {}
-        # The RunPod card's frame, when a RunPod card is hosted. The search filters it by its name like the others.
+        # The RunPod card's frame and its marks, when a RunPod card is hosted. The frame sits in the same list as the others,
+        # so a critical RunPod is listed first, and the search filters it by its name like the others.
         self._runpod_frame: QFrame | None = None
+        self._runpod_mark: _Mark | None = None
         # The first read of the listed names runs on the thread pool, so building this block never reads the keychain.
         self._owner = object()
         self._load_generation = 0
@@ -185,20 +244,12 @@ class KeysSection(QWidget):
         self._search_empty.setVisible(False)
         column.addWidget(self._search_empty)
 
-        if self._runpod_card is not None:
-            # The RunPod card is framed like the other cards, so every name in the block looks the same.
-            frame = QFrame(self)
-            frame.setObjectName("keys-entry-runpod")
-            self._runpod_frame = frame
-            frame.setFrameShape(QFrame.Shape.StyledPanel)
-            frame_column = QVBoxLayout(frame)
-            frame_column.addWidget(_bold(_label(frame, "keys-runpod-name", RUNPOD_HEADING_TEXT)))
-            frame_column.addWidget(self._runpod_card)
-            column.addWidget(frame)
-
+        # Every card sits in this one list, the RunPod card's included, so the critical names come first whichever they are.
         self._entry_layout = QVBoxLayout()
         self._entry_layout.setSpacing(8)
         column.addLayout(self._entry_layout)
+        if self._runpod_card is not None:
+            self._build_runpod_frame()
 
         self._message = _label(self, "keys-message")
         self._message.setVisible(False)
@@ -223,6 +274,35 @@ class KeysSection(QWidget):
         self._add_button.clicked.connect(self._on_add_clicked)
         self._new_value.returnPressed.connect(self._on_add_clicked)
 
+    def _build_runpod_frame(self) -> None:
+        # The RunPod card is framed like the other cards, so every name in the block looks the same.
+        frame = QFrame(self)
+        frame.setObjectName("keys-entry-runpod")
+        self._runpod_frame = frame
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        mark = self._make_mark(frame, slug(RUNPOD_NAME), RUNPOD_NAME)
+        self._runpod_mark = mark
+        frame_column = QVBoxLayout(frame)
+        head = QHBoxLayout()
+        head.addWidget(_bold(_label(frame, "keys-runpod-name", RUNPOD_HEADING_TEXT)))
+        head.addWidget(mark.badge)
+        head.addStretch(1)
+        frame_column.addLayout(head)
+        frame_column.addWidget(self._runpod_card)
+        frame_column.addLayout(_action_row(mark))
+        self._entry_layout.addWidget(frame)
+
+    def _make_mark(self, frame: QFrame, key: str, name: str) -> _Mark:
+        badge = _bold(_label(frame, f"keys-entry-{key}-badge", CRITICAL_BADGE_TEXT))
+        badge.setVisible(False)
+        critical = QCheckBox(CRITICAL_BOX_TEXT, frame)
+        critical.setObjectName(f"keys-entry-{key}-critical")
+        user_env = QPushButton(USER_ENV_TEXT, frame)
+        user_env.setObjectName(f"keys-entry-{key}-user-env")
+        critical.toggled.connect(lambda checked, n=name: self._on_critical_toggled(n, checked))
+        user_env.clicked.connect(lambda *_, n=name: self._on_user_env(n))
+        return _Mark(badge, critical, user_env)
+
     def _make_card(self, name: str) -> _Card:
         key = slug(name)
         frame = QFrame(self)
@@ -230,8 +310,10 @@ class KeysSection(QWidget):
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         column = QVBoxLayout(frame)
 
+        mark = self._make_mark(frame, key, name)
         head = QHBoxLayout()
         head.addWidget(_bold(_label(frame, f"keys-entry-{key}-name", name)))
+        head.addWidget(mark.badge)
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
         column.addLayout(head)
@@ -249,11 +331,12 @@ class KeysSection(QWidget):
         row.addWidget(save)
         row.addWidget(remove)
         column.addLayout(row)
+        column.addLayout(_action_row(mark))
 
         save.clicked.connect(lambda *_, n=name: self._on_save_value(n))
         value.returnPressed.connect(lambda *_, n=name: self._on_save_value(n))
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
-        return _Card(frame, status, value)
+        return _Card(frame, status, value, mark)
 
     # ----------------------------------------------------------- state on screen
 
@@ -282,7 +365,25 @@ class KeysSection(QWidget):
                 self._cards[entry.name] = card
                 self._entry_layout.addWidget(card.frame)
             card.status.setText(STATUS_TEXT[entry.status])
+            _show_mark(card.mark, entry.critical)
+        for entry in entries:
+            if entry.built_in and self._runpod_mark is not None:
+                _show_mark(self._runpod_mark, entry.critical)
+        self._reorder(entries)
         self._apply_filter()
+
+    def _reorder(self, entries: list[Any]) -> None:
+        """Lay the cards out in the order of ``entries``, which lists the critical names first. RunPod sits where its entry is."""
+        frames: list[QFrame] = []
+        for entry in entries:
+            if entry.built_in:
+                if self._runpod_frame is not None:
+                    frames.append(self._runpod_frame)
+            elif entry.name in self._cards:
+                frames.append(self._cards[entry.name].frame)
+        for index, frame in enumerate(frames):
+            self._entry_layout.removeWidget(frame)
+            self._entry_layout.insertWidget(index, frame)
 
     def _show(self, text: str) -> None:
         self._message.setText(text)
@@ -299,7 +400,7 @@ class KeysSection(QWidget):
         query = self._search.text().strip().casefold()
         frames = [(name, card.frame) for name, card in self._cards.items()]
         if self._runpod_frame is not None:
-            frames.insert(0, (RUNPOD_NAME, self._runpod_frame))
+            frames.append((RUNPOD_NAME, self._runpod_frame))
         any_match = False
         for name, frame in frames:
             match = not query or query in name.casefold()
@@ -351,6 +452,51 @@ class KeysSection(QWidget):
         self.refresh()
         self._show(REPLACED_TEXT.format(name=listed))
 
+    def _on_critical_toggled(self, name: str, critical: bool) -> None:
+        try:
+            listed = self._keys.set_critical(name, critical)
+        except KeyNameError as exc:
+            self.refresh()
+            self._show(str(exc))
+            return
+        except OSError:
+            # The box goes back to the mark the settings file still holds, because refresh reads it again.
+            self.refresh()
+            self._show(NOT_WRITTEN_TEXT)
+            return
+        self.refresh()
+        self._show((CRITICAL_TEXT if critical else UNCRITICAL_TEXT).format(name=listed))
+
+    def _on_user_env(self, name: str) -> None:
+        if self._keys.status(name) == STATUS_NOT_SET:
+            self._show(USER_ENV_NO_VALUE_TEXT.format(name=name))
+            return
+        try:
+            variable = self._keys.environment_name(name)
+        except KeyNameError as exc:
+            self._show(str(exc))
+            return
+        body = USER_ENV_BODY.format(name=name, variable=variable)
+        ask = self._confirm if self._confirm is not None else _ask_user_env
+        if not ask(self, USER_ENV_TITLE, body):
+            self._show(USER_ENV_CANCELLED_TEXT)
+            return
+        try:
+            written = self._keys.set_user_environment(name)
+        except KeyNameError as exc:
+            self._show(str(exc))
+            return
+        except (SecretStoreError, UserEnvironmentError) as exc:
+            self._show(USER_ENV_NOT_SET_TEXT.format(detail=exc))  # names the step and the class only
+            return
+        except OSError:
+            self._show(USER_ENV_OS_TEXT)
+            return
+        text = USER_ENV_SET_TEXT.format(variable=written.variable)
+        if not written.announced:
+            text = f"{text} {USER_ENV_UNANNOUNCED_TEXT}"
+        self._show(text)
+
     def _on_remove(self, name: str) -> None:
         if name in BUILT_IN_NAMES:
             return  # RunPod keeps its own Remove key button, on its card
@@ -379,6 +525,8 @@ class KeysSection(QWidget):
 
 __all__ = [
     "ADDED_TEXT",
+    "CRITICAL_BADGE_TEXT",
+    "CRITICAL_TEXT",
     "KeysSection",
     "NOT_WRITTEN_TEXT",
     "REMOVED_TEXT",
@@ -386,4 +534,7 @@ __all__ = [
     "SEARCH_EMPTY_TEXT",
     "SEARCH_PLACEHOLDER",
     "STATUS_TEXT",
+    "UNCRITICAL_TEXT",
+    "USER_ENV_SET_TEXT",
+    "USER_ENV_TITLE",
 ]
