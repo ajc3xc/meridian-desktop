@@ -668,3 +668,21 @@ def test_the_panel_backoff_uses_the_panel_clock(qtbot):
     clock.advance(30)
     panel.findChild(QTimer).timeout.emit()
     qtbot.waitUntil(lambda: run.ssh_calls == 2, timeout=5000)
+
+
+def test_three_hosts_are_read_at_the_same_time_on_the_panel_path(qtbot):
+    # The barrier releases only when all three SSH calls are waiting together. Read one after another, the first call would
+    # wait until the barrier times out, and no host would report "Timed out".
+    barrier = threading.Barrier(3, timeout=5)
+
+    class BarrierHosts(RecordingRunner):
+        def __call__(self, argv, timeout):
+            if argv[0] == "ssh":
+                barrier.wait()
+                return CommandResult(returncode=255, stderr="Connection timed out")
+            return super().__call__(argv, timeout)
+
+    panel = GpuJobsPanel(lambda: ("h0", "h1", "h2"), None, run=BarrierHosts())
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitUntil(lambda: sum(1 for text in _status_texts(panel) if "Timed out" in text) == 3, timeout=10000)

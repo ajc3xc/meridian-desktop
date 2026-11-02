@@ -732,6 +732,7 @@ def test_hosts_are_read_in_parallel_and_keep_their_order_in_the_snapshot():
 
 
 def test_three_hosts_are_in_flight_at_the_same_time():
+    """Covers collect(): the three hosts are read in parallel, not one after another."""
     # The barrier releases only when all three ssh calls are waiting together. Read one after another, the first call
     # would wait until the barrier times out, and that host would then be missing from the snapshot.
     barrier = threading.Barrier(3, timeout=5)
@@ -774,21 +775,23 @@ def _ssh_calls(run, alias):
     return sum(1 for call in run.calls if call == ssh_key(alias))
 
 
+# The backoff tests below call read_host, the per-host read the panel makes. They do not go through collect().
+
+
 def test_a_failed_login_skips_the_host_for_one_minute_then_tries_again():
     clock = FakeClock()
     backoff = gpu_jobs.HostBackoff(clock=clock)
     run = FakeRunner({ssh_key("gpu-box"): DENIED})
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     assert _ssh_calls(run, "gpu-box") == 1
 
     clock.advance(30)
-    snapshot = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    reading = gpu_jobs.read_host(run, "gpu-box", backoff)
     assert _ssh_calls(run, "gpu-box") == 1  # skipped: no second login attempt
-    (status,) = [s for s in snapshot.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
-    assert status.text == "Skipped for 1 min after a failed login."
+    assert reading.statuses[0].text == "Skipped for 1 min after a failed login."
 
     clock.advance(31)  # now 61 seconds after the failure
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     assert _ssh_calls(run, "gpu-box") == 2
 
 
@@ -798,11 +801,10 @@ def test_the_skip_grows_one_two_four_minutes_and_is_capped_at_ten():
     run = FakeRunner({ssh_key("gpu-box"): DENIED})
     expected_minutes = [1, 2, 4, 8, 10, 10]
     for minutes in expected_minutes:
-        collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)  # a login that fails
+        gpu_jobs.read_host(run, "gpu-box", backoff)  # a login that fails
         clock.advance(1)
-        skipped = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
-        (status,) = [s for s in skipped.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
-        assert status.text == f"Skipped for {minutes} min after a failed login."
+        skipped = gpu_jobs.read_host(run, "gpu-box", backoff)
+        assert skipped.statuses[0].text == f"Skipped for {minutes} min after a failed login."
         clock.advance(minutes * 60 - 1)  # now exactly at the retry time
     assert _ssh_calls(run, "gpu-box") == len(expected_minutes)
 
@@ -811,18 +813,17 @@ def test_a_successful_login_clears_the_skip():
     clock = FakeClock()
     backoff = gpu_jobs.HostBackoff(clock=clock)
     run = FakeRunner({ssh_key("gpu-box"): DENIED})
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     clock.advance(61)
     run.answers = {ssh_key("gpu-box"): ok(remote_stdout())}
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     assert backoff.remaining("gpu-box") == 0
     # The next failure starts again at one minute, not where the last skip left off.
     run.answers = {ssh_key("gpu-box"): DENIED}
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     clock.advance(59)
-    snapshot = collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
-    (status,) = [s for s in snapshot.statuses if s.where == "gpu-box" and s.part == PART_GPUS]
-    assert status.text == "Skipped for 1 min after a failed login."
+    reading = gpu_jobs.read_host(run, "gpu-box", backoff)
+    assert reading.statuses[0].text == "Skipped for 1 min after a failed login."
 
 
 def test_a_host_key_failure_starts_the_same_skip():
@@ -833,7 +834,7 @@ def test_a_host_key_failure_starts_the_same_skip():
         stderr="WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\r\nHost key verification failed.",
     )
     run = FakeRunner({ssh_key("gpu-box"): changed})
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     assert backoff.remaining("gpu-box") == 60
 
 
@@ -841,7 +842,7 @@ def test_a_timeout_or_unreachable_host_is_not_skipped():
     clock = FakeClock()
     backoff = gpu_jobs.HostBackoff(clock=clock)
     run = FakeRunner({ssh_key("gpu-box"): CommandResult(returncode=None, timed_out=True)})
-    collect(run, ("gpu-box",), None, now=NOW, backoff=backoff)
+    gpu_jobs.read_host(run, "gpu-box", backoff)
     assert backoff.remaining("gpu-box") == 0
 
 
