@@ -1,7 +1,7 @@
 """The Settings tab: five collapsible groups in one scrolling column, in this order.
 
 1. Connection: the mode (shown, set by the top-bar selector), the hosted URL, the hosted token status and its
-   Save and Remove, the Test connection button, the local URL and the database file.
+   Save and Remove, the Test connection and Try again buttons, the local URL and the database file.
 2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
    launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
 3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
@@ -12,7 +12,7 @@
 The hosted URL is checked with hosted_client.validate_base_url before anything is written. The hosted token is typed into
 a password field, saved to the keychain through token_store, and never written to the settings file. The tab shows only
 whether a token is set. Test connection makes one GET /projects with the saved URL and token, on a worker thread, and
-shows the result in plain words.
+shows the result in plain words. Try again runs the same test, from the button beside it.
 
 The local URL is checked with local_client.assert_loopback before anything is written. A value that is not an http
 loopback URL is refused inline, and the settings file is not touched. The database file is picked with a file dialog, and
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -359,10 +360,18 @@ class SettingsTab(QWidget):
         self._token_message.setVisible(False)
         grid.addWidget(self._token_message, 4, 0, 1, 4)
 
-        # Test connection, and its result.
+        # Test connection and Try again, side by side, then their result. Try again runs the same test.
         self._test_button = QPushButton("Test connection", body)
         self._test_button.setObjectName("settings-test-connection")
-        grid.addWidget(self._test_button, 5, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        self._try_again_button = QPushButton("Try again", body)
+        self._try_again_button.setObjectName("settings-try-again")
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 0, 0, 0)
+        test_row.setSpacing(8)
+        test_row.addWidget(self._test_button, 0, Qt.AlignmentFlag.AlignLeft)
+        test_row.addWidget(self._try_again_button, 0, Qt.AlignmentFlag.AlignLeft)
+        test_row.addStretch(1)
+        grid.addLayout(test_row, 5, 0, 1, 2)
         self._test_result = _label(body, "settings-test-result")
         self._test_result.setVisible(False)
         grid.addWidget(self._test_result, 6, 0, 1, 4)
@@ -454,6 +463,7 @@ class SettingsTab(QWidget):
         self._token_input.returnPressed.connect(self._on_save_token_clicked)
         self._remove_token.clicked.connect(self._on_remove_token_clicked)
         self._test_button.clicked.connect(self._on_test_clicked)
+        self._try_again_button.clicked.connect(self._on_test_clicked)
         self._save_url.clicked.connect(self._on_save_url_clicked)
         self._local_url.returnPressed.connect(self._on_save_url_clicked)
         self._choose_db.clicked.connect(self._on_choose_db_clicked)
@@ -564,6 +574,7 @@ class SettingsTab(QWidget):
     @Slot()
     def _on_test_clicked(self) -> None:
         self._test_button.setEnabled(False)
+        self._try_again_button.setEnabled(False)
         _set_message(self._test_result, TEST_RUNNING_TEXT)
         self._generation += 1
         generation = self._generation
@@ -579,6 +590,7 @@ class SettingsTab(QWidget):
         if not isinstance(done, _TestDone) or done.generation != self._generation:
             return
         self._test_button.setEnabled(True)
+        self._try_again_button.setEnabled(True)
         _set_message(self._test_result, done.text)
 
     # ----------------------------------------------------------- local settings
