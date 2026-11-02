@@ -25,6 +25,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -38,6 +39,45 @@ from meridian_desktop.local_client import LOOPBACK_HOSTS
 
 HOSTED_TIMEOUT = 10.0
 PROJECTS_PATH = "/projects"
+
+# The host the fallback root is for. A custom hosted URL never uses the fallback.
+DEFAULT_HOSTED_HOST = "usemeridian.us"
+
+# ISRG Root X1, the Let's Encrypt root that the default host's chain ends in. Public certificate text, not a secret.
+# Used only after the system trust store refuses the certificate for DEFAULT_HOSTED_HOST. Chain and hostname are
+# still verified against it. The fallback has to be updated if the default host moves to another CA.
+PINNED_ROOT_PEM = """-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+"""
 
 _LOG = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -199,10 +239,15 @@ def _bounded_read(response: Any, deadline: float) -> bytes:
             raise HostedError("too_large", TOO_LARGE_TEXT)
 
 
-def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
-    """The real transport: urllib, no redirects, a bounded body. A non-2xx status is returned, not raised."""
-    deadline = time.monotonic() + timeout
-    opener = urllib.request.build_opener(_NoRedirects())
+class _CertificateRefused(OSError):
+    """The trust store refused the server's certificate. Raised inside the transport only; _send maps it."""
+
+
+def _open_exchange(
+    request: urllib.request.Request, timeout: float, deadline: float, context: ssl.SSLContext | None
+) -> Reply:
+    """One request with the given TLS context (None means the system default). No redirects, a bounded body."""
+    opener = urllib.request.build_opener(_NoRedirects(), urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open(request, timeout=timeout) as response:
             return Reply(response.status, _bounded_read(response, deadline))
@@ -213,7 +258,34 @@ def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise TimeoutError("hosted connection timed out") from None
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            raise _CertificateRefused() from None
         raise
+
+
+def _pinned_context() -> ssl.SSLContext:
+    """A verifying context that trusts only PINNED_ROOT_PEM. Hostname and chain are still checked."""
+    return ssl.create_default_context(cadata=PINNED_ROOT_PEM)
+
+
+def _urllib_transport(request: urllib.request.Request, timeout: float) -> Reply:
+    """The real transport: urllib, no redirects, a bounded body. A non-2xx status is returned, not raised.
+
+    The system trust store is tried first. Only if it refuses the certificate, and only for DEFAULT_HOSTED_HOST,
+    is the request sent again with the pinned root. A broken local store then cannot block the default host,
+    and the chain and hostname are still verified.
+    """
+    deadline = time.monotonic() + timeout
+    try:
+        return _open_exchange(request, timeout, deadline, context=None)
+    except _CertificateRefused:
+        if _host_of(request) != DEFAULT_HOSTED_HOST:
+            raise
+        _LOG.warning(
+            "hosted TLS: the system trust store refused the certificate for %s; retrying with the pinned root",
+            DEFAULT_HOSTED_HOST,
+        )
+        return _open_exchange(request, timeout, deadline, context=_pinned_context())
 
 
 def _failure_detail(exc: BaseException) -> str:
