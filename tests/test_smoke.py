@@ -7,6 +7,7 @@ the real home directory or reads the keychain. The one real database is a temp f
 import dataclasses
 import gc
 import json
+import socket
 import sqlite3
 import threading
 import weakref
@@ -41,6 +42,7 @@ from meridian_desktop.data_source import (
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
+from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 from meridian_desktop.ui.home_tab import HomeTab
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
@@ -113,8 +115,33 @@ def _sources(*, probe_state=local_client.HEALTH_NOT_RUNNING, token=None, read_fi
     )
 
 
+class _QuietZotero:
+    """The window's Zotero client. It answers that Zotero is not running, and never runs tasklist.exe or calls the API.
+
+    The Home card and the Zotero panel call status and probe_api on the pool, so a window built with the real client
+    would run a process and a socket that no test controls. Launching and searching are never reached by these tests.
+    """
+
+    def status(self):
+        return ZoteroStatus(
+            exe=None,
+            process_running=False,
+            api=ApiCheck(API_NOT_RUNNING, "Zotero is not answering on its local API."),
+        )
+
+    def probe_api(self):
+        return ApiCheck(API_NOT_RUNNING, "Zotero is not answering on its local API.")
+
+    start_zotero = _unexpected
+    search_items = _unexpected
+
+
 def _window(qtbot, settings_path, sources=None):
-    window = MainWindow(SettingsStore(settings_path), data_sources=sources if sources is not None else _sources())
+    window = MainWindow(
+        SettingsStore(settings_path),
+        data_sources=sources if sources is not None else _sources(),
+        zotero=_QuietZotero(),
+    )
     qtbot.addWidget(window)
     return window
 
@@ -459,6 +486,27 @@ def test_a_load_that_finishes_after_its_tab_is_deleted_touches_no_tab(qtbot, set
     release.set()
     assert QThreadPool.globalInstance().waitForDone(5000)
     qtbot.wait(50)  # let any delivered result reach the event loop
+
+
+def test_a_shown_window_with_fake_sources_opens_no_socket(qtbot, settings_path, monkeypatch):
+    """Every read a shown window starts goes through its own sources, so no socket opens, not even to 127.0.0.1:7878.
+
+    The Tools read once used the default probe, a real loopback GET with a 10 second timeout. A test's pool drain has
+    5 seconds, so that socket could outlast it. Any connect here is recorded and refused at once, so this test is fast.
+    """
+    SettingsStore(settings_path).save(Settings(mode="local"))
+    opened = []
+
+    def record(self, address):
+        opened.append(address)
+        raise OSError("a test opened a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", record)
+    window = _shown_window(qtbot, settings_path, _sources(probe_state=local_client.HEALTH_NOT_RUNNING))
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    qtbot.wait(50)
+    assert opened == []
+    window.close()
 
 
 # The running server's GET /projects rows. Newest first, as the server orders them, and each row
