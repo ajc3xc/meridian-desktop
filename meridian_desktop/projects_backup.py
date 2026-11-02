@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +49,7 @@ NO_TOKEN_TEXT = (
     "Paste your hosted token in Settings and press Save token."
 )
 NO_PROJECTS_TEXT = "Hosted Meridian returned no projects, so no backup was written. Earlier backups are kept."
+NOTHING_CHECKED_TEXT = "No project is checked, so no backup was written. Earlier backups are kept."
 
 ListHosted = Callable[[str, str], list[dict[str, Any]]]  # (hosted URL, token) -> the hosted client's project rows
 
@@ -71,6 +72,16 @@ class NoUsableProjects(Exception):
 
     def __init__(self) -> None:
         super().__init__(NO_PROJECTS_TEXT)
+
+
+class NothingSelected(NoUsableProjects):
+    """A selection holds none of the projects in the rows, so nothing is backed up. Nothing is written or removed.
+
+    The message is NOTHING_CHECKED_TEXT. It is a NoUsableProjects, so a caller that handles that also handles this.
+    """
+
+    def __init__(self) -> None:  # noqa: D107 - the message is the only difference from NoUsableProjects
+        Exception.__init__(self, NOTHING_CHECKED_TEXT)
 
 
 def utc_now() -> datetime:
@@ -125,14 +136,32 @@ def _kept_row(row: Any) -> dict[str, Any] | None:
     return {"id": pid, "name": _text_or_none(row.get("name")), "created_at": _text_or_none(row.get("created_at"))}
 
 
-def write_backup(rows: list[Any], *, folder: Path, taken_at: datetime) -> BackupWritten:
+def kept_projects(rows: list[Any]) -> list[dict[str, Any]]:
+    """The KEPT_FIELDS of each row that has a usable id, in the order given. Any other field is dropped."""
+    return [kept for kept in (_kept_row(row) for row in rows) if kept is not None]
+
+
+def write_backup(
+    rows: list[Any],
+    *,
+    folder: Path,
+    taken_at: datetime,
+    only: Collection[str] | None = None,
+) -> BackupWritten:
     """Write the rows as the newest backup in ``folder``, then prune the backup files (prune_backups).
 
-    Only the KEPT_FIELDS of each row go in, and a row with no usable id is left out. When no row is left, nothing is
-    written or removed, and NoUsableProjects is raised. The message names the file the backup was saved to.
+    Only the KEPT_FIELDS of each row go in, and a row with no usable id is left out. ``only``, when given, keeps just the
+    projects whose id is in it, so the owner's checklist decides what is written. When no project is left, nothing is
+    written or removed: NothingSelected when ``only`` was given, otherwise NoUsableProjects. The message names the file
+    the backup was saved to.
     """
     taken = _utc(taken_at)
-    projects = [kept for kept in (_kept_row(row) for row in rows) if kept is not None]
+    projects = kept_projects(rows)
+    if only is not None:
+        wanted = set(only)
+        projects = [project for project in projects if project["id"] in wanted]
+        if not projects:
+            raise NothingSelected()
     if not projects:
         raise NoUsableProjects()
     folder.mkdir(parents=True, exist_ok=True)
@@ -212,16 +241,19 @@ __all__ = [
     "BACKUP_DIR_NAME",
     "BACKUPS_KEPT",
     "KEPT_FIELDS",
+    "NOTHING_CHECKED_TEXT",
     "NO_PROJECTS_TEXT",
     "NO_TOKEN_TEXT",
     "BackupWritten",
     "NoUsableProjects",
+    "NothingSelected",
     "backed_up_text",
     "backup_dir",
     "backup_hosted",
     "backup_name",
     "day_text",
     "destination_text",
+    "kept_projects",
     "prune_backups",
     "utc_now",
     "write_backup",

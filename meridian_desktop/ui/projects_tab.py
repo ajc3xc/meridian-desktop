@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -71,6 +73,9 @@ NONE_TEXT = "(none)"
 BACKUP_BUTTON_TEXT = "Back up hosted projects to this computer"
 BACKUP_RUNNING_TEXT = "Backing up hosted projects..."
 BACKUP_FAILED_TEXT = "Projects could not be backed up"
+CHOOSE_BUTTON_TEXT = "Choose projects to back up"
+WRITE_CHECKED_TEXT = "Back up checked projects"
+CHOOSING_TEXT = "Reading the hosted project list..."
 
 FIELD_LABELS = {
     "id": "ID",
@@ -174,6 +179,29 @@ class _Backed:
     message: str
 
 
+@dataclass(frozen=True)
+class _Chosen:
+    """The hosted projects a Choose read found, as the kept fields only (projects_backup.kept_projects). No token."""
+
+    rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _BackupRow:
+    """The backup controls: the two buttons, the destination and status lines, and the checklist with its write button.
+
+    ``choice`` holds the checklist and its write button. It is hidden until a Choose read has finished.
+    """
+
+    button: QPushButton
+    choose: QPushButton
+    destination: QLabel
+    status: QLabel
+    choice: QWidget
+    checklist: QListWidget
+    write: QPushButton
+
+
 def _usable_token(token: object) -> bool:
     return isinstance(token, str) and bool(token.strip())
 
@@ -216,6 +244,33 @@ def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
     except projects_backup.NoUsableProjects:
         # An empty answer writes nothing, so the backups already on disk are still there.
         return _Backed(projects_backup.NO_PROJECTS_TEXT)
+    return _Backed(written.message)
+
+
+def _choose_work(store: SettingsStore, sources: DataSources) -> _Chosen | _Backed:
+    """Runs on a worker: reads the hosted project list once, for the checklist. It writes nothing."""
+    settings = store.load().settings
+    token = sources.get_token()
+    if not _usable_token(token):
+        return _Backed(projects_backup.NO_TOKEN_TEXT)
+    rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
+    if not rows:
+        return _Backed(projects_backup.NO_PROJECTS_TEXT)
+    return _Chosen(tuple(rows))
+
+
+def _write_checked(rows: tuple[dict[str, Any], ...], ids: tuple[str, ...]) -> _Backed:
+    """Runs on a worker: writes only the checked projects, from the list the owner chose. It reads nothing."""
+    try:
+        written = projects_backup.write_backup(
+            list(rows),
+            folder=projects_backup.backup_dir(),
+            taken_at=projects_backup.utc_now(),
+            only=ids,
+        )
+    except projects_backup.NoUsableProjects as exc:
+        # Nothing is written or removed, so the backups already on disk are still there.
+        return _Backed(str(exc))
     return _Backed(written.message)
 
 
@@ -263,7 +318,7 @@ class _BackupJob(QRunnable):
     fixed text, or the exception class only. No token, response body or path reaches the UI as an error.
     """
 
-    def __init__(self, owner: object, work: Callable[[], _Backed], delivery: Delivery) -> None:
+    def __init__(self, owner: object, work: Callable[[], _Backed | _Chosen], delivery: Delivery) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._owner = owner
@@ -297,9 +352,10 @@ class ProjectsTab(QWidget):
         self._rows: list[dict[str, Any]] = []
         self._depths: list[int] = []
         # The backup controls exist only once a hosted token has been seen saved, so a tab without a token has none.
-        # A backup runs one at a time.
-        self._backup_widgets: tuple[QPushButton, QLabel, QLabel] | None = None
+        # A backup runs one at a time. The checklist holds the projects the last Choose read found, as kept fields only.
+        self._backup_row: _BackupRow | None = None
         self._backup_running = False
+        self._chosen: tuple[dict[str, Any], ...] = ()
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
@@ -362,6 +418,9 @@ class ProjectsTab(QWidget):
         if isinstance(item.value, _Backed):
             self._show_backup(item.value)
             return
+        if isinstance(item.value, _Chosen):
+            self._show_choices(item.value)
+            return
         loaded = item.value
         if not isinstance(loaded, _Loaded) or loaded.generation != self._generation:
             return
@@ -417,23 +476,29 @@ class ProjectsTab(QWidget):
         The widgets are built the first time a token is seen saved. A tab that never sees one never builds them. The
         destination line is set on each call, so it names the folder the backup would be written to now.
         """
-        if self._backup_widgets is None:
+        if self._backup_row is None:
             if not saved:
                 return
-            self._backup_widgets = self._build_backup_row()
-        button, destination, status = self._backup_widgets
-        destination.setText(projects_backup.destination_text(projects_backup.backup_dir()))
-        for widget in (button, destination, status):
+            self._backup_row = self._build_backup_row()
+        row = self._backup_row
+        row.destination.setText(projects_backup.destination_text(projects_backup.backup_dir()))
+        for widget in (row.button, row.choose, row.destination, row.status):
             widget.setVisible(saved)
+        if not saved:
+            row.choice.setVisible(False)
 
-    def _build_backup_row(self) -> tuple[QPushButton, QLabel, QLabel]:
+    def _build_backup_row(self) -> _BackupRow:
         column = QVBoxLayout()
-        row = QHBoxLayout()
+        buttons = QHBoxLayout()
         button = QPushButton(BACKUP_BUTTON_TEXT, self)
         button.setObjectName("projects-backup-button")
         button.clicked.connect(self._start_backup)
-        row.addWidget(button)
-        row.addStretch(1)
+        choose = QPushButton(CHOOSE_BUTTON_TEXT, self)
+        choose.setObjectName("projects-backup-choose")
+        choose.clicked.connect(self._start_choose)
+        buttons.addWidget(button)
+        buttons.addWidget(choose)
+        buttons.addStretch(1)
         destination = make_selectable(QLabel("", self))
         destination.setObjectName("projects-backup-destination")
         destination.setTextFormat(Qt.TextFormat.PlainText)
@@ -442,32 +507,111 @@ class ProjectsTab(QWidget):
         status.setObjectName("projects-backup-status")
         status.setTextFormat(Qt.TextFormat.PlainText)
         status.setWordWrap(True)
-        column.addLayout(row)
+        # The checklist and its write button. Hidden until a Choose read finishes, and every project starts checked.
+        checklist = QListWidget(self)
+        checklist.setObjectName("projects-backup-checklist")
+        write = QPushButton(WRITE_CHECKED_TEXT, self)
+        write.setObjectName("projects-backup-write-checked")
+        write.clicked.connect(self._start_checked_backup)
+        write.setEnabled(False)
+        choice = QWidget(self)
+        choice_layout = QVBoxLayout(choice)
+        choice_layout.setContentsMargins(0, 0, 0, 0)
+        choice_layout.addWidget(checklist)
+        choice_layout.addWidget(write, 0, Qt.AlignmentFlag.AlignLeft)
+        choice.setVisible(False)
+        checklist.itemChanged.connect(self._on_checklist_changed)
+        column.addLayout(buttons)
         column.addWidget(destination)
         column.addWidget(status)
+        column.addWidget(choice)
         # Below the status line, above the table.
         self.layout().insertLayout(1, column)
-        return button, destination, status
+        return _BackupRow(button, choose, destination, status, choice, checklist, write)
+
+    def _set_busy(self, busy: bool) -> None:
+        """Mark a backup step as running or finished. While one runs, no backup button can start another."""
+        self._backup_running = busy
+        row = self._backup_row
+        if row is None:
+            return
+        row.button.setEnabled(not busy)
+        row.choose.setEnabled(not busy)
+        row.write.setEnabled(not busy and bool(self._checked_ids()))
+
+    def _checked_ids(self) -> list[str]:
+        """The ids of the projects that are checked in the checklist, in the order the list shows them."""
+        row = self._backup_row
+        if row is None:
+            return []
+        ids: list[str] = []
+        for index in range(row.checklist.count()):
+            item = row.checklist.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                ids.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        return ids
+
+    def _on_checklist_changed(self, _item: object = None) -> None:
+        # The write button is off while nothing is checked, so an empty backup is never started.
+        row = self._backup_row
+        if row is not None:
+            row.write.setEnabled(not self._backup_running and bool(self._checked_ids()))
 
     def _start_backup(self, _checked: bool = False) -> None:
         """Start the one backup, which reads every hosted project in one run. A press while one runs does nothing."""
-        if self._backup_running or self._backup_widgets is None:
+        if self._backup_running or self._backup_row is None:
             return
-        button, _destination, status = self._backup_widgets
-        self._backup_running = True
-        button.setEnabled(False)
-        status.setText(BACKUP_RUNNING_TEXT)
+        self._set_busy(True)
+        self._backup_row.status.setText(BACKUP_RUNNING_TEXT)
         # The job gets the store and the sources, not self: a worker never holds the tab.
         work = functools.partial(_backup_work, self._settings, self._sources)
         QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
 
-    def _show_backup(self, report: _Backed) -> None:
-        self._backup_running = False
-        if self._backup_widgets is None:
+    def _start_choose(self, _checked: bool = False) -> None:
+        """Read the hosted project list once, for the checklist. Nothing is written by this step."""
+        if self._backup_running or self._backup_row is None:
             return
-        button, _destination, status = self._backup_widgets
-        button.setEnabled(True)
-        status.setText(report.message)
+        self._set_busy(True)
+        self._backup_row.status.setText(CHOOSING_TEXT)
+        work = functools.partial(_choose_work, self._settings, self._sources)
+        QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
+
+    def _show_choices(self, chosen: _Chosen) -> None:
+        """Fill the checklist with the projects the Choose read found, every one checked, and show it."""
+        row = self._backup_row
+        if row is None:
+            return
+        self._chosen = chosen.rows
+        row.checklist.blockSignals(True)
+        row.checklist.clear()
+        for project in chosen.rows:
+            item = QListWidgetItem(str(project.get("name") or project["id"]), row.checklist)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, project["id"])
+        row.checklist.blockSignals(False)
+        row.choice.setVisible(True)
+        self._set_busy(False)
+        row.status.setText(
+            f"Found {len(chosen.rows)} hosted project(s). All are checked. Uncheck any to leave out, "
+            "then press Back up checked projects."
+        )
+
+    def _start_checked_backup(self, _checked: bool = False) -> None:
+        """Write only the checked projects, from the list the Choose read found. Nothing is read again."""
+        ids = tuple(self._checked_ids())
+        if self._backup_running or self._backup_row is None or not ids:
+            return
+        self._set_busy(True)
+        self._backup_row.status.setText(BACKUP_RUNNING_TEXT)
+        work = functools.partial(_write_checked, self._chosen, ids)
+        QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
+
+    def _show_backup(self, report: _Backed) -> None:
+        self._set_busy(False)
+        if self._backup_row is None:
+            return
+        self._backup_row.status.setText(report.message)
 
     # ----------------------------------------------------------- first show
 
