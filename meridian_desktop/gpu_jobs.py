@@ -47,7 +47,17 @@ REMOTE_REFRESH_SECONDS = 30.0
 # After a failed login, a host is skipped for 1, 2, 4 ... minutes, and never longer than this.
 BACKOFF_CAP_MINUTES = 10
 # The stderr words that mean a login was refused, as opposed to a host that did not answer.
-LOGIN_FAILURE_WORDS = ("permission denied", "host key", "remote host identification has changed")
+LOGIN_FAILURE_WORDS = (
+    "permission denied",
+    "host key",
+    "remote host identification has changed",
+)
+# The owner-facing text for a host whose key is not accepted, and for a changed key. Neither tells anyone to accept a key.
+KEY_TYPE_TEXT = "The host offers no SSH key type this computer accepts. This needs a change on the host, not here."
+CHANGED_KEY_TEXT = (
+    "Host key changed. This may be a reinstall or an attack. "
+    "Do not accept the new key until the host's admin confirms it."
+)
 # A saved host is an SSH alias from the owner's own ssh config: letters, digits, dot, dash, underscore and "@" for
 # user@host. It may not start with a dash, so it can never be read as an option.
 ALIAS_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,62}")
@@ -611,12 +621,13 @@ def _ssh_failure(where: str, result: CommandResult) -> SourceStatus:
     # A changed key prints the identification banner, and ssh then reports the same bare "Host key verification
     # failed." line as an unknown key. So the banner is checked first, and the new key is never offered for acceptance.
     if "remote host identification has changed" in stderr:
-        reason = (
-            "Host key changed. This may be a reinstall or an attack. "
-            "Do not accept the new key until the host's admin confirms it."
-        )
-    elif "host key is known" in stderr or "no matching host key" in stderr:
-        reason = "Host key unknown. Connect to it once in a terminal to accept its key."
+        reason = CHANGED_KEY_TEXT
+    elif "no matching host key type" in stderr:
+        reason = KEY_TYPE_TEXT
+    elif "host key is known" in stderr:
+        # ssh's strict-checking line for a key it does not know. The owner gets the changed-key wording, which never
+        # says to accept a key, rather than a suggestion to accept one.
+        reason = CHANGED_KEY_TEXT
     elif "host key verification failed" in stderr:
         reason = "Host key not accepted. Check the host's key in a terminal before trying again."
     elif "permission denied" in stderr:
@@ -695,6 +706,9 @@ def _login_failed(result: CommandResult) -> bool:
     if result.returncode != 255:
         return False
     stderr = result.stderr.lower()
+    # A key-type mismatch is a setting on the host, not a refused login, so it does not back the host off.
+    if "no matching host key type" in stderr:
+        return False
     return any(word in stderr for word in LOGIN_FAILURE_WORDS)
 
 

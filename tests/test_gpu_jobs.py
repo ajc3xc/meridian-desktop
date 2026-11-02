@@ -613,7 +613,8 @@ def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
                 "Host key verification failed.",
             ),
             STATE_FAILED,
-            "Host key unknown. Connect to it once in a terminal to accept its key.",
+            "Host key changed. This may be a reinstall or an attack. "
+            "Do not accept the new key until the host's admin confirms it.",
         ),
         (
             CommandResult(
@@ -1077,3 +1078,51 @@ def test_a_failed_whole_read_is_a_plain_status():
     (status,) = snapshot.statuses
     assert status.state == STATE_FAILED
     assert status.text == "The GPU read failed. Press Refresh to try again."
+
+
+# ----------------------------------------------------------------- read_host: key-type errors and auth backoff (round 3)
+
+KEY_TYPE_STDERR = "Unable to negotiate with 10.0.0.5 port 22: no matching host key type found. Their offer: ssh-rsa"
+KEY_TYPE_TEXT = "The host offers no SSH key type this computer accepts. This needs a change on the host, not here."
+CHANGED_TEXT = (
+    "Host key changed. This may be a reinstall or an attack. "
+    "Do not accept the new key until the host's admin confirms it."
+)
+STRICT_UNKNOWN_STDERR = (
+    "No ED25519 host key is known for gpu-box and you have requested strict checking.\r\nHost key verification failed."
+)
+
+
+def _host_status(run, alias, backoff):
+    reading = gpu_jobs.read_host(run, alias, backoff)
+    (status,) = [s for s in reading.statuses if s.part == PART_GPUS]
+    return status
+
+
+def _no_accept_instruction(text):
+    lowered = text.lower()
+    return "accept its key" not in lowered and "to accept" not in lowered and "accept the key" not in lowered
+
+
+def test_a_key_type_mismatch_gets_its_own_message_and_no_accept_wording():
+    run = FakeRunner({ssh_key("legacy"): CommandResult(returncode=255, stderr=KEY_TYPE_STDERR)})
+    status = _host_status(run, "legacy", None)
+    assert status.state == STATE_FAILED
+    assert status.text == KEY_TYPE_TEXT
+    assert _no_accept_instruction(status.text)
+
+
+def test_a_key_type_mismatch_is_not_backed_off_as_a_login_failure():
+    clock = FakeClock()
+    backoff = gpu_jobs.HostBackoff(clock=clock)
+    run = FakeRunner({ssh_key("legacy"): CommandResult(returncode=255, stderr=KEY_TYPE_STDERR)})
+    gpu_jobs.read_host(run, "legacy", backoff)
+    assert backoff.remaining("legacy") == 0
+
+
+def test_a_strict_checking_unknown_key_gets_the_changed_key_wording_that_never_says_accept():
+    run = FakeRunner({ssh_key("gpu-box"): CommandResult(returncode=255, stderr=STRICT_UNKNOWN_STDERR)})
+    status = _host_status(run, "gpu-box", None)
+    assert status.state == STATE_FAILED
+    assert status.text == CHANGED_TEXT
+    assert _no_accept_instruction(status.text)
