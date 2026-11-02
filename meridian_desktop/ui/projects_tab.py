@@ -26,6 +26,7 @@ appear, even if a source returned them. Every label and cell is plain text.
 from __future__ import annotations
 
 import functools
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -96,7 +97,12 @@ RESET_CHOOSE_ENDED = "choose_ended"
 RESET_WRITE_REFUSED = "write_refused"
 RESET_TOKEN_UNREADABLE = "token_unreadable"
 RESET_ACCOUNT_UNKNOWN = "account_unknown"
+RESET_EXPIRED = "expired"
+# A checklist older than this is not offered or written again. It counts from the read (see _Chosen.taken_at).
+CHOICE_MAX_AGE_SECONDS = 600
+EXPIRED_TEXT = "The list is older than 10 minutes. Choose again."
 RESET_TEXT = {
+    RESET_EXPIRED: EXPIRED_TEXT,
     RESET_ACCOUNT_UNKNOWN: "The hosted account could not be confirmed, so the checklist was cleared. Choose again.",
     RESET_ACCOUNT_CHANGED: "The hosted account changed, so the checklist was cleared. Choose the projects again.",
     RESET_TOKEN_REMOVED: "No hosted token is saved, so the checklist was cleared.",
@@ -240,6 +246,8 @@ class _Chosen:
     rows: tuple[dict[str, Any], ...]
     message: str = ""
     reset: str = RESET_CHOOSE_ENDED
+    # The clock when the hosted list was read, after the read returned. The checklist's age counts from here.
+    taken_at: float = 0.0
 
 
 @dataclass
@@ -312,7 +320,12 @@ def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
     return _Backed(written.message)
 
 
-def _choose_work(store: SettingsStore, sources: DataSources, generation: int) -> _Chosen:
+def _choose_work(
+    store: SettingsStore,
+    sources: DataSources,
+    generation: int,
+    clock: Callable[[], float] = time.time,
+) -> _Chosen:
     """Runs on a worker: reads the hosted project list once, for the checklist. It writes nothing.
 
     Every outcome is a _Chosen, so the tab never receives a raw exception from this read. A read that fails or finds no
@@ -328,6 +341,8 @@ def _choose_work(store: SettingsStore, sources: DataSources, generation: int) ->
         if not identity:
             return _Chosen(generation, None, (), IDENTITY_UNKNOWN_TEXT, RESET_ACCOUNT_UNKNOWN)
         rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
+        # The list is read at this moment. The age of the checklist counts from here, not from the Choose or the write.
+        taken_at = clock()
     except token_store.TokenReadError:
         return _Chosen(generation, None, (), TOKEN_UNREADABLE_TEXT, RESET_TOKEN_UNREADABLE)
     except hosted_client.HostedError as exc:
@@ -336,7 +351,7 @@ def _choose_work(store: SettingsStore, sources: DataSources, generation: int) ->
         return _Chosen(generation, None, (), f"{BACKUP_FAILED_TEXT} ({exc.__class__.__name__}).")
     if not rows:
         return _Chosen(generation, None, (), projects_backup.NO_PROJECTS_TEXT)
-    return _Chosen(generation, projects_backup.account_key(settings.hosted_url, identity), tuple(rows))
+    return _Chosen(generation, projects_backup.account_key(settings.hosted_url, identity), tuple(rows), taken_at=taken_at)
 
 
 def _write_checked(
@@ -439,11 +454,19 @@ class _BackupJob(QRunnable):
 class ProjectsTab(QWidget):
     """Projects from the resolver, and the detail of the selected row. Read-only."""
 
-    def __init__(self, settings_store: SettingsStore, sources: DataSources, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore,
+        sources: DataSources,
+        parent: QWidget | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("projects-tab")
         self._settings = settings_store
         self._sources = sources
+        # The clock the checklist's age is read from. Tests pass a fake, so no test waits in real time.
+        self._clock = clock
         self._generation = 0
         # Identifies this tab's loads. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
@@ -456,6 +479,8 @@ class ProjectsTab(QWidget):
         self._chosen: tuple[dict[str, Any], ...] = ()
         # The account (URL and token fingerprint) the checklist was read for, or None when no checklist is shown.
         self._chosen_key: str | None = None
+        # When the checklist's list was read (the clock at the moment the read returned). A list older than the limit is reset.
+        self._chosen_at: float | None = None
         # Each Choose takes the next number, and removing the token takes one too. A Choose result with an older number
         # is dropped, so a list read before the token was removed can never show again.
         self._choice_generation = 0
@@ -604,6 +629,10 @@ class ProjectsTab(QWidget):
         if not saved:
             row.choice.setVisible(False)
 
+    def _chosen_is_old(self) -> bool:
+        """True when a checklist is shown and its list was read more than CHOICE_MAX_AGE_SECONDS ago."""
+        return self._chosen_at is not None and self._clock() - self._chosen_at > CHOICE_MAX_AGE_SECONDS
+
     def _sync_account(self, checked: bool, account_key: str | None) -> None:
         """Reset a checklist whose account is not the one this load found, or could not be confirmed.
 
@@ -626,6 +655,7 @@ class ProjectsTab(QWidget):
         self._choice_generation += 1
         self._chosen = ()
         self._chosen_key = None
+        self._chosen_at = None
         row = self._backup_row
         if row is None:
             return
@@ -744,7 +774,7 @@ class ProjectsTab(QWidget):
         self._set_busy(True)
         self._backup_row.status.setText(CHOOSING_TEXT)
         self._choice_generation += 1
-        work = functools.partial(_choose_work, self._settings, self._sources, self._choice_generation)
+        work = functools.partial(_choose_work, self._settings, self._sources, self._choice_generation, self._clock)
         QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
 
     def _show_choices(self, chosen: _Chosen) -> None:
@@ -767,6 +797,7 @@ class ProjectsTab(QWidget):
             return
         self._chosen = chosen.rows
         self._chosen_key = chosen.key
+        self._chosen_at = chosen.taken_at
         row.checklist.blockSignals(True)
         row.checklist.clear()
         for project in chosen.rows:
@@ -783,6 +814,10 @@ class ProjectsTab(QWidget):
         """Write only the checked projects, from the list the Choose read found. Nothing is read again."""
         ids = tuple(self._checked_ids())
         if self._backup_running or self._backup_row is None or not ids or self._chosen_key is None:
+            return
+        if self._chosen_is_old():
+            # A list older than ten minutes is refused, and the checklist is cleared with the reason.
+            self._reset_choice(RESET_EXPIRED)
             return
         self._set_busy(True)
         self._backup_row.status.setText(BACKUP_RUNNING_TEXT)
@@ -805,7 +840,10 @@ class ProjectsTab(QWidget):
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
-        # Each time the tab is shown, reload, so a server or file that started since then is seen.
+        # A checklist read more than ten minutes ago is not offered again. Then the tab reloads, so a server or file that
+        # started since then is seen.
+        if self._chosen_is_old():
+            self._reset_choice(RESET_EXPIRED)
         self.refresh()
 
 

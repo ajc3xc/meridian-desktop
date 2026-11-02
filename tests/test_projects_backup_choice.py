@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QWidget
 
 from _fakes import MemoryKeyring
@@ -280,7 +281,21 @@ def test_the_settings_connection_section_states_the_backup_folder(qtbot, setting
 # ----------------------------------------------------------------- a stale checklist never stays writable
 
 
-def _tab_with_token(qtbot, settings_path, holder, list_hosted):
+class _Clock:
+    """A clock the test moves by hand. The tab reads it for a list's age, so no test waits in real time."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+CLOCK_START = 1_800_000_000.0
+EXPIRED_TEXT = "The list is older than 10 minutes. Choose again."
+
+
+def _tab_with_token(qtbot, settings_path, holder, list_hosted, clock=None):
     """A Projects tab whose saved token is read from ``holder``, so a test can change or remove it between loads."""
     SettingsStore(settings_path).save(Settings(mode="local", hosted_url=HOSTED_URL, local_url=LOCAL_URL))
     sources = DataSources(
@@ -291,7 +306,7 @@ def _tab_with_token(qtbot, settings_path, holder, list_hosted):
         list_hosted=list_hosted,
         read_account=lambda url, token: holder.get("email", ACCOUNT_EMAIL),
     )
-    tab = ProjectsTab(SettingsStore(settings_path), sources)
+    tab = ProjectsTab(SettingsStore(settings_path), sources, clock=clock if clock is not None else _Clock(CLOCK_START))
     qtbot.addWidget(tab)
     tab.refresh()
     status = tab.findChild(QLabel, "projects-status")
@@ -576,6 +591,13 @@ def _trigger_no_projects(qtbot, tab, settings_path, holder):
     return projects_backup.NO_PROJECTS_TEXT
 
 
+def _trigger_expired(qtbot, tab, settings_path, holder):
+    """The list is shown, ten minutes pass, and the tab is shown again: the checklist is reset."""
+    holder["clock"].now += 601
+    tab.showEvent(QShowEvent())
+    return EXPIRED_TEXT
+
+
 def _trigger_token_unreadable(qtbot, tab, settings_path, holder):
     holder["unreadable"] = True
     tab.refresh()
@@ -631,6 +653,7 @@ TRIGGERS = {
     "write_refused": _trigger_write_refused,
     "stale_choose": _trigger_stale_choose,
     "token_unreadable": _trigger_token_unreadable,
+    "expired": _trigger_expired,
 }
 
 
@@ -661,7 +684,8 @@ def test_every_trigger_resets_the_checklist_through_the_same_path(qtbot, setting
         list_hosted=list_hosted,
         read_account=lambda url, token: holder.get("email", ACCOUNT_EMAIL),
     )
-    tab = ProjectsTab(SettingsStore(settings_path), sources)
+    holder["clock"] = _Clock(CLOCK_START)
+    tab = ProjectsTab(SettingsStore(settings_path), sources, clock=holder["clock"])
     qtbot.addWidget(tab)
     tab.refresh()
     qtbot.waitUntil(lambda: tab.findChild(QLabel, "projects-status").text() != LOADING_TEXT, timeout=5000)
@@ -724,3 +748,48 @@ def test_a_removed_token_hides_the_backup_controls_and_is_not_a_read_failure(qtb
     assert tab.findChild(QPushButton, "projects-backup-button").isHidden()
     assert status.text() != TOKEN_UNREADABLE_TEXT
     assert _checklist(tab).count() == 0
+
+
+# ----------------------------------------------------------------- the list expires after ten minutes
+
+
+def test_the_list_age_counts_from_the_read_not_from_the_choose_or_the_write(qtbot, settings_path, local_folder):
+    clock = _Clock(CLOCK_START)
+
+    def list_hosted(url, token):
+        clock.now = CLOCK_START + 300  # the hosted read takes five minutes; the list is read when it returns
+        return list(HOSTED_ROWS)
+
+    tab = _tab_with_token(qtbot, settings_path, {"token": FAKE_TOKEN}, list_hosted, clock=clock)
+    _choose(qtbot, tab)
+    write = _write_button(tab)
+    backup_status = tab.findChild(QLabel, "projects-backup-status")
+    read_at = CLOCK_START + 300
+
+    clock.now = read_at + 600  # exactly ten minutes after the read: still allowed
+    write.click()
+    qtbot.waitUntil(lambda: backup_status.text().startswith("Backed up"), timeout=5000)
+
+    clock.now = read_at + 601  # one second more: refused
+    write.click()
+    qtbot.waitUntil(lambda: backup_status.text() == EXPIRED_TEXT, timeout=5000)
+
+    assert len(list(local_folder.glob(SUBSET_GLOB))) == 1
+
+
+def test_a_checklist_older_than_ten_minutes_is_reset_when_the_tab_is_shown(qtbot, settings_path, local_folder):
+    clock = _Clock(CLOCK_START)
+    tab = _tab_with_token(
+        qtbot, settings_path, {"token": FAKE_TOKEN}, lambda url, token: list(HOSTED_ROWS), clock=clock
+    )
+    _choose(qtbot, tab)
+
+    clock.now = CLOCK_START + 600
+    tab.showEvent(QShowEvent())
+    assert _checklist(tab).count() == 3
+
+    clock.now = CLOCK_START + 601
+    tab.showEvent(QShowEvent())
+    assert _checklist(tab).count() == 0
+    assert not _write_button(tab).isEnabled()
+    assert tab.findChild(QLabel, "projects-backup-status").text() == EXPIRED_TEXT
