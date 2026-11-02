@@ -659,8 +659,8 @@ def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
                 "Host key verification failed.",
             ),
             STATE_FAILED,
-            "Host key changed. This may be a reinstall or an attack. "
-            "Do not accept the new key until the host's admin confirms it.",
+            "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect "
+            "once in a terminal to add it. Do not add a fingerprint you have not verified.",
         ),
         (
             CommandResult(
@@ -1167,12 +1167,34 @@ def test_a_key_type_mismatch_is_not_backed_off_as_a_login_failure():
     assert backoff.remaining("legacy") == 0
 
 
-def test_a_strict_checking_unknown_key_gets_the_changed_key_wording_that_never_says_accept():
+FIRST_CONTACT_TEXT = (
+    "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect once "
+    "in a terminal to add it. Do not add a fingerprint you have not verified."
+)
+
+
+def test_a_first_contact_host_gets_the_not_in_known_hosts_text_that_never_says_changed():
+    # OpenSSH prints the "No <type> host key is known" line for a host with no known key. That is first contact, not a
+    # changed key, so the text must not say the key changed.
     run = FakeRunner({ssh_key("gpu-box"): CommandResult(returncode=255, stderr=STRICT_UNKNOWN_STDERR)})
     status = _host_status(run, "gpu-box", None)
     assert status.state == STATE_FAILED
-    assert status.text == CHANGED_TEXT
+    assert status.text == FIRST_CONTACT_TEXT
+    assert "changed" not in status.text.lower()
     assert _no_accept_instruction(status.text)
+
+
+def test_a_changed_banner_keeps_the_changed_key_text_with_no_accept_advice():
+    changed = CommandResult(
+        returncode=255,
+        stderr="WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\r\nHost key verification failed.",
+    )
+    run = FakeRunner({ssh_key("gpu-box"): changed})
+    status = _host_status(run, "gpu-box", None)
+    assert status.state == STATE_FAILED
+    assert status.text == CHANGED_TEXT
+    assert "accept its key" not in status.text.lower()
+    assert "to accept" not in status.text.lower()
 
 
 def test_too_many_authentication_failures_backs_the_host_off():

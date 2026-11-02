@@ -55,6 +55,12 @@ LOGIN_FAILURE_WORDS = (
 )
 # The owner-facing text for a host whose key is not accepted, and for a changed key. Neither tells anyone to accept a key.
 KEY_TYPE_TEXT = "The host offers no SSH key type this computer accepts. This needs a change on the host, not here."
+# The "No <type> host key is known" line is printed for first contact, and for a key type the host does not offer. The
+# text says it is not in known_hosts and never says the key changed.
+FIRST_CONTACT_TEXT = (
+    "This host is not in known_hosts for this key type. Check its fingerprint with the host's admin, then connect once "
+    "in a terminal to add it. Do not add a fingerprint you have not verified."
+)
 CHANGED_KEY_TEXT = (
     "Host key changed. This may be a reinstall or an attack. "
     "Do not accept the new key until the host's admin confirms it."
@@ -658,9 +664,8 @@ def _ssh_failure(where: str, result: CommandResult) -> SourceStatus:
     elif "no matching host key type" in stderr:
         reason = KEY_TYPE_TEXT
     elif "host key is known" in stderr:
-        # ssh's strict-checking line for a key it does not know. The owner gets the changed-key wording, which never
-        # says to accept a key, rather than a suggestion to accept one.
-        reason = CHANGED_KEY_TEXT
+        # ssh's strict-checking line for a host with no known key: first contact, or a key type it has not recorded.
+        reason = FIRST_CONTACT_TEXT
     elif "host key verification failed" in stderr:
         reason = "Host key not accepted. Check the host's key in a terminal before trying again."
     elif "permission denied" in stderr:
