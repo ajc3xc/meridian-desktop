@@ -32,7 +32,13 @@ from meridian_desktop.ui.runpod_panel import (
     REMOVE_KEY_TITLE,
     RunPodPanel,
 )
+from meridian_desktop import local_client
 from meridian_desktop.ui.settings_group import CollapsibleGroup
+
+# The conftest guard replaces the local RunPod calls for every test. This test talks to its own loopback server on purpose,
+# so it takes the real functions, captured here at import, before that guard runs.
+REAL_RUNPOD_CHECK = local_client.runpod_check
+REAL_RUNPOD_LIST_PODS = local_client.runpod_list_pods
 
 FAKE_KEY = "test-key-not-real"
 # /projects is the Projects tab's read-only GET on the local server, made when the window first shows.
@@ -233,6 +239,8 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp, monkey
     restore_font = _use_readable_font(qapp)
     owner = _OwnerSaysYes()
     monkeypatch.setattr(runpod_panel_module, "ask_yes_no", owner)
+    monkeypatch.setattr(local_client, "runpod_check", REAL_RUNPOD_CHECK)
+    monkeypatch.setattr(local_client, "runpod_list_pods", REAL_RUNPOD_LIST_PODS)
     try:
         settings_file = tmp_path / "settings" / "settings.json"
         SettingsStore(settings_file).save(Settings(local_url=stub.url))
