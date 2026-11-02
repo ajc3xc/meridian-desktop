@@ -15,7 +15,8 @@ Every change is planned first. plan_local_cache is a dry run and writes nothing.
 <name>.meridian-desktop-backup-<stamp>, writes the new text to a temp file in the same folder and replaces the file. It
 refuses when the file changed after it was planned. A file that does not parse is refused and never rewritten.
 
-Ownership. The server names are owned by this module, in both clients. Codex entries are written in one managed block,
+Ownership. The server names are owned by this module, in both clients, and so is every name with the meridian-custom- prefix
+(the owner's custom connectors, see custom_connectors.py). Codex entries are written in one managed block,
 between MARK_BEGIN and MARK_END, which this module rewrites. A table for one of these names that already sits outside
 that block (the core's client setup writes the same names) is left exactly as it is, and the plan says so. The core's
 block is never edited, because its own apply removes and re-renders it. Claude Desktop entries are overwritten under
@@ -77,6 +78,9 @@ NAMES: dict[str, dict[str, str]] = {
 }
 # Serena's context follows the client, as in the core's client setup.
 SERENA_CONTEXT = {CLAUDE_DESKTOP: "claude-code", CODEX: "codex"}
+# The owner's custom connectors (custom_connectors.py) are written under this prefix. A name the owner gives can then never
+# clash with a Meridian server, and any entry with the prefix is one this module owns, so one removed from the list is removed.
+CUSTOM_PREFIX = "meridian-custom-"
 
 _MANAGED_CODEX_KEYS = frozenset({"command", "args", "env", "enabled", "disabled_tools"})
 _HEADER = re.compile(r"^\s*\[(?!\[)\s*([^\]]+?)\s*\]\s*(?:#.*)?$")
@@ -105,6 +109,15 @@ class ServerSpec:
         if self.env:
             entry["env"] = dict(self.env)
         return entry
+
+
+@dataclass(frozen=True)
+class CustomCache:
+    """The owner's custom connectors for the cache: the stdio specs that resolved on this computer, and a note for each
+    one left out. Built by custom_connectors.cache_entries. Empty means none is written."""
+
+    specs: tuple[ServerSpec, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,7 +152,8 @@ class LocalCachePlan:
 
     @property
     def notes(self) -> tuple[str, ...]:
-        return tuple(note for plan in self.files for note in plan.notes)
+        # A note two clients share (a custom connector left out) is shown once.
+        return tuple(dict.fromkeys(note for plan in self.files for note in plan.notes))
 
 
 def find_command(name: str, fallbacks: tuple[Path, ...] = ()) -> str | None:
@@ -230,8 +244,19 @@ def build_specs(client: str, core_checkout: str, resolve: Resolve, home: Path) -
     return specs, notes
 
 
+def _owned_names(client: str, existing: Iterable[str]) -> set[str]:
+    """The names this module owns in one client: the Meridian servers, and every custom connector name already there."""
+    return {NAMES[client][server] for server in SERVER_ORDER} | {name for name in existing if name.startswith(CUSTOM_PREFIX)}
+
+
+def _server_names(document: Mapping) -> Iterable[str]:
+    """The names in a parsed Codex config's mcp_servers table, or nothing when the table is absent or not a table."""
+    servers = document.get("mcp_servers")
+    return servers.keys() if isinstance(servers, dict) else ()
+
+
 def _wanted(
-    client: str, specs: Mapping[str, ServerSpec], disabled: Iterable[str]
+    client: str, specs: Mapping[str, ServerSpec], disabled: Iterable[str], custom: CustomCache
 ) -> tuple[dict[str, tuple[ServerSpec, tuple[str, ...]]], list[str]]:
     """The servers to write, each with its switched-off tool names, plus the notes for servers left out."""
     off = tool_catalog.normalise(disabled)
@@ -252,6 +277,8 @@ def _wanted(
                 f"{len(disabled_names)} tool(s) switched off in Meridian Desktop stay available there."
             )
         wanted[server] = (spec, disabled_names)
+    for spec in custom.specs:
+        wanted[spec.server] = (spec, ())
     return wanted, notes
 
 
@@ -283,6 +310,7 @@ def plan_claude_desktop(
     resolve: Resolve = find_command,
     home: Path | None = None,
     require_folder: bool = True,
+    custom: CustomCache = CustomCache(),
 ) -> FilePlan:
     """The Claude Desktop change for ``path``, as a dry run. Writes nothing.
 
@@ -291,8 +319,8 @@ def plan_claude_desktop(
     """
     home = Path.home() if home is None else home
     specs, build_notes = build_specs(CLAUDE_DESKTOP, core_checkout, resolve, home)
-    wanted, notes = _wanted(CLAUDE_DESKTOP, specs, disabled)
-    notes = build_notes + notes
+    wanted, notes = _wanted(CLAUDE_DESKTOP, specs, disabled, custom)
+    notes = build_notes + notes + list(custom.notes)
     source = _read(path)
     skipped = _missing_folder(CLAUDE_DESKTOP, path, source, require_folder, notes)
     if skipped is not None:
@@ -300,7 +328,6 @@ def plan_claude_desktop(
     text = source or ""
     bom = text.startswith(_BOM)
     body = text[1:] if bom else text
-    owned = {NAMES[CLAUDE_DESKTOP][server] for server in SERVER_ORDER}
     wanted_by_name = {spec.name: spec.json_entry() for spec, _ in wanted.values()}
 
     try:
@@ -314,6 +341,9 @@ def plan_claude_desktop(
         current = {}
     if not isinstance(current, dict):
         return _refused(CLAUDE_DESKTOP, path, source, f"{path} has a non-object mcpServers value; refusing to rewrite it", notes)
+
+    # The names being written count as owned too, so a custom entry that is not in the file yet is not refused as foreign.
+    owned = _owned_names(CLAUDE_DESKTOP, [*current, *wanted_by_name])
 
     merged: dict = {}
     for name, value in current.items():
@@ -436,12 +466,13 @@ def plan_codex(
     resolve: Resolve = find_command,
     home: Path | None = None,
     require_folder: bool = True,
+    custom: CustomCache = CustomCache(),
 ) -> FilePlan:
     """The Codex change for ``path``, as a dry run. Writes nothing. ``require_folder`` as for plan_claude_desktop."""
     home = Path.home() if home is None else home
     specs, build_notes = build_specs(CODEX, core_checkout, resolve, home)
-    wanted, notes = _wanted(CODEX, specs, disabled)
-    notes = build_notes + notes
+    wanted, notes = _wanted(CODEX, specs, disabled, custom)
+    notes = build_notes + notes + list(custom.notes)
     source = _read(path)
     skipped = _missing_folder(CODEX, path, source, require_folder, notes)
     if skipped is not None:
@@ -450,7 +481,6 @@ def plan_codex(
     bom = text.startswith(_BOM)
     body = text[1:] if bom else text
     eol = "\r\n" if "\r\n" in body else "\n"
-    owned = {NAMES[CODEX][server] for server in SERVER_ORDER}
 
     try:
         old_document = tomllib.loads(body) if body.strip() else {}
@@ -462,13 +492,15 @@ def plan_codex(
     except LocalCacheError as exc:
         return _refused(CODEX, path, source, str(exc), notes)
 
+    # The names being written count as owned too, so a custom entry that is not in the file yet is not refused as foreign.
+    owned = _owned_names(CODEX, [*_server_names(old_document), *(spec.name for spec, _ in wanted.values())])
     foreign = _owned_headers(outside, owned)
     preserved = _preserved_keys(old_block, owned)
     rendered: list[tuple[ServerSpec, tuple[str, ...]]] = [
-        wanted[server] for server in SERVER_ORDER if server in wanted and wanted[server][0].name not in foreign
+        entry for entry in wanted.values() if entry[0].name not in foreign
     ]
     rendered_names = {spec.name for spec, _ in rendered}
-    for name in NAMES[CODEX].values():
+    for name in sorted(owned):
         if name in foreign and name not in rendered_names:
             notes.append(f"{name} is left as it is: it is set outside the Meridian Desktop block (Client setup).")
 
@@ -615,6 +647,7 @@ def plan_local_cache(
     resolve: Resolve = find_command,
     home: Path | None = None,
     require_folder: bool = True,
+    custom: CustomCache = CustomCache(),
 ) -> LocalCachePlan:
     """The dry run for both clients. Writes nothing. Pass explicit paths to keep tests out of the real configs."""
     claude = claude_path if claude_path is not None else default_claude_desktop_config()
@@ -628,6 +661,7 @@ def plan_local_cache(
                 resolve=resolve,
                 home=home,
                 require_folder=require_folder,
+                custom=custom,
             ),
             plan_codex(
                 codex,
@@ -636,6 +670,7 @@ def plan_local_cache(
                 resolve=resolve,
                 home=home,
                 require_folder=require_folder,
+                custom=custom,
             ),
         )
     )
@@ -674,6 +709,7 @@ def sync_local_cache(
     resolve: Resolve = find_command,
     home: Path | None = None,
     require_folder: bool = True,
+    custom: CustomCache = CustomCache(),
 ) -> list[str]:
     """Plan, then write, both clients. Returns the plain lines to log."""
     plan = plan_local_cache(
@@ -684,6 +720,7 @@ def sync_local_cache(
         resolve=resolve,
         home=home,
         require_folder=require_folder,
+        custom=custom,
     )
     return list(plan.notes) + apply_local_cache(plan)
 
@@ -691,6 +728,8 @@ def sync_local_cache(
 __all__ = [
     "CLAUDE_DESKTOP",
     "CODEX",
+    "CUSTOM_PREFIX",
+    "CustomCache",
     "LocalCacheError",
     "LocalCachePlan",
     "FilePlan",
