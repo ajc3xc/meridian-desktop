@@ -44,6 +44,7 @@ from meridian_desktop.client_setup_runner import (
     ClientRow,
     ClientSetupRunner,
     CommandResult,
+    message_with_detail,
     names_text,
     unchecked_rows,
 )
@@ -646,7 +647,7 @@ class ClientSetupSection(QWidget):
         for row in result.rows:
             self._rows[row.client] = row
         self._render_rows()
-        self._last_status = result.message or DEFAULT_STATUS_TEXT
+        self._last_status = message_with_detail(result.message, result.detail) or DEFAULT_STATUS_TEXT
         self._refresh_status()
         self._apply_enablement()
 
@@ -654,7 +655,7 @@ class ClientSetupSection(QWidget):
         assert isinstance(result, CommandResult)
         label = LABELS.get(pending.client, pending.client)
         if not result.ok:
-            _set_message(self._result, result.message)
+            _set_message(self._result, message_with_detail(result.message, result.detail))
             return
         change = result.changes[0]
         if change.action == "unchanged":
@@ -675,7 +676,7 @@ class ClientSetupSection(QWidget):
         assert isinstance(result, CommandResult)
         label = LABELS.get(pending.client, pending.client)
         if not result.ok:
-            _set_message(self._result, result.message)
+            _set_message(self._result, message_with_detail(result.message, result.detail))
             return
         change = result.changes[0]
         if change.action == "unchanged":

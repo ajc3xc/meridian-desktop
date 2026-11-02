@@ -7,6 +7,7 @@ credential store, the real user home directory, or the real Claude Desktop and C
 config files, even by accident.
 """
 
+import gc
 import os
 
 import keyring
@@ -54,6 +55,28 @@ def no_loopback_probe_waits(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_zotero_reads(monkeypatch):
+    """Zotero's process list and its local API are the machine's own state, and a window reads them by default.
+
+    A window or a runner built without a Zotero fake reaches zotero_client's defaults. On Windows the process list is a
+    real tasklist.exe launch, and the API probe is a real GET to 127.0.0.1:23119, which answers whenever the owner's
+    Zotero is open. So those results depended on the machine, and each read ran as a real process or socket on a pool
+    thread. Both are replaced here: no process is launched, no socket opens, and the API reads as not running. Tests that
+    call zotero_client directly pass their own reader, and test_zotero_client imports http_get by name, so it keeps the
+    real function."""
+    from meridian_desktop import zotero_client
+
+    def no_process_listed() -> str:
+        return ""
+
+    def api_not_running(base_url, path, headers, timeout):
+        raise zotero_client.ZoteroError("not_running", zotero_client.NOT_RUNNING_MESSAGE)
+
+    monkeypatch.setattr(zotero_client, "_tasklist_output", no_process_listed)
+    monkeypatch.setattr(zotero_client, "http_get", api_not_running)
+
+
+@pytest.fixture(autouse=True)
 def no_modal_dialog(monkeypatch):
     """A modal dialog never returns offscreen, so a test that opens one by accident would hang the whole run.
 
@@ -72,17 +95,23 @@ def no_modal_dialog(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def drain_pool_jobs():
+def drain_pool_jobs(request):
     """Let every thread-pool job a test started finish before the next test starts.
 
     A window that is shown starts its Home checks on the pool. A check still running when a test ends would emit its
     result during a later test, and that test's recording of the shared delivery object would count it. Waiting here
     keeps each test's deliveries to its own.
+
+    A window test also leaves cyclic garbage, which holds Qt widgets. The collector runs on whichever thread allocates,
+    so a pool worker could collect a widget left by an earlier test, and free it off the GUI thread. That is an access
+    violation on Windows. So a qtbot test collects its garbage here, on the GUI thread, before the next test starts.
     """
     yield
     from PySide6.QtCore import QThreadPool
 
     QThreadPool.globalInstance().waitForDone(5000)
+    if "qtbot" in request.fixturenames:
+        gc.collect()
 
 
 @pytest.fixture(autouse=True)

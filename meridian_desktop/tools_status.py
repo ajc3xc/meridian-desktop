@@ -337,6 +337,9 @@ def _not_ready_text(settings: Settings) -> str:
     folder = Path(checkout)
     if not folder.is_dir() or not (folder / "meridian" / "__init__.py").is_file():
         return CHECKOUT_INVALID_TEXT
+    if not (folder / "meridian" / "client_setup.py").is_file():
+        # The runner refuses a checkout without the client setup command, so the panel says the same thing.
+        return CHECKOUT_INVALID_TEXT
     if not Path(python).is_file():
         return PYTHON_MISSING_TEXT
     # The runner refused for a reason this mirror does not see (for example, a change between the two reads).

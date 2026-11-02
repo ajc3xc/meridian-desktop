@@ -62,6 +62,7 @@ def make_core(tmp_path: Path) -> Path:
     checkout = tmp_path / "core"
     (checkout / "meridian").mkdir(parents=True)
     (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "meridian" / "client_setup.py").write_text("", encoding="utf-8")
     return checkout
 
 
@@ -402,6 +403,48 @@ def test_a_failed_check_says_why_and_leaves_rows_not_checked(qtbot, settings_pat
 def _ready_store(qtbot, settings_path, tmp_path):
     store = configured_store(tmp_path, settings_path)
     return store
+
+
+def test_a_failed_check_shows_the_last_stderr_lines_on_screen(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    stderr = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'meridian.client_setup'"
+    section = _section(qtbot, store, run=FakeRun(lambda argv: CommandOutput(1, "", stderr)))
+
+    _button(section, "client-setup-check").click()
+
+    needle = "No module named 'meridian.client_setup'"
+    qtbot.waitUntil(lambda: needle in _text(section, "client-setup-status"), timeout=5000)
+    assert "exit code 1" in _text(section, "client-setup-status")
+
+
+def test_a_checkout_without_the_setup_command_is_named_and_nothing_runs(qtbot, settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    (tmp_path / "core" / "meridian" / "client_setup.py").unlink()
+    run = FakeRun(lambda argv: out(results()))
+    section = _section(qtbot, store, run=run)
+
+    _button(section, "client-setup-check").click()
+
+    qtbot.waitUntil(lambda: "has no client setup command" in _text(section, "client-setup-status"), timeout=5000)
+    assert run.argvs == []
+
+
+def test_a_failed_change_shows_the_stderr_lines_in_the_result_line(qtbot, settings_path, tmp_path):
+    store = _ready_store(qtbot, settings_path, tmp_path)
+    config = _existing(tmp_path, "desktop.json")
+
+    def respond(argv):
+        if "apply" in argv:
+            return CommandOutput(1, "", "PermissionError: claude_desktop_config.json is locked")
+        return out(results(entry("claude-desktop", config, "would_write", added=["meridian-docs"])))
+
+    section = _section(qtbot, store, run=FakeRun(respond))
+    _button(section, "client-setup-check").click()
+    _wait_for_state(qtbot, section, "claude-desktop", WOULD_CHANGE)
+
+    _button(section, "client-setup-claude-desktop-apply").click()
+
+    _wait_for_result(qtbot, section, "PermissionError: claude_desktop_config.json is locked")
 
 
 def test_cancelling_the_dialog_runs_nothing(qtbot, settings_path, tmp_path):
