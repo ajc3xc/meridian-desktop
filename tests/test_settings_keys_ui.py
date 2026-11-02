@@ -44,6 +44,7 @@ GROUP_ORDER = (
     "settings-group-client-setup",
     "settings-group-tools",
     "settings-group-connections",
+    "settings-group-gpu-hosts",
     "settings-group-diagnostics",
 )
 GROUP_TITLES = (
@@ -53,6 +54,7 @@ GROUP_TITLES = (
     "Client setup",
     "MCP tools",
     "Connections",
+    "GPU hosts over SSH",
     "Diagnostics (logs)",
 )
 TAB_WIDTH = 1280
@@ -159,7 +161,7 @@ def _seed(settings_path, backend, *, names=("OpenAI", "Anthropic"), value_for=No
 # ----------------------------------------------------------- groups
 
 
-def test_the_seven_groups_are_in_the_requested_order(qtbot, settings_path):
+def test_the_eight_groups_are_in_the_requested_order(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
 
     assert _group_names(tab) == list(GROUP_ORDER)

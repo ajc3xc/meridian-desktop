@@ -33,7 +33,7 @@ from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar, downloading_text, ready_text
 from meridian_desktop.version import APP_VERSION
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Settings")
 LOCAL = "http://127.0.0.1:7999"
 HOSTED = "https://usemeridian.us"
 PID = "5787cc92-ba7d-4788-b17c-28ab7938b839"
