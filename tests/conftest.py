@@ -145,6 +145,29 @@ def drain_pool_jobs(request):
 
 
 @pytest.fixture(autouse=True)
+def fresh_shared_delivery(monkeypatch):
+    """Give each test its own shared delivery object, with the recorder connected before any page of the test exists.
+
+    A pool job takes the shared object when it starts, so a job from an earlier test emits to that test's object, and
+    nothing of this test is connected to it. A page connects to the object that is current when the page is built, so
+    the pages of this test connect to this test's object. The recorder is the object's first connection, so it records
+    each delivery before a page's queued handler is posted. Once the pool has drained, every connection of the object is
+    dropped.
+    """
+    from PySide6.QtCore import QThreadPool
+
+    from _shared_delivery import start_recording
+    from meridian_desktop.ui import delivery as delivery_module
+
+    fresh = delivery_module.Delivery()
+    monkeypatch.setattr(delivery_module, "_SHARED", fresh)
+    start_recording(fresh)
+    yield fresh
+    QThreadPool.globalInstance().waitForDone(5000)
+    fresh.delivered.disconnect()
+
+
+@pytest.fixture(autouse=True)
 def no_hosted_network(monkeypatch):
     """The connection bar's check and the Settings sign-in reach the hosted host through hosted_session.live_transport.
     No test may reach it, so that transport is replaced here by one that fails as an unreachable host would. A test

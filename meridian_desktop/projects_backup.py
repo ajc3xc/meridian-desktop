@@ -167,11 +167,23 @@ def backup_hosted(
 
 
 def _backup_files(folder: Path) -> list[Path]:
-    """The backup files in ``folder``, newest first. Only names this module writes are listed."""
+    """The backup files in ``folder``, newest first. Only names this module writes are listed.
+
+    Each entry is checked on its own. An entry that cannot be stat'ed is skipped, and the rest of the folder is still listed.
+    """
     try:
-        found = [path for path in folder.iterdir() if path.is_file() and _NAME.fullmatch(path.name)]
+        entries = list(folder.iterdir())
     except OSError:
         return []
+    found: list[Path] = []
+    for path in entries:
+        if not _NAME.fullmatch(path.name):
+            continue
+        try:
+            if path.is_file():
+                found.append(path)
+        except OSError:
+            continue
     return sorted(found, key=lambda path: path.name, reverse=True)
 
 
@@ -180,7 +192,8 @@ def _holds_projects(path: Path) -> bool:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         projects = document["projects"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        # A file nested past the parser's limit raises RecursionError. It holds no project, so it is not the one to keep.
         return False
     if not isinstance(projects, list):
         return False

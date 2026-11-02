@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client, hosted_session, token_store
+from meridian_desktop import hosted_client, hosted_session, projects_backup, token_store
 from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
@@ -526,6 +526,12 @@ class SettingsTab(QWidget):
         self._db_message = _label(body, "settings-db-message")
         self._db_message.setVisible(False)
         grid.addWidget(self._db_message, 10, 0, 1, 4)
+
+        # Project backups: the folder the Projects tab writes its hosted-project backups to. Read-only.
+        grid.addWidget(_caption(body, "Project backups:"), 11, 0)
+        destination = projects_backup.destination_text(projects_backup.backup_dir())
+        self._backup_destination = _label(body, "settings-backup-destination", destination)
+        grid.addWidget(self._backup_destination, 11, 1, 1, 2)
 
         group.add_layout(grid)
         return group
