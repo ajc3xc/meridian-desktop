@@ -29,11 +29,13 @@ from meridian_desktop.client_setup_runner import (
     IN_PLACE,
     KIND_BAD_OUTPUT,
     KIND_CANNOT_START,
+    KIND_FAILED,
     KIND_NOT_CONFIGURED,
     KIND_NOT_COVERED,
     KIND_TIMEOUT,
     MISSING,
     NO_RESULT_TEXT,
+    NO_SETUP_COMMAND_TEXT,
     NOT_CHECKED,
     NOT_COVERED,
     NOT_READABLE,
@@ -41,11 +43,15 @@ from meridian_desktop.client_setup_runner import (
     NOT_SET_PYTHON_TEXT,
     PARTIAL_TEXT,
     PYTHON_MISSING_TEXT,
+    STDERR_HEADING_TEXT,
+    STDERR_LINE_CHARS,
+    STDERR_TAIL_LINES,
     WOULD_CHANGE,
     ClientChange,
     ClientRow,
     ClientSetupRunner,
     CommandOutput,
+    message_with_detail,
     names_text,
     parse_changes,
     run_process,
@@ -63,10 +69,11 @@ TRACE_LEAK = "SECRET-TRACE-DO-NOT-SHOW"
 
 
 def make_core(tmp_path: Path) -> Path:
-    """A folder that looks like a Meridian core checkout: it holds the meridian package."""
+    """A folder that looks like a Meridian core checkout: the meridian package and its client setup command."""
     checkout = tmp_path / "core"
     (checkout / "meridian").mkdir(parents=True)
     (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "meridian" / "client_setup.py").write_text("", encoding="utf-8")
     return checkout
 
 
@@ -439,15 +446,105 @@ def test_a_core_error_is_read_per_client_so_one_bad_file_does_not_hide_the_rest(
     assert row_for(result, "codex").state == IN_PLACE
 
 
-def test_a_failure_without_the_core_error_shape_shows_the_exit_code_only(settings_path, tmp_path):
+def test_a_failure_shows_the_last_stderr_lines_with_secrets_redacted(settings_path, tmp_path):
+    """The reported failure: the core command exits 1 and writes its reason to stderr, not to the JSON error shape."""
     store = configured_store(tmp_path, settings_path)
-    run = FakeRun(lambda argv: CommandOutput(1, "", f"Traceback (most recent call last): {TRACE_LEAK}"))
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "<frozen runpy>", line 198, in _run_module_as_main\n'
+        f"api_key={TRACE_LEAK}\n"
+        "ModuleNotFoundError: No module named 'meridian.client_setup'\n"
+    )
+    run = FakeRun(lambda argv: CommandOutput(1, "", stderr))
 
     result = ClientSetupRunner(store, run=run).check()
 
     assert result.message == FAILED_TEXT.format(code=1)
+    assert result.detail.startswith(STDERR_HEADING_TEXT)
+    assert "No module named 'meridian.client_setup'" in result.detail
+    assert "api_key=" in result.detail
+    assert TRACE_LEAK not in result.detail
     assert TRACE_LEAK not in result.message
     assert all(row.state == NOT_CHECKED for row in result.rows if row.covered)
+
+
+def test_only_the_last_stderr_lines_are_shown_and_a_long_line_is_cut(settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    early = [f"early line {number}" for number in range(1, 11)]
+    late = [f"late line {number}" for number in range(1, STDERR_TAIL_LINES)]
+    long_line = "x" * (STDERR_LINE_CHARS * 3)
+    stderr = "\n".join([*early, *late, long_line]) + "\n"
+    run = FakeRun(lambda argv: CommandOutput(1, "", stderr))
+
+    result = ClientSetupRunner(store, run=run).check()
+
+    lines = result.detail.splitlines()
+    assert lines[0] == STDERR_HEADING_TEXT
+    assert len(lines) == 1 + STDERR_TAIL_LINES
+    assert not any("early line" in line for line in lines)
+    assert all(len(line) <= STDERR_LINE_CHARS for line in lines[1:])
+
+
+def test_an_empty_stderr_adds_no_detail(settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    run = FakeRun(lambda argv: CommandOutput(3, "", "   \n"))
+
+    result = ClientSetupRunner(store, run=run).check()
+
+    assert result.message == FAILED_TEXT.format(code=3)
+    assert result.detail == ""
+
+
+def test_a_failed_preview_carries_the_stderr_detail(settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    run = FakeRun(lambda argv: CommandOutput(1, "", "ModuleNotFoundError: No module named 'meridian'"))
+
+    change = ClientSetupRunner(store, run=run).preview("codex", "apply")
+
+    assert change.ok is False and change.kind == KIND_FAILED
+    assert "No module named 'meridian'" in change.detail
+
+
+def test_a_checkout_without_the_client_setup_command_is_refused_before_any_process(settings_path, tmp_path):
+    """The root cause: a core checkout that predates meridian/client_setup.py used to start the command and fail."""
+    checkout = make_core(tmp_path)
+    (checkout / "meridian" / "client_setup.py").unlink()
+    store = SettingsStore(settings_path)
+    store.save(Settings(core_checkout=str(checkout), core_python=make_python(tmp_path)))
+    run = FakeRun(lambda argv: CommandOutput(0, "{}", ""))
+
+    result = ClientSetupRunner(store, run=run).check()
+    change = ClientSetupRunner(store, run=run).run_change("codex", "apply")
+
+    assert run.calls == []
+    assert result.configured is False
+    assert result.message == NO_SETUP_COMMAND_TEXT.format(path=str(checkout))
+    assert change.ok is False and change.kind == KIND_NOT_CONFIGURED
+    assert all(row.state == NOT_CHECKED for row in result.rows if row.covered)
+
+
+def test_a_client_that_fails_without_json_shows_its_stderr_in_its_row(settings_path, tmp_path):
+    store = configured_store(tmp_path, settings_path)
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    bad_json = "claude_desktop_config.json is not valid JSON; refusing to rewrite it"
+
+    def respond(argv):
+        if argv[-1] == "all":
+            return core_error(bad_json)
+        if "codex" in argv:
+            return CommandOutput(1, "", "PermissionError: codex config is locked")
+        return out(results(entry("claude-desktop", config, "unchanged")))
+
+    result = ClientSetupRunner(store, run=FakeRun(respond)).check()
+
+    codex = row_for(result, "codex")
+    assert codex.state == NOT_READABLE
+    assert FAILED_TEXT.format(code=1) in codex.detail
+    assert "PermissionError: codex config is locked" in codex.detail
+    assert message_with_detail("", "") == ""
+    assert message_with_detail("one", "") == "one"
+    assert message_with_detail("one", "two") == "one\ntwo"
 
 
 def test_output_that_is_not_json_is_bad_output(settings_path, tmp_path):
