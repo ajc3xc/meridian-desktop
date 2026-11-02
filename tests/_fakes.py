@@ -68,6 +68,28 @@ class FailingKeyring:
         raise OSError(f"delete failed for {self._secret}")
 
 
+class FakeUserRegistry:
+    """A fake of the Windows user environment writer. It records each write and each broadcast, and writes nothing real.
+
+    ``fail_write`` is raised by the write, and ``announced`` is what the broadcast reports.
+    """
+
+    def __init__(self, *, announced: bool = True, fail_write: BaseException | None = None) -> None:
+        self.writes: list[tuple[str, str]] = []
+        self.announcements = 0
+        self._announced = announced
+        self._fail_write = fail_write
+
+    def write_user_value(self, name: str, value: str) -> None:
+        if self._fail_write is not None:
+            raise self._fail_write
+        self.writes.append((name, value))
+
+    def announce_change(self) -> bool:
+        self.announcements += 1
+        return self._announced
+
+
 class ScriptedTransport:
     """A transport that answers by path from a queue per path. The last item of a queue repeats. An exception is raised."""
 

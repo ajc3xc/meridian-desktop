@@ -108,6 +108,9 @@ class Settings:
     # The names of the saved API keys that are not built in (RunPod is always listed). Only names: a value lives in the
     # keychain and never here. save() writes the key only when there is a name, so a file with no keys is unchanged.
     key_names: tuple[str, ...] = ()
+    # The listed names of the API keys the owner marked critical, RunPod included. A critical key is listed first and
+    # shows a badge. Only names: the mark never sits with a value. save() writes the key only when there is a name.
+    critical_keys: tuple[str, ...] = ()
     # The MCP tools the owner switched off, as "group:tool" keys (meridian_desktop/tool_catalog.py). Every tool is on by
     # default, so an empty tuple is the default. save() writes the key only when it is not empty.
     disabled_tools: tuple[str, ...] = ()
@@ -253,6 +256,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values["key_names"] = tuple(item.strip() for item in value)
         else:
             problems.append("key_names must be a list of names; using none")
+
+    # critical_keys: an absent key means no key is marked, with no warning. Only a list of non-empty text is accepted.
+    if "critical_keys" in data:
+        value = data["critical_keys"]
+        if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+            values["critical_keys"] = tuple(dict.fromkeys(item.strip() for item in value))
+        else:
+            problems.append("critical_keys must be a list of names; using none")
 
     # disabled_tools: an absent key means every tool is on, with no warning. Only a list of non-empty text is accepted.
     # A value that is not such a list is ignored with a warning, so no tool is switched off by a bad file.
@@ -424,6 +435,9 @@ class SettingsStore:
         if not settings.key_names:
             # No saved names is the default, so a file with no API keys has no such key.
             del data["key_names"]
+        if not settings.critical_keys:
+            # No critical marks is the default, so a file with none has no such key.
+            del data["critical_keys"]
         if not settings.disabled_tools:
             # Every tool on is the default, so a file with no switched-off tool has no such key.
             del data["disabled_tools"]
