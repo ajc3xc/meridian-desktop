@@ -6,8 +6,13 @@ other name gets the account ``key-<slug>``, where the slug is the name in lower 
 turned into one dash.
 
 The keychain cannot be listed, so the saved custom names are kept in settings.json as ``key_names``. A name is not a
-secret. A value is never written there. Nothing here returns a value: ``status`` tests only whether a value is set, and
-a failed read reads as unreadable. Errors name the step and the class, never the value.
+secret. A value is never written there. The critical marks are kept there too, as ``critical_keys``, by listed name.
+
+A key can also be set as a Windows user variable (set_user_environment). The value is read from the keychain, handed to
+meridian_desktop.user_environment, and dropped. It is never stored in settings and never returned to the caller.
+
+Nothing here returns a value: ``status`` tests only whether a value is set, and a failed read reads as unreadable. Errors
+name the step and the class, never the value.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from dataclasses import dataclass, replace
 
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH, RUNPOD_ACCOUNT, RUNPOD_SERVICE, SecretStore
 from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.user_environment import UserEnvironment, variable_name_problem
 
 KEY_SERVICE = RUNPOD_SERVICE
 RUNPOD_NAME = "RunPod"
@@ -24,6 +30,8 @@ BUILT_IN_NAMES: tuple[str, ...] = (RUNPOD_NAME,)
 MAX_NAME_LENGTH = 40
 MAX_CUSTOM_NAMES = 50
 CUSTOM_ACCOUNT_PREFIX = "key-"
+# The Windows user variable RunPod is set as. It is the name the RunPod tools already read.
+RUNPOD_ENVIRONMENT_NAME = "RUNPOD_API_KEY"
 
 STATUS_SET = "set"
 STATUS_NOT_SET = "not_set"
@@ -39,11 +47,24 @@ class KeyNameError(ValueError):
 
 @dataclass(frozen=True)
 class KeyEntry:
-    """One named key as the Keys section lists it: the name, whether it is built in, and its status. Never its value."""
+    """One named key as the Keys section lists it: the name, whether it is built in, its status and its critical mark.
+
+    Never its value.
+    """
 
     name: str
     status: str
     built_in: bool
+    # True when the owner marked the key critical. Such a key is listed first and shows a badge.
+    critical: bool = False
+
+
+@dataclass(frozen=True)
+class EnvironmentSet:
+    """What setting a key as a Windows user variable did: the variable's name, and whether Windows confirmed the change."""
+
+    variable: str
+    announced: bool
 
 
 def clean_name(text: object) -> str:
@@ -73,6 +94,22 @@ def account_for(name: str) -> str:
     return f"{CUSTOM_ACCOUNT_PREFIX}{key}"
 
 
+def environment_name(name: str) -> str:
+    """The Windows user variable a key is set as.
+
+    RunPod is RUNPOD_API_KEY. Any other name is its slug in capitals, with each dash as an underscore, so OpenAI becomes
+    OPENAI. Raise KeyNameError when Windows cannot take that variable name.
+    """
+    cleaned = clean_name(name)
+    if slug(cleaned) == slug(RUNPOD_NAME):
+        return RUNPOD_ENVIRONMENT_NAME
+    variable = slug(cleaned).upper().replace("-", "_")
+    problem = variable_name_problem(variable)
+    if problem is not None:
+        raise KeyNameError(problem)
+    return variable
+
+
 def _clean_value(value: object) -> str:
     """Strip the value and check it. The messages hold no part of the value."""
     if not isinstance(value, str) or not value.strip():
@@ -86,17 +123,74 @@ def _clean_value(value: object) -> str:
 class ApiKeys:
     """The named keys: list them, read whether each one is set, save a value, replace it, or remove it."""
 
-    def __init__(self, settings: SettingsStore, secrets: SecretStore) -> None:
+    def __init__(
+        self,
+        settings: SettingsStore,
+        secrets: SecretStore,
+        user_environment: UserEnvironment | None = None,
+    ) -> None:
         self._settings = settings
         self._secrets = secrets
+        # The Windows user variable writer. Tests pass a fake. The default writes HKCU only when it is asked to.
+        self._user_environment = user_environment if user_environment is not None else UserEnvironment()
 
     def names(self) -> list[str]:
         """The built-in names, then the saved custom names in the order they were added."""
         return [*BUILT_IN_NAMES, *self._custom_names()]
 
     def entries(self) -> list[KeyEntry]:
-        """Every listed name with its status. No value is in the result."""
-        return [KeyEntry(name, self.status(name), name in BUILT_IN_NAMES) for name in self.names()]
+        """Every listed name with its status and critical mark. Critical names come first, the rest keep their order.
+
+        No value is in the result.
+        """
+        marked = self._critical_slugs()
+        found = [
+            KeyEntry(name, self.status(name), name in BUILT_IN_NAMES, slug(name) in marked) for name in self.names()
+        ]
+        return sorted(found, key=lambda entry: not entry.critical)  # sorted is stable, so each group keeps its order
+
+    def set_critical(self, name: str, critical: bool) -> str:
+        """Mark a listed key critical, or clear the mark. Return the name as it is listed.
+
+        Only the listed name is saved in settings, never a value. Raise KeyNameError when the name is not listed, and OSError
+        when the settings file cannot be written.
+        """
+        listed = self._listed(clean_name(name))
+        if listed is None:
+            raise KeyNameError("That key name is not listed.")
+        key = slug(listed)
+        # A settings file that did not load cleanly is copied aside first, as the other writers do, so its content survives.
+        self._settings.keep_unreadable_copy()
+        current = self._settings.load().settings
+        kept = [raw for raw in current.critical_keys if slug(raw) != key]
+        if critical:
+            kept.append(listed)
+        self._settings.save(replace(current, critical_keys=tuple(kept)))
+        return listed
+
+    def environment_name(self, name: str) -> str:
+        """The Windows user variable this listed key is set as. Raise KeyNameError when it is not listed or cannot be one."""
+        listed = self._listed(clean_name(name))
+        if listed is None:
+            raise KeyNameError("That key name is not listed.")
+        return environment_name(listed)
+
+    def set_user_environment(self, name: str) -> EnvironmentSet:
+        """Write the saved value of a listed key to the Windows user environment, under environment_name(name).
+
+        The value is read here, handed to the writer and dropped. It is never returned, never stored and never put in an
+        error. Raise KeyNameError when the name is not listed, or when no value is saved for it. Raise SecretStoreError when
+        the keychain cannot be read, and UserEnvironmentError when the variable cannot be written.
+        """
+        listed = self._listed(clean_name(name))
+        if listed is None:
+            raise KeyNameError("That key name is not listed.")
+        variable = environment_name(listed)
+        value = self._secrets.get_secret(KEY_SERVICE, account_for(listed))
+        if not value:
+            raise KeyNameError("No value is saved for that key yet. Save a value first.")
+        announced = self._user_environment.set(variable, value)
+        return EnvironmentSet(variable, announced)
 
     def status(self, name: str) -> str:
         """Whether a value is set for this name. The value is read only to test it, and it is dropped here."""
@@ -139,7 +233,10 @@ class ApiKeys:
             raise KeyNameError("That key name is not listed.")
         removed = bool(self._secrets.delete_secret(KEY_SERVICE, account_for(listed)))
         if listed not in BUILT_IN_NAMES:
-            self._write_custom([kept for kept in self._custom_names() if slug(kept) != slug(listed)])
+            # A custom name that leaves the list also loses its critical mark, so no stale mark is left behind.
+            gone = slug(listed)
+            marks = tuple(raw for raw in self._settings.load().settings.critical_keys if slug(raw) != gone)
+            self._write_custom([kept for kept in self._custom_names() if slug(kept) != gone], critical_keys=marks)
         return removed
 
     def _listed(self, name: str) -> str | None:
@@ -165,10 +262,20 @@ class ApiKeys:
             names.append(cleaned)
         return names
 
-    def _write_custom(self, names: list[str]) -> None:
-        """Save the custom names. Every other field in the settings file is kept. Raises OSError when it cannot write."""
+    def _critical_slugs(self) -> set[str]:
+        """The slugs of the keys marked critical. A mark on a name that is no longer listed matches nothing."""
+        return {slug(raw) for raw in self._settings.load().settings.critical_keys}
+
+    def _write_custom(self, names: list[str], *, critical_keys: tuple[str, ...] | None = None) -> None:
+        """Save the custom names, and the critical marks when given. Every other field in the settings file is kept.
+
+        Raises OSError when it cannot write.
+        """
         current = self._settings.load().settings
-        self._settings.save(replace(current, key_names=tuple(names)))
+        changes: dict[str, object] = {"key_names": tuple(names)}
+        if critical_keys is not None:
+            changes["critical_keys"] = critical_keys
+        self._settings.save(replace(current, **changes))
 
     def _drop_value(self, name: str) -> None:
         """Remove a value after a failed save. A failure here is not reported, because the save error is the one to show."""
@@ -183,14 +290,17 @@ __all__ = [
     "KEY_SERVICE",
     "MAX_CUSTOM_NAMES",
     "MAX_NAME_LENGTH",
+    "RUNPOD_ENVIRONMENT_NAME",
     "RUNPOD_NAME",
     "STATUS_NOT_SET",
     "STATUS_SET",
     "STATUS_UNREADABLE",
     "ApiKeys",
+    "EnvironmentSet",
     "KeyEntry",
     "KeyNameError",
     "account_for",
     "clean_name",
+    "environment_name",
     "slug",
 ]

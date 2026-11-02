@@ -98,6 +98,22 @@ def no_hosted_network(monkeypatch):
     monkeypatch.setattr(hosted_session, "live_transport", offline)
 
 
+@pytest.fixture(autouse=True)
+def no_real_user_environment(monkeypatch):
+    """The Windows user environment is HKCU\\Environment on the machine running the tests. No test may write it.
+
+    The real writer refuses, and pytest.fail is a BaseException, so the refusal cannot be swallowed by the code under test.
+    A test that means to set a user variable injects a fake registry instead.
+    """
+    from meridian_desktop import user_environment
+
+    def refuse(self, *args, **kwargs):
+        pytest.fail("a test tried to write the real Windows user environment; inject a fake registry", pytrace=False)
+
+    monkeypatch.setattr(user_environment.WindowsRegistry, "write_user_value", refuse)
+    monkeypatch.setattr(user_environment.WindowsRegistry, "announce_change", refuse)
+
+
 @pytest.fixture
 def settings_path(tmp_path):
     """A settings file in pytest's temp dir. Tests never touch the real one."""

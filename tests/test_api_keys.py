@@ -171,7 +171,7 @@ def test_entries_carry_name_status_and_built_in_flag_only(keys):
     assert [entry.built_in for entry in entries] == [True, False]
     assert {entry.status for entry in entries} == {STATUS_NOT_SET, STATUS_SET}
     for entry in entries:
-        assert set(vars(entry)) == {"name", "status", "built_in"}, "a KeyEntry holds no value field"
+        assert set(vars(entry)) == {"name", "status", "built_in", "critical"}, "a KeyEntry holds no value field"
         assert FAKE_VALUE not in repr(entry)
 
 
