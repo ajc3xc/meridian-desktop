@@ -10,10 +10,12 @@ owner presses it.
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
-pressed. The tunnel's Start, Stop and Restart and the Zotero launch ask first. Search (ui/search_tab.py) lists the
-local server's code, outputs and research, grouped by source. It has no search box. Code and outputs have no list
-route yet, so they send nothing, and research runs are read from the Local URL. Settings holds the connection
-settings, the RunPod panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
+pressed. The tunnel's Start, Stop and Restart are in the Tunnel panel in Settings, and each asks first. The Zotero launch
+asks first too. Search (ui/search_tab.py) lists the local server's code, outputs and research, grouped by source. It has no
+search box. Code and outputs have no list route yet, so they send nothing, and research runs are read from the Local URL.
+Settings opens with the Tunnel panel (ui/tunnel_panel.py), the one place for the tunnel: its status, Start, Stop and
+Restart, the lanes, the tool groups and the custom connectors. Settings then holds the connection settings, the RunPod
+panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
 Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
 Sessions tabs are read-only.
 
@@ -83,6 +85,7 @@ from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
+from meridian_desktop.ui.tunnel_panel import TunnelPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
@@ -264,7 +267,7 @@ class MainWindow(QMainWindow):
         # from the core Python and folder in Settings. The status call never starts or stops anything. The
         # Start, Stop and Restart controls use runner_actions instead, and they stay off until the owner turns them on.
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
-        # The runner controls (the Home tunnel card and the Settings runner block). Tests pass fakes. The app reads Settings.
+        # The runner controls (the Tunnel panel and the Settings runner block). Tests pass fakes. The app reads Settings.
         self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
         # The tools read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
@@ -394,6 +397,10 @@ class MainWindow(QMainWindow):
         container = QWidget(self.tabs)
         container.setObjectName("settings-page")
         column = QVBoxLayout(container)
+        # The Tunnel panel is the one place for the tunnel: its status, Start and Stop, the lanes, the tool groups and the
+        # custom connectors. It sits first, above the connection settings. Its status is read when this page is first shown.
+        self._tunnel_panel = TunnelPanel(self._store, self._runner_actions, self._tunnel_runner.status, parent=container)
+        column.addWidget(self._tunnel_panel)
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
         column.addWidget(ZoteroPanel(client=self._zotero, parent=container))

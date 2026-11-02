@@ -57,10 +57,12 @@ NO_RESULT = "NoResult"
 
 # Nothing here yet. Each pane shows this one plain line while it holds no text.
 NOTHING_HERE_TEXT = "Nothing here yet."
-# The owner starts the tunnel from the Home tunnel card (Start asks first). No terminal command is typed here.
-START_TUNNEL_TEXT = "Start the tunnel from the Home tunnel card, then press Refresh here."
+# The owner starts the tunnel from the Tunnel panel in Settings (Start asks first). No terminal command is typed here.
+START_TUNNEL_TEXT = "Start the tunnel from the Tunnel panel in Settings, then press Refresh here."
 # The control log gets one line for each Start or Stop of the local server or the tunnel.
-START_CONTROL_TEXT = "Press Start or Stop in Local server and startup, or on the Home tunnel card, then press Refresh here."
+START_CONTROL_TEXT = (
+    "Press Start or Stop in Local server and startup, or in the Tunnel panel in Settings, then press Refresh here."
+)
 
 DESKTOP_MISSING_TEXT = (
     "No log yet. The Meridian Desktop app writes this file each time it starts. "

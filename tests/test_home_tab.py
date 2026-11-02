@@ -292,30 +292,28 @@ def _core_settings(tmp_path):
     return store
 
 
-def test_tunnel_buttons_are_off_with_no_core_setup_and_open_settings_is_shown(qtbot, tmp_path):
+def test_the_tunnel_card_holds_no_start_or_stop_control_and_opens_the_tunnel_panel(qtbot, tmp_path):
     tab = _shown(qtbot, _deps(tmp_path))
     _wait_settled(qtbot, tab, "tunnel")
-    buttons = {name: tab.findChild(QPushButton, name) for name in ("tunnel-start", "tunnel-stop", "tunnel-restart")}
-    assert all(button is not None and not button.isEnabled() for button in buttons.values())
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+        assert tab.findChild(QPushButton, name) is None, name
     settings_button = tab.findChild(QPushButton, "home-tunnel-settings")
     assert settings_button is not None
     assert settings_button.isVisible()
-    assert settings_button.text() == "Open Settings"
+    assert settings_button.text() == "Open the Tunnel panel"
 
 
-def test_tunnel_buttons_are_on_once_the_core_is_set_and_the_switch_is_on(qtbot, tmp_path):
+def test_the_open_tunnel_panel_button_stays_with_the_core_set(qtbot, tmp_path):
     store = _core_settings(tmp_path)
     actions = RunnerActions(store, make_control=lambda python, cwd: None, confirm=lambda *args: False)
     tab = _shown(qtbot, _deps(tmp_path, actions=actions))
     _wait_settled(qtbot, tab, "tunnel")
-    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
-        assert tab.findChild(QPushButton, name).isEnabled(), name
-    assert not tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
+    assert tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
 
 
 def test_a_core_found_after_the_boot_checks_is_read_again_by_the_tunnel_and_tools_cards(qtbot, tmp_path):
     """The launch-time core search can finish after the boot checks. The Tunnel and Tools cards then read the core again,
-    so they stop saying it is not set, and the Open Settings button goes away."""
+    so they stop saying it is not set."""
     store = SettingsStore(tmp_path / "settings.json")
     found = {"core": False}
 
@@ -344,8 +342,7 @@ def test_a_core_found_after_the_boot_checks_is_read_again_by_the_tunnel_and_tool
 
     qtbot.waitUntil(lambda: _headline(tab, "tunnel") == "Not running", timeout=5000)
     qtbot.waitUntil(lambda: _headline(tab, "tools") == "All set up", timeout=5000)
-    assert not tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
-    assert tab.findChild(QPushButton, "tunnel-start").isEnabled()
+    assert tab.findChild(QPushButton, "home-tunnel-settings").isVisible()
 
 
 def test_a_search_still_running_does_not_re_read_the_cards_yet(qtbot, tmp_path):
@@ -365,33 +362,6 @@ def test_a_search_still_running_does_not_re_read_the_cards_yet(qtbot, tmp_path):
     actions.coreChanged.emit()
     qtbot.wait(50)
     assert len(reads) == before
-
-
-def test_tunnel_start_asks_first_and_a_no_starts_nothing(qtbot, tmp_path):
-    store = _core_settings(tmp_path)
-    asked = []
-    started = []
-
-    class Control:
-        def start(self, scope):
-            started.append(scope)
-            raise AssertionError("no start may run after a no")
-
-        def stop(self, scope):
-            raise AssertionError("no stop may run")
-
-    def confirm(parent, title, body, confirm_text):
-        asked.append((title, confirm_text))
-        return False
-
-    actions = RunnerActions(store, make_control=lambda python, cwd: Control(), confirm=confirm)
-    tab = _shown(qtbot, _deps(tmp_path, actions=actions))
-    _wait_settled(qtbot, tab, "tunnel")
-    tab.findChild(QPushButton, "tunnel-start").click()
-    assert len(asked) == 1
-    assert started == []
-    result = tab.findChild(QLabel, "tunnel-control-result")
-    assert "Start cancelled" in result.text()
 
 
 def test_open_settings_asks_the_window_to_switch_tabs(qtbot, tmp_path):
