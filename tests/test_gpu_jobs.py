@@ -8,6 +8,7 @@ fake runner. Two guards turn any real process start or network connection into a
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import threading
@@ -353,7 +354,7 @@ def test_the_ssh_call_is_fixed_and_the_alias_comes_after_double_dash():
 
 
 def test_the_remote_command_asks_only_for_read_only_queries():
-    command = gpu_jobs.REMOTE_COMMAND
+    command = gpu_jobs.REMOTE_SCRIPT
     for word in ("kill", "scancel", "bkill", "rm ", "sbatch", "bsub", "> ", "| sh"):
         assert word not in command
     assert "nvidia-smi --query-gpu=" in command
@@ -574,10 +575,20 @@ def test_a_remote_section_that_never_reports_its_status_is_a_failure():
     assert [row for row in snapshot.gpus if row.host == "cut"] == []
 
 
+def test_the_remote_command_starts_with_sh_c_and_the_script_is_one_quoted_argument():
+    # The remote login shell is not assumed to be POSIX, so the script is handed to sh -c as one quoted argument.
+    words = shlex.split(gpu_jobs.REMOTE_COMMAND)
+    assert gpu_jobs.REMOTE_COMMAND.startswith("sh -c ")
+    assert words[:2] == ["sh", "-c"]
+    assert len(words) == 3
+    assert words[2].startswith(f"echo {gpu_jobs.GPU_MARKER}")
+    assert words[2].endswith("exit 0")
+
+
 def test_the_remote_command_ends_with_an_explicit_exit_zero():
     # ssh's own failures are 255. The remote status comes from each section's marker line, so the script itself must
     # end with exit 0, and no later command's status can stand in for an earlier failure.
-    assert gpu_jobs.REMOTE_COMMAND.endswith("exit 0")
+    assert gpu_jobs.REMOTE_SCRIPT.endswith("exit 0")
 
 
 def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():

@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+import shlex
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -84,7 +85,7 @@ SLURM_MARKER = "---SLURM---"
 LSF_MARKER = "---LSF---"
 SECTION_MARKERS = {GPU_MARKER: "GPU", APPS_MARKER: "APPS", SLURM_MARKER: "SLURM", LSF_MARKER: "LSF"}
 _STATUS_LINE = re.compile(r"---(GPU|APPS|SLURM|LSF)-RC=(\d+)---")
-REMOTE_COMMAND = "; ".join(
+REMOTE_SCRIPT = "; ".join(
     [
         f"echo {GPU_MARKER}",
         f"nvidia-smi --query-gpu={GPU_FIELDS} {NVIDIA_FORMAT}",
@@ -97,6 +98,8 @@ REMOTE_COMMAND = "; ".join(
         "exit 0",
     ]
 )
+# The login shell on the host is not assumed to be POSIX, so the script goes to sh -c as one quoted argument.
+REMOTE_COMMAND = "sh -c " + shlex.quote(REMOTE_SCRIPT)
 
 # nvidia-smi writes these where a value does not exist or the process owner cannot be read.
 UNREPORTED_VALUES = frozenset({"", "[N/A]", "N/A", "[Not Supported]", "[Unknown Error]"})
