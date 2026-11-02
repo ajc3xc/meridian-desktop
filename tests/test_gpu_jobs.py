@@ -103,13 +103,25 @@ def ssh_key(alias: str) -> tuple[str, ...]:
     return tuple(gpu_jobs.ssh_argv(alias))
 
 
-def remote_stdout(gpu: str = REAL_GPU_LINE, apps: str = "", slurm: str | None = None, lsf: str | None = None) -> str:
-    parts = [gpu, gpu_jobs.APPS_MARKER, apps]
+def remote_stdout(
+    gpu: str = REAL_GPU_LINE,
+    apps: str = "",
+    slurm: str | None = None,
+    lsf: str | None = None,
+    *,
+    gpu_rc: int = 0,
+    apps_rc: int = 0,
+    slurm_rc: int = 0,
+    lsf_rc: int = 0,
+) -> str:
+    """What the remote script prints: each section starts with its marker and ends with its own exit status."""
+    parts = [gpu_jobs.GPU_MARKER, gpu, f"---GPU-RC={gpu_rc}---"]
+    parts += [gpu_jobs.APPS_MARKER, apps, f"---APPS-RC={apps_rc}---"]
     if slurm is not None:
-        parts += [gpu_jobs.SLURM_MARKER, slurm]
+        parts += [gpu_jobs.SLURM_MARKER, slurm, f"---SLURM-RC={slurm_rc}---"]
     if lsf is not None:
-        parts += [gpu_jobs.LSF_MARKER, lsf]
-    return "\n".join(part for part in parts if part is not None)
+        parts += [gpu_jobs.LSF_MARKER, lsf, f"---LSF-RC={lsf_rc}---"]
+    return "\n".join(parts)
 
 
 @pytest.fixture(autouse=True)
@@ -500,8 +512,9 @@ def test_a_host_without_squeue_or_bjobs_says_not_on_this_host():
     assert texts == {PART_SLURM: "Slurm: not on this host.", PART_LSF: "LSF: not on this host."}
 
 
-def test_a_host_without_nvidia_smi_says_so_from_its_error_text():
-    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu=""), stderr="bash: nvidia-smi: command not found")
+def test_a_host_without_nvidia_smi_is_reported_absent_from_its_exit_status():
+    # The remote shell reports 127 when the program is not found. The stderr text is not needed.
+    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu="", gpu_rc=127))
     run = FakeRunner({ssh_key("cpu-only"): answer})
     snapshot = collect(run, ("cpu-only",), None, now=NOW)
     (status,) = [s for s in snapshot.statuses if s.where == "cpu-only" and s.part == PART_GPUS]
@@ -509,12 +522,62 @@ def test_a_host_without_nvidia_smi_says_so_from_its_error_text():
     assert status.text == "nvidia-smi is not on this host, so its GPUs cannot be read."
 
 
-def test_a_host_where_nvidia_smi_errors_says_it_could_not_read():
-    answer = CommandResult(returncode=0, stdout=remote_stdout(gpu=""), stderr="NVIDIA-SMI has failed")
-    run = FakeRunner({ssh_key("broken"): answer})
-    snapshot = collect(run, ("broken",), None, now=NOW)
-    (status,) = [s for s in snapshot.statuses if s.where == "broken" and s.part == PART_GPUS]
-    assert status.text == "nvidia-smi could not read the GPUs on this host."
+def test_an_nvml_error_without_the_word_nvidia_smi_is_a_failure_with_its_status():
+    # The driver can fail with a message that never names nvidia-smi. The exit status still decides.
+    answer = CommandResult(
+        returncode=0,
+        stdout=remote_stdout(gpu="", gpu_rc=9),
+        stderr="Failed to initialize NVML: Driver/library version mismatch",
+    )
+    run = FakeRunner({ssh_key("nvml"): answer})
+    snapshot = collect(run, ("nvml",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "nvml" and s.part == PART_GPUS]
+    assert status.state == STATE_FAILED
+    assert status.text == "nvidia-smi could not read the GPUs (exit code 9)."
+
+
+def test_a_failed_remote_gpu_status_shows_no_rows_even_if_some_were_printed():
+    answer = ok(remote_stdout(gpu=REAL_GPU_LINE, gpu_rc=9))
+    run = FakeRunner({ssh_key("partial"): answer})
+    snapshot = collect(run, ("partial",), None, now=NOW)
+    assert [row for row in snapshot.gpus if row.host == "partial"] == []
+    (status,) = [s for s in snapshot.statuses if s.where == "partial" and s.part == PART_GPUS]
+    assert status.text == "nvidia-smi could not read the GPUs (exit code 9)."
+
+
+def test_a_controller_that_is_down_is_reported_as_slurm_could_not_be_read():
+    answer = ok(remote_stdout(slurm="", slurm_rc=1))
+    run = FakeRunner({ssh_key("login"): answer})
+    snapshot = collect(run, ("login",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "login" and s.part == PART_SLURM]
+    assert status.state == STATE_FAILED
+    assert status.text == "Slurm could not be read."
+
+
+def test_a_failed_lsf_and_a_failed_process_query_say_could_not_be_read_on_the_host():
+    answer = ok(remote_stdout(apps="", apps_rc=3, lsf="", lsf_rc=2))
+    run = FakeRunner({ssh_key("hpc"): answer})
+    snapshot = collect(run, ("hpc",), None, now=NOW)
+    texts = {s.part: s.text for s in snapshot.statuses if s.where == "hpc"}
+    assert texts[PART_PROCESSES] == "GPU processes could not be read."
+    assert texts[PART_LSF] == "LSF could not be read."
+
+
+def test_a_remote_section_that_never_reports_its_status_is_a_failure():
+    # The script was cut off after the GPU section started, before its status line was printed.
+    cut_off = f"{gpu_jobs.GPU_MARKER}\n{REAL_GPU_LINE}"
+    run = FakeRunner({ssh_key("cut"): ok(cut_off)})
+    snapshot = collect(run, ("cut",), None, now=NOW)
+    (status,) = [s for s in snapshot.statuses if s.where == "cut" and s.part == PART_GPUS]
+    assert status.state == STATE_FAILED
+    assert status.text == "nvidia-smi could not be read on this host."
+    assert [row for row in snapshot.gpus if row.host == "cut"] == []
+
+
+def test_the_remote_command_ends_with_an_explicit_exit_zero():
+    # ssh's own failures are 255. The remote status comes from each section's marker line, so the script itself must
+    # end with exit 0, and no later command's status can stand in for an earlier failure.
+    assert gpu_jobs.REMOTE_COMMAND.endswith("exit 0")
 
 
 def test_a_host_that_prints_nothing_for_gpus_is_an_empty_state():
