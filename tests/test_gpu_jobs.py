@@ -887,43 +887,52 @@ def test_runpod_not_connected_when_there_is_no_provider_at_all():
 # ----------------------------------------------------------------- the default runner
 
 
-def test_a_missing_program_is_reported_as_missing_not_raised():
-    def absent(*args, **kwargs):
+# An absolute path that need not exist. The default-runner tests patch resolve_program to return it, so they run the
+# same on any machine, with or without nvidia-smi installed.
+FAKE_PROGRAM = os.path.join(os.sep, "fake", "bin", "nvidia-smi.exe")
+
+
+def test_a_missing_program_reaches_the_file_not_found_branch_and_is_reported_missing(monkeypatch):
+    # The name resolves to an absolute path, then starting it fails: that is the FileNotFoundError branch.
+    started = []
+
+    def absent(argv, **kwargs):
+        started.append(list(argv))
         raise FileNotFoundError("no such program")
 
-    original = subprocess.run
-    subprocess.run = absent
-    try:
-        result = REAL_RUN_COMMAND(("definitely-missing-program",), 1.0)
-    finally:
-        subprocess.run = original
+    monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: FAKE_PROGRAM)
+    monkeypatch.setattr(subprocess, "run", absent)
+    result = REAL_RUN_COMMAND(("nvidia-smi", "--version"), 1.0)
     assert result == CommandResult(returncode=None, missing=True)
+    assert started == [[FAKE_PROGRAM, "--version"]]
 
 
-def test_a_timeout_is_reported_as_timed_out():
-    def slow(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+def test_a_program_that_cannot_be_resolved_is_missing_and_never_started(monkeypatch):
+    started = []
+    monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: None)
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: started.append(argv))
+    assert REAL_RUN_COMMAND(("definitely-missing-program",), 1.0) == CommandResult(returncode=None, missing=True)
+    assert started == []
 
-    original = subprocess.run
-    subprocess.run = slow
-    try:
-        result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
-    finally:
-        subprocess.run = original
+
+def test_a_timeout_is_reported_as_timed_out(monkeypatch):
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
+
+    monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: FAKE_PROGRAM)
+    monkeypatch.setattr(subprocess, "run", slow)
+    result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
     assert result.timed_out is True
     assert result.returncode is None
 
 
-def test_an_os_error_is_reported_as_failed_to_start():
-    def denied(*args, **kwargs):
+def test_an_os_error_is_reported_as_failed_to_start(monkeypatch):
+    def denied(argv, **kwargs):
         raise PermissionError("denied")
 
-    original = subprocess.run
-    subprocess.run = denied
-    try:
-        result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
-    finally:
-        subprocess.run = original
+    monkeypatch.setattr(gpu_jobs, "resolve_program", lambda name: FAKE_PROGRAM)
+    monkeypatch.setattr(subprocess, "run", denied)
+    result = REAL_RUN_COMMAND(("nvidia-smi",), 1.0)
     assert result.failed_to_start is True
 
 
