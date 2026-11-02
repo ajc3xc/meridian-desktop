@@ -11,19 +11,16 @@ in that list. A failed read writes nothing, so a failure never removes a backup.
 (an empty list, or no row with an id) writes nothing either, and raises NoUsableProjects: an empty answer never stands
 in for a backup that holds projects. After a successful write the newest BACKUPS_KEPT backup files are kept, and so is
 the newest backup that holds projects, even when newer files hold none (prune_backups). Older backup files are removed.
-A checked-subset backup (subset-projects-*.json) is kept under its own cap, and its writes never remove a full backup.
 
 Nothing in this module sends anything to the hosted service, and nothing reads a backup back.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import urllib.parse
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,12 +32,8 @@ BACKUP_DIR_NAME = "backups"
 BACKUP_VERSION = 1
 # After a write, the newest this many backup files are kept, by name. The newest backup that holds projects is kept too.
 BACKUPS_KEPT = 5
-# A checked-subset backup holds only the projects the owner chose. It has its own name and its own cap, and its writes
-# never remove a full backup, which may be the only local copy of the projects left out of the subset.
-SUBSET_BACKUPS_KEPT = 5
 # The file name, and the time inside it, both in UTC. The time is fixed width, so names sort oldest to newest.
 _NAME = re.compile(r"projects-(\d{8}T\d{6})Z\.json")
-_SUBSET_NAME = re.compile(r"subset-projects-(\d{8}T\d{6})Z\.json")
 _NAME_TIME = "%Y%m%dT%H%M%S"
 _JSON_TIME = "%Y-%m-%dT%H:%M:%SZ"
 # The only fields a backup keeps for a project.
@@ -56,11 +49,6 @@ NO_TOKEN_TEXT = (
     "Paste your hosted token in Settings and press Save token."
 )
 NO_PROJECTS_TEXT = "Hosted Meridian returned no projects, so no backup was written. Earlier backups are kept."
-NOTHING_CHECKED_TEXT = "No project is checked, so no backup was written. Earlier backups are kept."
-ACCOUNT_CHANGED_TEXT = (
-    "The hosted account changed after its project list was read, so nothing was written. "
-    "Choose the projects again."
-)
 
 ListHosted = Callable[[str, str], list[dict[str, Any]]]  # (hosted URL, token) -> the hosted client's project rows
 
@@ -85,16 +73,6 @@ class NoUsableProjects(Exception):
         super().__init__(NO_PROJECTS_TEXT)
 
 
-class NothingSelected(NoUsableProjects):
-    """A selection holds none of the projects in the rows, so nothing is backed up. Nothing is written or removed.
-
-    The message is NOTHING_CHECKED_TEXT. It is a NoUsableProjects, so a caller that handles that also handles this.
-    """
-
-    def __init__(self) -> None:  # noqa: D107 - the message is the only difference from NoUsableProjects
-        Exception.__init__(self, NOTHING_CHECKED_TEXT)
-
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -117,32 +95,13 @@ def backup_dir(env: Mapping[str, str] | None = None, home: Path | None = None) -
     return default_settings_path(env, home).parent / BACKUP_DIR_NAME
 
 
-def backup_name(taken_at: datetime, *, subset: bool = False) -> str:
-    prefix = "subset-projects-" if subset else "projects-"
-    return prefix + _utc(taken_at).strftime(_NAME_TIME) + "Z.json"
+def backup_name(taken_at: datetime) -> str:
+    return "projects-" + _utc(taken_at).strftime(_NAME_TIME) + "Z.json"
 
 
 def backed_up_text(count: int, taken_at: datetime) -> str:
     noun = "project" if count == 1 else "projects"
     return f"Backed up {count} {noun} on {day_text(taken_at)}."
-
-
-def normalize_hosted_url(hosted_url: str) -> str:
-    """The hosted URL with its scheme and host lowercased and any trailing slash removed, so one service has one form."""
-    parts = urllib.parse.urlsplit(hosted_url.strip())
-    return urllib.parse.urlunsplit(
-        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment)
-    )
-
-
-def account_key(hosted_url: str, identity: str) -> str:
-    """A fingerprint of the normalized hosted URL and the account identity /me names, for one checklist.
-
-    The identity is the account's email, not the token, so a new token for the same account gives the same key. The key
-    is a SHA-256 digest, so neither the URL nor the identity is kept in the clear.
-    """
-    text = f"{normalize_hosted_url(hosted_url)}\n{identity}"
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def destination_text(folder: Path) -> str:
@@ -166,45 +125,26 @@ def _kept_row(row: Any) -> dict[str, Any] | None:
     return {"id": pid, "name": _text_or_none(row.get("name")), "created_at": _text_or_none(row.get("created_at"))}
 
 
-def kept_projects(rows: list[Any]) -> list[dict[str, Any]]:
-    """The KEPT_FIELDS of each row that has a usable id, in the order given. Any other field is dropped."""
-    return [kept for kept in (_kept_row(row) for row in rows) if kept is not None]
-
-
-def write_backup(
-    rows: list[Any],
-    *,
-    folder: Path,
-    taken_at: datetime,
-    only: Collection[str] | None = None,
-) -> BackupWritten:
+def write_backup(rows: list[Any], *, folder: Path, taken_at: datetime) -> BackupWritten:
     """Write the rows as the newest backup in ``folder``, then prune the backup files (prune_backups).
 
-    Only the KEPT_FIELDS of each row go in, and a row with no usable id is left out. ``only``, when given, keeps just the
-    projects whose id is in it, so the owner's checklist decides what is written. When no project is left, nothing is
-    written or removed: NothingSelected when ``only`` was given, otherwise NoUsableProjects. The message names the file
-    the backup was saved to.
+    Only the KEPT_FIELDS of each row go in, and a row with no usable id is left out. When no row is left, nothing is
+    written or removed, and NoUsableProjects is raised. The message names the file the backup was saved to.
     """
     taken = _utc(taken_at)
-    projects = kept_projects(rows)
-    subset = only is not None
-    if subset:
-        wanted = set(only)
-        projects = [project for project in projects if project["id"] in wanted]
-        if not projects:
-            raise NothingSelected()
+    projects = [kept for kept in (_kept_row(row) for row in rows) if kept is not None]
     if not projects:
         raise NoUsableProjects()
     folder.mkdir(parents=True, exist_ok=True)
     # A backup never replaces an existing file: a second write in the same UTC second takes the next free second's name.
-    while (folder / backup_name(taken, subset=subset)).exists():
+    while (folder / backup_name(taken)).exists():
         taken = taken + timedelta(seconds=1)
     document = {"version": BACKUP_VERSION, "taken_at": taken.strftime(_JSON_TIME), "projects": projects}
-    path = folder / backup_name(taken, subset=subset)
+    path = folder / backup_name(taken)
     temp = folder / (path.name + ".tmp")
     temp.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
-    prune_backups(folder, keep=path, subset=subset)
+    prune_backups(folder, keep=path)
     message = f"{backed_up_text(len(projects), taken)} Saved to: {path}"
     return BackupWritten(path, len(projects), taken, message)
 
@@ -226,97 +166,62 @@ def backup_hosted(
     return write_backup(rows, folder=folder, taken_at=taken_at)
 
 
-def _backup_files(folder: Path, pattern: re.Pattern[str]) -> list[Path]:
-    """The backup files in ``folder`` whose names match ``pattern``, newest first. Only names this module writes match."""
+def _backup_files(folder: Path) -> list[Path]:
+    """The backup files in ``folder``, newest first. Only names this module writes are listed."""
     try:
-        entries = list(folder.iterdir())
+        found = [path for path in folder.iterdir() if path.is_file() and _NAME.fullmatch(path.name)]
     except OSError:
         return []
-    found: list[Path] = []
-    for path in entries:
-        if not pattern.fullmatch(path.name):
-            continue
-        try:
-            if path.is_file():
-                found.append(path)
-        except OSError:
-            # One unreadable entry is skipped. The rest of the folder is still listed and pruned as usual.
-            continue
     return sorted(found, key=lambda path: path.name, reverse=True)
-
-
-def _project_ids(path: Path) -> set[str] | None:
-    """The project ids the backup in ``path`` holds, or None when the file cannot be read or does not parse as a backup."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-        projects = document["projects"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(projects, list):
-        return None
-    return {row["id"] for row in kept_projects(projects)}
 
 
 def _holds_projects(path: Path) -> bool:
     """True when the backup in ``path`` parses and holds at least one project with a usable id."""
-    return bool(_project_ids(path))
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        projects = document["projects"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(projects, list):
+        return False
+    return any(_kept_row(row) is not None for row in projects)
 
 
-def prune_backups(folder: Path, keep: Path | None = None, *, subset: bool = False) -> None:
-    """Remove the old backup files of one kind, and leave every other file as it is.
+def prune_backups(folder: Path, keep: Path | None = None) -> None:
+    """Remove the backup files that retention does not keep, and leave every other file as it is.
 
-    One kind is pruned: the full backups by default, or the subset backups when ``subset`` is true. Each kind has its own
-    cap, so pruning one never removes a file of the other. Within that kind, kept: the newest cap files by name (BACKUPS_KEPT
-    or SUBSET_BACKUPS_KEPT), the newest that holds projects (even when newer files hold none), and ``keep``, the file just
-    written. A file that cannot be removed is left as it is.
+    Kept: the newest BACKUPS_KEPT backup files by name, the newest backup that holds projects (even when newer files
+    hold none), and ``keep``, the file just written. A file that cannot be removed is left as it is.
     """
-    pattern, cap = (_SUBSET_NAME, SUBSET_BACKUPS_KEPT) if subset else (_NAME, BACKUPS_KEPT)
-    files = _backup_files(folder, pattern)  # newest first
-    kept = set(files[:cap])
+    files = _backup_files(folder)  # newest first
+    kept = set(files[:BACKUPS_KEPT])
     newest_with_projects = next((path for path in files if _holds_projects(path)), None)
     if newest_with_projects is not None:
         kept.add(newest_with_projects)
     if keep is not None:
         kept.add(keep)
-    # Files are visited newest first, so every file already seen is newer. An older file beyond the cap goes only when
-    # every project it holds is also held by a newer kept file. A file that cannot be read is kept.
-    newer_ids: set[str] = set()
     for path in files:
-        ids = _project_ids(path)
-        if path in kept:
-            newer_ids |= ids or set()
-            continue
-        if ids is not None and ids <= newer_ids:
+        if path not in kept:
             try:
                 path.unlink()
             except OSError:
                 pass
-        else:
-            kept.add(path)
-            newer_ids |= ids or set()
 
 
 __all__ = [
     "BACKUP_DIR_NAME",
     "BACKUPS_KEPT",
-    "SUBSET_BACKUPS_KEPT",
     "KEPT_FIELDS",
-    "ACCOUNT_CHANGED_TEXT",
-    "NOTHING_CHECKED_TEXT",
     "NO_PROJECTS_TEXT",
     "NO_TOKEN_TEXT",
     "BackupWritten",
     "NoUsableProjects",
-    "NothingSelected",
     "backed_up_text",
     "backup_dir",
     "backup_hosted",
-    "account_key",
     "backup_name",
     "day_text",
     "destination_text",
-    "kept_projects",
-    "normalize_hosted_url",
     "prune_backups",
     "utc_now",
     "write_backup",
