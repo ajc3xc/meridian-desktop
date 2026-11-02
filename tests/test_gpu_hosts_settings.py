@@ -155,6 +155,19 @@ def test_a_refused_name_is_shown_and_nothing_is_written(qtbot, settings_path):
     assert "gpu_hosts" not in (_saved(settings_path) if settings_path.exists() else {})
 
 
+def test_nine_names_are_refused_with_a_clear_message_and_nothing_is_truncated(qtbot, settings_path):
+    _store_with(settings_path, gpu_hosts=("gpu-box",))
+    tab = _tab(qtbot, settings_path)
+    nine = ", ".join(f"host{index}" for index in range(9))
+    tab.findChild(QLineEdit, "settings-gpu-hosts").setText(nine)
+    tab.findChild(QPushButton, "settings-save-gpu-hosts").click()
+    message = tab.findChild(QLabel, "settings-gpu-hosts-message").text()
+    assert message == "Not saved. Save at most 8 SSH hosts. Remove 1 to save."
+    assert "are kept" not in message
+    # The saved file is unchanged: no hosts were silently cut to eight.
+    assert _saved(settings_path)["gpu_hosts"] == ["gpu-box"]
+
+
 def test_clearing_the_field_says_no_hosts_are_read(qtbot, settings_path):
     _store_with(settings_path, gpu_hosts=("gpu-box",))
     tab = _tab(qtbot, settings_path)

@@ -240,9 +240,9 @@ def parse_host_list(text: str) -> tuple[tuple[str, ...], list[str]]:
             continue
         if item not in hosts:
             hosts.append(item)
+    # Too many names is a refusal, not a silent cut: the caller saves nothing and the owner removes the extra names.
     if len(hosts) > MAX_HOSTS:
-        problems.append(f"Save at most {MAX_HOSTS} SSH hosts. The first {MAX_HOSTS} are kept.")
-        hosts = hosts[:MAX_HOSTS]
+        problems.append(f"Save at most {MAX_HOSTS} SSH hosts. Remove {len(hosts) - MAX_HOSTS} to save.")
     return tuple(hosts), problems
 
 

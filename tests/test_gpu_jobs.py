@@ -321,12 +321,12 @@ def test_a_bad_name_is_a_problem_and_the_good_ones_are_kept():
     assert "-oX=y" in problems[0]
 
 
-def test_more_than_the_limit_keeps_the_first_names_and_says_so():
+def test_more_than_the_limit_is_a_refusal_that_names_how_many_to_remove():
     names = ",".join(f"host{index}" for index in range(gpu_jobs.MAX_HOSTS + 2))
     hosts, problems = gpu_jobs.parse_host_list(names)
-    assert len(hosts) == gpu_jobs.MAX_HOSTS
-    assert hosts[0] == "host0"
-    assert problems == [f"Save at most {gpu_jobs.MAX_HOSTS} SSH hosts. The first {gpu_jobs.MAX_HOSTS} are kept."]
+    # Nothing is cut silently: every valid name is returned, and the problem asks for the extra ones to go.
+    assert len(hosts) == gpu_jobs.MAX_HOSTS + 2
+    assert problems == [f"Save at most {gpu_jobs.MAX_HOSTS} SSH hosts. Remove 2 to save."]
 
 
 def test_the_ssh_call_is_fixed_and_the_alias_comes_after_double_dash():
