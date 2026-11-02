@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QWidget
 
 from _fakes import MemoryKeyring
-from meridian_desktop import hosted_client, local_client, projects_backup
+from meridian_desktop import hosted_client, local_client, projects_backup, token_store
 from meridian_desktop.data_source import DataSources
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
@@ -284,7 +284,7 @@ def _tab_with_token(qtbot, settings_path, holder, list_hosted):
         probe=lambda url: local_client.HEALTH_NOT_RUNNING,
         read_server=lambda url: [],
         read_file=lambda path: [],
-        get_token=lambda: holder["token"],
+        get_token=lambda: _read_holder_token(holder),
         list_hosted=list_hosted,
     )
     tab = ProjectsTab(SettingsStore(settings_path), sources)
@@ -529,6 +529,14 @@ def _trigger_no_projects(qtbot, tab, settings_path, holder):
     return projects_backup.NO_PROJECTS_TEXT
 
 
+def _trigger_token_unreadable(qtbot, tab, settings_path, holder):
+    holder["unreadable"] = True
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return TOKEN_UNREADABLE_TEXT
+
+
 def _trigger_choose_failed(qtbot, tab, settings_path, holder):
     holder["fail"] = True
     tab.findChild(QPushButton, "projects-backup-choose").click()
@@ -575,6 +583,7 @@ TRIGGERS = {
     "choose_failed": _trigger_choose_failed,
     "write_refused": _trigger_write_refused,
     "stale_choose": _trigger_stale_choose,
+    "token_unreadable": _trigger_token_unreadable,
 }
 
 
@@ -596,13 +605,12 @@ def test_every_trigger_resets_the_checklist_through_the_same_path(qtbot, setting
             raise hosted_client.HostedUnreachable()
         return list(holder["answers"])
 
-    sources_token = {"get": lambda: holder["token"]}
     SettingsStore(settings_path).save(Settings(mode="local", hosted_url=HOSTED_URL, local_url=LOCAL_URL))
     sources = DataSources(
         probe=lambda url: local_client.HEALTH_NOT_RUNNING,
         read_server=lambda url: [],
         read_file=lambda path: [],
-        get_token=lambda: sources_token["get"](),
+        get_token=lambda: _read_holder_token(holder),
         list_hosted=list_hosted,
     )
     tab = ProjectsTab(SettingsStore(settings_path), sources)
@@ -621,3 +629,50 @@ def test_every_trigger_resets_the_checklist_through_the_same_path(qtbot, setting
     assert tab._chosen == ()
     assert not tab._backup_running
     assert status.text().startswith(expected)
+
+
+# ----------------------------------------------------------------- a keychain read failure is not a removed token
+
+
+TOKEN_UNREADABLE_TEXT = "Could not read the saved token. Try again."
+
+
+def _read_holder_token(holder):
+    """What the keychain read returns in these tests: the token, None for no token, or a raised read failure."""
+    if holder.get("unreadable"):
+        raise token_store.TokenReadError("token could not be read: keyring call failed (RuntimeError)")
+    return holder["token"]
+
+
+def test_a_keychain_read_failure_keeps_the_saved_state_and_says_so(qtbot, settings_path, local_folder):
+    holder = {"token": FAKE_TOKEN, "unreadable": False}
+    tab = _tab_with_token(qtbot, settings_path, holder, lambda url, token: list(HOSTED_ROWS))
+    _choose(qtbot, tab)
+    button = tab.findChild(QPushButton, "projects-backup-button")
+    assert not button.isHidden()
+
+    holder["unreadable"] = True
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    # The tab runs in local mode here, so the projects list does not use the token. The backup line says what happened.
+    assert status.text() != TOKEN_UNREADABLE_TEXT
+    assert not button.isHidden()  # the saved state is kept: an unreadable token is not a removed one
+    assert tab.findChild(QLabel, "projects-backup-status").text() == TOKEN_UNREADABLE_TEXT
+    assert _checklist(tab).count() == 0 and not _write_button(tab).isEnabled()
+
+
+def test_a_removed_token_hides_the_backup_controls_and_is_not_a_read_failure(qtbot, settings_path, local_folder):
+    holder = {"token": FAKE_TOKEN, "unreadable": False}
+    tab = _tab_with_token(qtbot, settings_path, holder, lambda url, token: list(HOSTED_ROWS))
+    _choose(qtbot, tab)
+
+    holder["token"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+
+    assert tab.findChild(QPushButton, "projects-backup-button").isHidden()
+    assert status.text() != TOKEN_UNREADABLE_TEXT
+    assert _checklist(tab).count() == 0

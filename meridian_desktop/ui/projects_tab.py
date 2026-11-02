@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 
 from meridian_desktop import hosted_client, local_client, project_tree, projects_backup, projects_reader, token_store
 from meridian_desktop.data_source import (
+    HOSTED_PATH_MODES,
     SOURCE_FILE,
     SOURCE_HOSTED,
     SOURCE_SERVER,
@@ -77,18 +78,21 @@ CHOOSE_BUTTON_TEXT = "Choose projects to back up"
 WRITE_CHECKED_TEXT = "Back up checked projects"
 CHOOSING_TEXT = "Reading the hosted project list..."
 CHOOSE_PROMPT_TEXT = "Press Choose projects to back up to read the hosted projects."
+TOKEN_UNREADABLE_TEXT = "Could not read the saved token. Try again."
 # Why a checklist is cleared. _reset_choice is the one place that clears it, and each reason has the line the owner sees.
 RESET_ACCOUNT_CHANGED = "account_changed"
 RESET_TOKEN_REMOVED = "token_removed"
 RESET_TOKEN_ADDED = "token_added"
 RESET_CHOOSE_ENDED = "choose_ended"
 RESET_WRITE_REFUSED = "write_refused"
+RESET_TOKEN_UNREADABLE = "token_unreadable"
 RESET_TEXT = {
     RESET_ACCOUNT_CHANGED: "The hosted account changed, so the checklist was cleared. Choose the projects again.",
     RESET_TOKEN_REMOVED: "No hosted token is saved, so the checklist was cleared.",
     RESET_TOKEN_ADDED: "A hosted token was saved again, so the checklist was cleared. Choose the projects again.",
     RESET_CHOOSE_ENDED: "The checklist was cleared.",
     RESET_WRITE_REFUSED: "The write was refused, so the checklist was cleared. Choose the projects again.",
+    RESET_TOKEN_UNREADABLE: TOKEN_UNREADABLE_TEXT,
 }
 
 FIELD_LABELS = {
@@ -127,7 +131,7 @@ def default_sources(secrets: SecretStore, *, server_transport: local_client.Tran
         probe=lambda url: local_client.probe_health(url, PROBE_TIMEOUT),
         read_server=lambda url: local_client.list_projects(url, transport=server_transport),
         read_file=projects_reader.list_projects,
-        get_token=lambda: token_store.get_token(store=secrets),
+        get_token=lambda: token_store.read_token(store=secrets),
         list_hosted=hosted_client.list_projects,
     )
 
@@ -186,6 +190,8 @@ class _Loaded:
     token_saved: bool | None = None
     # A fingerprint of the hosted URL and token this load read, so a checklist for another account is cleared.
     account_key: str | None = None
+    # True when the keychain read failed. That is not a removed token, so the saved state is kept.
+    token_unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,6 +217,7 @@ class _Chosen:
     key: str | None
     rows: tuple[dict[str, Any], ...]
     message: str = ""
+    reset: str = RESET_CHOOSE_ENDED
 
 
 @dataclass
@@ -233,34 +240,35 @@ def _usable_token(token: object) -> bool:
     return isinstance(token, str) and bool(token.strip())
 
 
-def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool, str | None]:
+def _load(store: SettingsStore, sources: DataSources) -> _Loaded:
     """Runs on a worker: reads the saved settings, resolves the one source the mode uses, and says whether a hosted
     token is saved, with the account fingerprint when one is.
 
-    The token is read at most once. The resolve's own read is reused. A load whose resolve never reads it reads it here.
+    The token is read once, here. A keychain read that fails is not "no token": the load reports token_unreadable, and
+    the saved state stays as the tab had it. The generation is set by the job that runs this.
     """
-    read: list[object] = []
-
-    def get_token() -> object:
-        if not read:
-            read.append(sources.get_token())
-        return read[0]
-
     settings = store.load().settings
-    outcome = resolve(settings, replace(sources, get_token=get_token))
     try:
-        token = get_token()
-    except Exception:  # noqa: BLE001 - an unreadable token only hides the backup button
-        token = None
+        token = sources.get_token()
+    except token_store.TokenReadError:
+        if settings.mode in HOSTED_PATH_MODES:
+            outcome = Resolution(STATE_READ_FAILED, None, message=TOKEN_UNREADABLE_TEXT)
+        else:
+            outcome = resolve(settings, replace(sources, get_token=lambda: None))
+        return _Loaded(0, outcome, None, None, token_unreadable=True)
+    outcome = resolve(settings, replace(sources, get_token=lambda: token))
     if not _usable_token(token):
-        return outcome, False, None
-    return outcome, True, projects_backup.account_key(settings.hosted_url, str(token))
+        return _Loaded(0, outcome, False, None)
+    return _Loaded(0, outcome, True, projects_backup.account_key(settings.hosted_url, str(token)))
 
 
 def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
     """Runs on a worker: backs up all the hosted projects in one run, through the same hosted reader the tab uses."""
     settings = store.load().settings
-    token = sources.get_token()
+    try:
+        token = sources.get_token()
+    except token_store.TokenReadError:
+        return _Backed(TOKEN_UNREADABLE_TEXT)
     if not _usable_token(token):
         return _Backed(projects_backup.NO_TOKEN_TEXT)
     try:
@@ -289,6 +297,8 @@ def _choose_work(store: SettingsStore, sources: DataSources, generation: int) ->
         if not _usable_token(token):
             return _Chosen(generation, None, (), projects_backup.NO_TOKEN_TEXT)
         rows = projects_backup.kept_projects(sources.list_hosted(settings.hosted_url, str(token)))
+    except token_store.TokenReadError:
+        return _Chosen(generation, None, (), TOKEN_UNREADABLE_TEXT, RESET_TOKEN_UNREADABLE)
     except hosted_client.HostedError as exc:
         return _Chosen(generation, None, (), f"{BACKUP_FAILED_TEXT}. {exc}")
     except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
@@ -311,7 +321,10 @@ def _write_checked(
     token, writes nothing.
     """
     settings = store.load().settings
-    token = sources.get_token()
+    try:
+        token = sources.get_token()
+    except token_store.TokenReadError:
+        return _Backed(TOKEN_UNREADABLE_TEXT, RESET_TOKEN_UNREADABLE)
     if not _usable_token(token):
         return _Backed(projects_backup.NO_TOKEN_TEXT, RESET_WRITE_REFUSED)
     if projects_backup.account_key(settings.hosted_url, str(token)) != key:
@@ -342,7 +355,7 @@ class _LoadJob(QRunnable):
         self,
         owner: object,
         generation: int,
-        work: Callable[[], tuple[Resolution, bool, str | None]],
+        work: Callable[[], _Loaded],
         delivery: Delivery,
     ) -> None:
         super().__init__()
@@ -353,16 +366,12 @@ class _LoadJob(QRunnable):
         self._delivery = delivery
 
     def run(self) -> None:
-        token_saved: bool | None
-        account_key: str | None = None
         try:
-            outcome, token_saved, account_key = self._work()
+            loaded = replace(self._work(), generation=self._generation)
         except Exception as exc:  # noqa: BLE001 - a worker must never raise into the pool
             failed = f"Projects could not be loaded ({exc.__class__.__name__})."
-            outcome = Resolution(STATE_READ_FAILED, None, message=failed)
-            token_saved = None
+            loaded = _Loaded(self._generation, Resolution(STATE_READ_FAILED, None, message=failed), None, None)
         try:
-            loaded = _Loaded(self._generation, outcome, token_saved, account_key)
             self._delivery.delivered.emit(Delivered(self._owner, loaded))
         except RuntimeError:
             pass  # the shared delivery object is gone, for example at shutdown
@@ -488,7 +497,10 @@ class ProjectsTab(QWidget):
         loaded = item.value
         if not isinstance(loaded, _Loaded) or loaded.generation != self._generation:
             return
-        if loaded.token_saved is not None:
+        if loaded.token_unreadable:
+            # A read failure keeps the saved state. The controls stay as they are, and the checklist is reset.
+            self._reset_choice(RESET_TOKEN_UNREADABLE, text=TOKEN_UNREADABLE_TEXT)
+        elif loaded.token_saved is not None:
             self._offer_backup(loaded.token_saved)
             self._sync_account(loaded.account_key)
         self._show(loaded.outcome)
@@ -711,7 +723,7 @@ class ProjectsTab(QWidget):
             row.status.setText(CHOOSE_PROMPT_TEXT)
             return
         if not chosen.rows:
-            self._reset_choice(RESET_CHOOSE_ENDED, text=chosen.message)
+            self._reset_choice(chosen.reset, text=chosen.message)
             self._set_busy(False)
             return
         self._chosen = chosen.rows

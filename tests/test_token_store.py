@@ -18,10 +18,12 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.token_store import (
     HOSTED_TOKEN_ACCOUNT,
     TOKEN_SERVICE,
+    TokenReadError,
     TokenStoreError,
     delete_token,
     get_token,
     has_token,
+    read_token,
     set_token,
 )
 
@@ -206,3 +208,27 @@ def test_has_token_reads_a_backend_failure_as_no_token_and_never_shows_its_text(
 
     assert answer is False
     assert FAKE_TOKEN not in repr(answer)
+
+
+# ----------------------------------------------------------------- "no token" and "could not read" are different
+
+
+def test_read_token_returns_none_when_nothing_is_stored_and_the_token_when_it_is(store):
+    assert read_token(store=store) is None
+    set_token(FAKE_TOKEN, store=store)
+    assert read_token(store=store) == FAKE_TOKEN
+
+
+def test_read_token_raises_on_a_backend_failure_and_never_shows_the_token():
+    store = KeyringSecretStore(backend=FailingKeyring(FAKE_TOKEN))
+
+    with pytest.raises(TokenReadError) as caught:
+        read_token(store=store)
+
+    assert FAKE_TOKEN not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_get_token_still_reads_a_backend_failure_as_none_for_its_other_callers():
+    store = KeyringSecretStore(backend=FailingKeyring(FAKE_TOKEN))
+    assert get_token(store=store) is None
