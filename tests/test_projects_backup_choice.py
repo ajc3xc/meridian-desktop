@@ -591,6 +591,15 @@ def _trigger_no_projects(qtbot, tab, settings_path, holder):
     return projects_backup.NO_PROJECTS_TEXT
 
 
+def _trigger_account_unknown(qtbot, tab, settings_path, holder):
+    """The list is shown, and then /me no longer confirms an account: the checklist cannot be trusted and is reset."""
+    holder["email"] = None
+    tab.refresh()
+    status = tab.findChild(QLabel, "projects-status")
+    qtbot.waitUntil(lambda: status.text() != LOADING_TEXT, timeout=5000)
+    return RESET_TEXT_FOR["account_unknown"]
+
+
 def _trigger_expired(qtbot, tab, settings_path, holder):
     """The list is shown, ten minutes pass, and the tab is shown again: the checklist is reset."""
     holder["clock"].now += 601
@@ -642,6 +651,7 @@ RESET_TEXT_FOR = {
     "account_changed": "The hosted account changed, so the checklist was cleared. Choose the projects again.",
     "token_removed": "No hosted token is saved, so the checklist was cleared.",
     "token_added": "A hosted token was saved again, so the checklist was cleared. Choose the projects again.",
+    "account_unknown": "The hosted account could not be confirmed, so the checklist was cleared. Choose again.",
 }
 
 TRIGGERS = {
@@ -654,6 +664,7 @@ TRIGGERS = {
     "stale_choose": _trigger_stale_choose,
     "token_unreadable": _trigger_token_unreadable,
     "expired": _trigger_expired,
+    "account_unknown": _trigger_account_unknown,
 }
 
 
