@@ -681,6 +681,22 @@ def test_hosts_are_read_in_parallel_and_keep_their_order_in_the_snapshot():
     assert sum(1 for call in run.calls if call[0] == "ssh") == 3
 
 
+def test_three_hosts_are_in_flight_at_the_same_time():
+    # The barrier releases only when all three ssh calls are waiting together. Read one after another, the first call
+    # would wait until the barrier times out, and that host would then be missing from the snapshot.
+    barrier = threading.Barrier(3, timeout=5)
+
+    class BarrierRunner(FakeRunner):
+        def __call__(self, argv, timeout):
+            if argv[0] == "ssh":
+                barrier.wait()
+            return super().__call__(argv, timeout)
+
+    answers = {ssh_key(f"h{index}"): ok(remote_stdout(gpu=REAL_GPU_LINE)) for index in range(3)}
+    snapshot = collect(BarrierRunner(answers), ("h0", "h1", "h2"), None, now=NOW)
+    assert sorted(row.host for row in snapshot.gpus) == ["h0", "h1", "h2"]
+
+
 def test_a_bad_saved_name_is_skipped_and_never_run():
     run = FakeRunner({ssh_key("good"): ok(remote_stdout(gpu=REAL_GPU_LINE))})
     snapshot = collect(run, ("-oProxyCommand=x", "good"), None, now=NOW)
