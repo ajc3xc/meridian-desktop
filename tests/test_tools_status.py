@@ -141,6 +141,7 @@ def core(tmp_path):
     checkout = tmp_path / "core"
     (checkout / "meridian").mkdir(parents=True)
     (checkout / "meridian" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "meridian" / "client_setup.py").write_text("", encoding="utf-8")
     python = tmp_path / "python.exe"
     python.write_text("", encoding="utf-8")
     return checkout, str(python)

@@ -8,8 +8,11 @@ and Remove change a file only when they run with --yes, and the core makes a bac
 Every outcome is a typed value, so the Settings page can say what happened in plain words:
   - a core checkout or Python that is not set, or missing, is a refusal and no process starts;
   - a command that fails, times out or cannot start is an error with plain text;
-  - only names, paths and actions are read from the output. A file's document or text is never kept,
-    and the raw stderr is never shown, because it can hold anything.
+  - only names, paths and actions are read from the output. A file's document or text is never kept.
+    When the command fails without the core's JSON error, only the last few stderr lines are shown,
+    with secret-shaped values redacted and each line cut to a fixed length (stderr_detail).
+  - a checkout without meridian/client_setup.py is refused before any process starts, because the
+    command cannot run from it.
 The process runner is injected, so tests use a fake and never start the real command.
 """
 
@@ -22,6 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from meridian_desktop.desktop_log import redact_text
 from meridian_desktop.settings_store import SettingsStore
 
 COMMAND_TIMEOUT_SECONDS = 60
@@ -115,6 +119,15 @@ UNKNOWN_ACTION_TEXT = "The Meridian core reported an action this desktop does no
 CHECKED_TEXT = "Checked. Nothing was written."
 PARTIAL_TEXT = "The Meridian core could not read every client. The rows say why."
 BAD_MODE_TEXT = "Unknown setup action."
+NO_SETUP_COMMAND_TEXT = (
+    "The Meridian core checkout at {path} has no client setup command (meridian/client_setup.py), so this "
+    "desktop cannot run the setup from it. In Settings, choose a Meridian core checkout that has that file, "
+    "then press Check setup."
+)
+STDERR_HEADING_TEXT = "Last lines of the setup command's error output:"
+# At most this many stderr lines are shown, and each is cut to this many characters. Redaction runs first.
+STDERR_TAIL_LINES = 5
+STDERR_LINE_CHARS = 240
 
 
 @dataclass(frozen=True)
@@ -169,12 +182,16 @@ class ClientChange:
 
 @dataclass(frozen=True)
 class CommandResult:
-    """The outcome of one command. ok is True only when the core ran and its output was read."""
+    """The outcome of one command. ok is True only when the core ran and its output was read.
+
+    detail holds the last stderr lines of a failure that had no JSON error (see stderr_detail). It is empty otherwise.
+    """
 
     ok: bool
     kind: str
     message: str = ""
     changes: tuple[ClientChange, ...] = ()
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,6 +216,7 @@ class CheckResult:
     rows: tuple[ClientRow, ...]
     message: str = ""
     configured: bool = True
+    detail: str = ""
 
 
 class _NotReady(Exception):
@@ -269,6 +287,23 @@ def _core_error(stderr: str) -> str | None:
     return None
 
 
+def stderr_detail(stderr: str) -> str:
+    """The heading and the last few non-empty stderr lines, redacted and cut. Empty when stderr holds no text.
+
+    Redaction runs on each whole line before it is cut, so a secret cut at the limit is never left half shown.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    tail = [redact_text(line)[:STDERR_LINE_CHARS] for line in lines[-STDERR_TAIL_LINES:]]
+    return "\n".join([STDERR_HEADING_TEXT, *tail])
+
+
+def message_with_detail(message: str, detail: str) -> str:
+    """The message, then the detail on its own line. Either part may be empty."""
+    return "\n".join(part for part in (message, detail) if part)
+
+
 def _argv(python: str, mode: str, client: str, *, write: bool) -> list[str]:
     argv = [python, "-m", CORE_MODULE, mode, "--client", client]
     if write:
@@ -331,6 +366,9 @@ class ClientSetupRunner:
             raise _NotReady(CHECKOUT_MISSING_TEXT.format(path=checkout))
         if not (checkout_path / "meridian" / "__init__.py").is_file():
             raise _NotReady(CHECKOUT_NOT_CORE_TEXT.format(path=checkout))
+        if not (checkout_path / "meridian" / "client_setup.py").is_file():
+            # An older checkout has the package but not the command. Starting it would fail with exit code 1.
+            raise _NotReady(NO_SETUP_COMMAND_TEXT.format(path=checkout))
         if not Path(python).is_file():
             raise _NotReady(PYTHON_MISSING_TEXT.format(path=python))
         return checkout_path, python
@@ -349,7 +387,12 @@ class ClientSetupRunner:
             core_message = _core_error(output.stderr)
             if core_message is not None:
                 return CommandResult(False, KIND_CORE_ERROR, core_message)
-            return CommandResult(False, KIND_FAILED, FAILED_TEXT.format(code=output.returncode))
+            return CommandResult(
+                False,
+                KIND_FAILED,
+                FAILED_TEXT.format(code=output.returncode),
+                detail=stderr_detail(output.stderr),
+            )
         try:
             changes = parse_changes(output.stdout)
         except ValueError:
@@ -369,7 +412,7 @@ class ClientSetupRunner:
             return self._rows_from_changes(result.changes)
         if result.kind == KIND_CORE_ERROR:
             return self._check_one_client_at_a_time(checkout, python)
-        return CheckResult(rows=unchecked_rows(), message=result.message)
+        return CheckResult(rows=unchecked_rows(), message=result.message, detail=result.detail)
 
     def _rows_from_changes(self, changes: tuple[ClientChange, ...]) -> CheckResult:
         by_client = {change.client: change for change in changes}
@@ -399,7 +442,8 @@ class ClientSetupRunner:
             if result.ok and match is not None:
                 rows.append(_row_from_change(match, label))
             else:
-                rows.append(ClientRow(client, label, NOT_READABLE, detail=result.message or NO_RESULT_TEXT))
+                shown = message_with_detail(result.message, result.detail)
+                rows.append(ClientRow(client, label, NOT_READABLE, detail=shown or NO_RESULT_TEXT))
         return CheckResult(rows=tuple(rows), message=PARTIAL_TEXT)
 
     # ----------------------------------------------------------- preview and change
@@ -455,10 +499,16 @@ __all__ = [
     "NOT_CHECKED",
     "NOT_COVERED",
     "NOT_READABLE",
+    "NO_SETUP_COMMAND_TEXT",
     "STATE_TEXT",
+    "STDERR_HEADING_TEXT",
+    "STDERR_LINE_CHARS",
+    "STDERR_TAIL_LINES",
     "WOULD_CHANGE",
+    "message_with_detail",
     "names_text",
     "parse_changes",
     "run_process",
+    "stderr_detail",
     "unchecked_rows",
 ]
