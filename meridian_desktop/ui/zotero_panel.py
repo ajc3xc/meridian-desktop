@@ -5,7 +5,9 @@ is built. It checks Zotero when first shown and when Refresh is pressed. Each ch
 the start action run on the thread pool, so the UI never blocks. Zotero starts only after the owner
 picks Start Zotero in a dialog whose default button is Cancel. Results are plain text (PlainText
 labels and plain table cells), so Zotero's text is never read as HTML. The results table is read-only
-and has the shared Copy action (Ctrl+C or the right-click menu).
+and has the shared Copy action (Ctrl+C or the right-click menu). The save section at the foot sends lines of
+reading-list items through the Meridian Zotero bridge. The bridge check runs with the other checks, and Save runs on the
+thread pool as well.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import zotero_client
+from meridian_desktop import zotero_bridge, zotero_client
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 from meridian_desktop.zotero_client import (
@@ -87,10 +90,21 @@ NO_RESULTS_TEXT = "No items in your Zotero library match \"{}\"."
 RESULTS_TEXT = "{} result(s) for \"{}\"."
 LIMIT_TEXT = " Showing the first {}; narrow the search to see fewer."
 RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
-# The three kinds of read the panel runs. Each kind has at most one read in flight.
+SAVE_HEADING = "Save to Zotero"
+SAVE_INTRO = (
+    "One item per line, as Title | URL. The items go into your Zotero library through the Meridian Zotero bridge. "
+    "Nothing is deleted."
+)
+SAVE_PLACEHOLDER = "Title | https://example.org/page"
+SAVE_BUTTON_TEXT = "Save to Zotero"
+SAVING_TEXT = "Saving to Zotero through the Meridian bridge..."
+BRIDGE_CHECKING_TEXT = "Bridge: checking..."
+# The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
 SEARCH = "search"
 ACTION = "action"
+BRIDGE = "bridge"
+SAVE = "save"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -207,10 +221,13 @@ class ZoteroPanel(QWidget):
         client: Any = zotero_client,
         confirm: Callable[[QWidget, str, str], bool] | None = None,
         parent: QWidget | None = None,
+        bridge: Any = zotero_bridge,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("zotero-panel")
         self._client = client
+        self._bridge = bridge
+        self._saving = False
         self._confirm = ask_start if confirm is None else confirm
         self._exe: str | None = None
         self._running: bool | None = None
@@ -280,10 +297,30 @@ class ZoteroPanel(QWidget):
         enable_table_copy(self._results)
         layout.addWidget(self._results, 1)
 
+        save_box = QVBoxLayout()
+        save_box.addWidget(_label(self, "zotero-save-heading", SAVE_HEADING))
+        save_box.addWidget(_label(self, "zotero-save-intro", SAVE_INTRO))
+        self._save_input = QPlainTextEdit(self)
+        self._save_input.setObjectName("zotero-save-input")
+        self._save_input.setPlaceholderText(SAVE_PLACEHOLDER)
+        self._save_input.setMinimumHeight(90)
+        save_box.addWidget(self._save_input)
+        save_row = QHBoxLayout()
+        self._save_button = QPushButton(SAVE_BUTTON_TEXT, self)
+        self._save_button.setObjectName("zotero-save-button")
+        self._bridge_state = _label(self, "zotero-bridge-state", BRIDGE_CHECKING_TEXT)
+        save_row.addWidget(self._save_button)
+        save_row.addWidget(self._bridge_state, 1)
+        save_box.addLayout(save_row)
+        self._save_result = _label(self, "zotero-save-result", "")
+        save_box.addWidget(self._save_result)
+        layout.addLayout(save_box)
+
         self._refresh_button.clicked.connect(self._on_refresh_clicked)
         self._start_button.clicked.connect(self._on_start_clicked)
         self._search_button.clicked.connect(self._on_search_clicked)
         self._search_input.returnPressed.connect(self._on_search_clicked)
+        self._save_button.clicked.connect(self._on_save_clicked)
 
     # ----------------------------------------------------------- status
 
@@ -309,6 +346,11 @@ class ZoteroPanel(QWidget):
         self._api_detail.setText("")
         self._start_hint.setText("")
         self._start_read(STATUS, self._client.status)
+        self._start_bridge_check()
+
+    def _start_bridge_check(self) -> None:
+        self._bridge_state.setText(BRIDGE_CHECKING_TEXT)
+        self._start_read(BRIDGE, self._bridge.bridge_status)
 
     def _start_read(self, kind: str, work: Callable[[], Any]) -> None:
         """Start one read on the thread pool. Its result comes back to _on_delivered, tagged with kind and number."""
@@ -339,6 +381,10 @@ class ZoteroPanel(QWidget):
             self._on_search_ready(done.payload)
         elif done.kind == ACTION:
             self._on_action_ready(done.payload)
+        elif done.kind == BRIDGE:
+            self._on_bridge_ready(done.payload)
+        elif done.kind == SAVE:
+            self._on_save_ready(done.payload)
 
     def _on_status_ready(self, payload: tuple) -> None:
         result, failure = payload
@@ -440,6 +486,39 @@ class ZoteroPanel(QWidget):
                 cell = QTableWidgetItem(value)
                 cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._results.setItem(row, column, cell)
+
+    # ----------------------------------------------------------- bridge and save
+
+    def _on_bridge_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        if failure is not None or not isinstance(result, zotero_bridge.BridgeStatus):
+            self._bridge_state.setText(failure or CHECK_FAILED_TEXT.format("NoResult"))
+            return
+        self._bridge_state.setText(result.message)
+
+    @Slot()
+    def _on_save_clicked(self) -> None:
+        if self._saving:
+            return
+        try:
+            items = self._bridge.parse_lines(self._save_input.toPlainText())
+        except zotero_bridge.BridgeInputError as exc:
+            self._save_result.setText(exc.message)
+            return
+        self._saving = True
+        self._save_button.setEnabled(False)
+        self._save_result.setText(SAVING_TEXT)
+        self._start_read(SAVE, functools.partial(self._bridge.save_items, items))
+
+    def _on_save_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        self._saving = False
+        self._save_button.setEnabled(True)
+        if failure is not None or not isinstance(result, zotero_bridge.SaveResult):
+            self._save_result.setText(failure or CHECK_FAILED_TEXT.format("NoResult"))
+        else:
+            self._save_result.setText(result.message)
+        self._start_bridge_check()
 
 
 __all__ = [

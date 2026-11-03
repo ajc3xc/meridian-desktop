@@ -77,6 +77,28 @@ def no_real_zotero_reads(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_zotero_bridge_writes(monkeypatch):
+    """The Meridian Zotero bridge on 127.0.0.1:23125 writes into the owner's own Zotero library, so no test may reach it.
+
+    Every request through the bridge's default transport is refused here, without a socket. A write (POST or DELETE)
+    that a test attempts is recorded, and the test fails at teardown, even when the code went on to swallow the
+    refusal. Reads are refused the same way. The Zotero API on 127.0.0.1:23119 is covered by no_real_zotero_reads.
+    """
+    from meridian_desktop import zotero_bridge, zotero_client
+
+    writes: list[str] = []
+
+    def refused(method, path, headers, body, timeout):
+        if method != "GET":
+            writes.append(f"{method} {path}")
+        raise zotero_client.ZoteroError("not_running", zotero_bridge.NOT_ANSWERING_TEXT)
+
+    monkeypatch.setattr(zotero_bridge, "http_request", refused)
+    yield writes
+    assert not writes, f"a test tried to write to the Zotero bridge: {writes}"
+
+
+@pytest.fixture(autouse=True)
 def no_real_gpu_or_runpod_reads(monkeypatch):
     """The GPUs tab reads this computer's GPUs with nvidia-smi and ssh, and the RunPod pods from the local server. A
     window that shows the tab without a fake would run those reads for real. Here each one is replaced: no program is
