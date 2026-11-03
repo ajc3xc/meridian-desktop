@@ -3,8 +3,12 @@
 Each test uses its own journal in pytest's temp folder. No test touches the real desktop state folder.
 """
 
+import errno
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -16,14 +20,17 @@ from meridian_desktop.zotero_journal import (
     JOURNAL_NAME,
     LANDED,
     LINE_HELD_TEXT,
+    LOCK_FAILED_TEXT,
     LOCK_SUFFIX,
     LOCK_TIMEOUT_TEXT,
     REFUSED,
+    UI_READ_TIMEOUT_SECONDS,
     UNKNOWN,
     WRITING,
     JournalError,
     SaveJournal,
     _lock_file,
+    _process_state,
     _unlock_file,
     default_path,
     journal_unreadable_text,
@@ -86,7 +93,7 @@ def test_only_the_line_outcome_id_and_time_are_stored(tmp_path):
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert set(stored) == {"version", "entries"}
     for entry in stored["entries"]:
-        assert set(entry) == {"id", "line", "outcome", "at"}
+        assert set(entry) == {"id", "line", "outcome", "at", "owner_pid", "owner_started"}
     assert "token" not in path.read_text(encoding="utf-8").lower()
     assert "grant" not in path.read_text(encoding="utf-8").lower()
 
@@ -246,6 +253,153 @@ def test_a_lock_held_by_another_process_times_out_with_a_fixed_message(tmp_path)
         with pytest.raises(JournalError) as info:
             journal.held()
         assert info.value.message == LOCK_TIMEOUT_TEXT
+    finally:
+        _unlock_file(holder)
+        holder.close()
+
+
+def _exited_pid() -> int:
+    """The id of a process that has already exited, so no running process has it."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _raw_entry(entry_id, line, outcome, owner_pid=None, owner_started=None):
+    return {
+        "id": entry_id,
+        "line": line,
+        "outcome": outcome,
+        "at": "2026-11-03T05:00:00+00:00",
+        "owner_pid": owner_pid,
+        "owner_started": owner_started,
+    }
+
+
+def _write_raw(path: Path, entries) -> None:
+    path.write_text(json.dumps({"version": 1, "entries": entries}), encoding="utf-8")
+
+
+def test_a_running_process_is_running_and_an_exited_one_is_not():
+    running, token = _process_state(os.getpid())
+    assert running
+    if os.name == "nt":
+        assert token
+    assert _process_state(_exited_pid())[0] is False
+
+
+def test_a_writing_entry_records_its_owner_and_finishing_clears_the_owner(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path)
+    entry_id = journal.begin(LINE)
+    stored = json.loads(path.read_text(encoding="utf-8"))["entries"][0]
+    assert stored["owner_pid"] == os.getpid()
+    if os.name == "nt":
+        assert stored["owner_started"]
+    journal.finish(entry_id, LANDED)
+    stored = json.loads(path.read_text(encoding="utf-8"))["entries"][0]
+    assert stored["owner_pid"] is None
+    assert stored["owner_started"] is None
+
+
+def test_a_writing_entry_whose_owner_has_exited_loads_as_unknown_and_can_be_cleared(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    _write_raw(path, [_raw_entry("a", LINE, WRITING, owner_pid=_exited_pid(), owner_started="1")])
+    journal = SaveJournal(path)
+    assert [(entry.id, entry.outcome) for entry in journal.held()] == [("a", UNKNOWN)]
+    assert journal.clear(["a"]) == 1
+    assert SaveJournal(path).held() == []
+
+
+def test_a_writing_entry_whose_owner_is_running_is_never_cleared(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path)
+    entry_id = journal.begin(LINE)  # owned by this running process
+    assert journal.clear([entry_id]) == 0
+    assert [(entry.id, entry.outcome) for entry in SaveJournal(path).held()] == [(entry_id, WRITING)]
+
+
+def test_a_reused_process_id_with_another_start_time_counts_as_an_exited_owner(tmp_path):
+    if os.name != "nt":
+        pytest.skip("the start time is read on Windows only")
+    path = tmp_path / JOURNAL_NAME
+    _write_raw(path, [_raw_entry("a", LINE, WRITING, owner_pid=os.getpid(), owner_started="0")])
+    assert [(entry.id, entry.outcome) for entry in SaveJournal(path).held()] == [("a", UNKNOWN)]
+
+
+def test_a_writing_entry_with_no_owner_is_unknown(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    _write_raw(path, [_raw_entry("a", LINE, WRITING)])
+    assert [(entry.id, entry.outcome) for entry in SaveJournal(path).held()] == [("a", UNKNOWN)]
+
+
+@pytest.mark.parametrize("operation", ["held", "begin", "finish", "record_unknown", "clear"])
+def test_every_operation_waits_for_the_lock_and_is_refused_busy_while_another_window_holds_it(tmp_path, operation):
+    path = tmp_path / JOURNAL_NAME
+    entry_id = SaveJournal(path).begin(LINE)
+    before = path.read_bytes()
+    journal = SaveJournal(path, lock_timeout=0.2)
+    calls = {
+        "held": journal.held,
+        "begin": lambda: journal.begin("Paper 2 | https://example.org/2"),
+        "finish": lambda: journal.finish(entry_id, LANDED),
+        "record_unknown": lambda: journal.record_unknown(["Paper 3 | https://example.org/3"]),
+        "clear": lambda: journal.clear([entry_id]),
+    }
+    holder = open(path.with_name(path.name + LOCK_SUFFIX), "a+b")
+    _lock_file(holder)
+    try:
+        with pytest.raises(JournalError) as info:
+            calls[operation]()
+        assert info.value.busy
+        assert info.value.message == LOCK_TIMEOUT_TEXT
+    finally:
+        _unlock_file(holder)
+        holder.close()
+    assert path.read_bytes() == before
+
+
+def test_a_lock_error_that_is_not_contention_is_raised_at_once_with_its_cause(tmp_path, monkeypatch):
+    def bad_handle(handle):
+        raise OSError(errno.EBADF, "bad handle")
+
+    monkeypatch.setattr(zotero_journal, "_lock_file", bad_handle)
+    started = time.monotonic()
+    with pytest.raises(JournalError) as info:
+        SaveJournal(tmp_path / JOURNAL_NAME, lock_timeout=10.0)
+    assert time.monotonic() - started < 1.0
+    assert info.value.busy is False
+    assert info.value.message != LOCK_TIMEOUT_TEXT
+    assert LOCK_FAILED_TEXT in info.value.message
+    assert "bad handle" in info.value.message
+
+
+def test_contention_is_waited_for_and_then_reported_busy(tmp_path, monkeypatch):
+    def held_elsewhere(handle):
+        raise OSError(errno.EACCES, "locked by another window")
+
+    monkeypatch.setattr(zotero_journal, "_lock_file", held_elsewhere)
+    started = time.monotonic()
+    with pytest.raises(JournalError) as info:
+        SaveJournal(tmp_path / JOURNAL_NAME, lock_timeout=0.3)
+    elapsed = time.monotonic() - started
+    assert info.value.busy
+    assert info.value.message == LOCK_TIMEOUT_TEXT
+    assert 0.3 <= elapsed < 2.0
+
+
+def test_a_read_that_gates_the_window_gives_up_within_half_a_second(tmp_path):
+    assert UI_READ_TIMEOUT_SECONDS == 0.5
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path, read_timeout=UI_READ_TIMEOUT_SECONDS)
+    holder = open(path.with_name(path.name + LOCK_SUFFIX), "a+b")
+    _lock_file(holder)
+    try:
+        started = time.monotonic()
+        with pytest.raises(JournalError) as info:
+            journal.held()
+        assert time.monotonic() - started < 1.0
+        assert info.value.busy
     finally:
         _unlock_file(holder)
         holder.close()
