@@ -8,9 +8,9 @@ grant is not granted at once, it cancels the grant and reports not_open_for_writ
 - token_file_path and read_token: the token file under Meridian's local-runner state folder. A missing or empty file
   means the bridge is off, and no request is sent.
 - bridge_status: GET /v1/status, which only reads.
-- save_items: one grant for the batch, one POST /v1/items per item, then the grant ends. It stops at the first refusal
-  and reports the titles that landed, the items not saved, and any item whose write may have landed without an answer.
-  It never trashes, restores or deletes anything.
+- save_items: one grant for the batch, one POST /v1/items per item, then the grant ends. It always returns a result. The
+  result lists the titles that landed, the items not saved, and any item whose write got no answer. It never trashes,
+  restores or deletes anything.
 - parse_lines: reads the "Title | URL" lines the panel shows.
 
 Every request goes through an injectable transport: transport(method, path, headers, body, timeout) -> Reply. A
@@ -69,6 +69,9 @@ ERROR = "error"
 ANSWERING = "answering"
 UNAUTHORIZED = "unauthorized"
 
+PROMPT_OPEN_WARNING = "A prompt may be open in Zotero. Press Deny there."
+PROMPT_STILL_OPEN_WARNING = "A prompt may still be open in Zotero. Press Deny there."
+
 NOTHING_TO_SAVE = "Type at least one line as Title | URL. Nothing was saved."
 TOO_MANY_TEXT = f"Save at most {MAX_ITEMS} items at a time. Nothing was saved."
 LINE_TEXT = "Line {} needs a title and a URL, separated by |. Nothing was saved."
@@ -94,17 +97,25 @@ TIMEOUT_TEXT = (
 TOKEN_REFUSED_TEXT = "The Meridian Zotero bridge refused its token. Check the token file, then try again."
 BAD_RESPONSE_TEXT = "The Meridian Zotero bridge sent a response the desktop could not read."
 SAVED_TEXT = "Saved {} item(s) to Zotero through the Meridian bridge."
-NOT_OPEN_TEXT = (
-    "Nothing was saved. Zotero did not grant a write at once: {}. The request was cancelled. "
-    "If Zotero asks a person to answer a prompt, open local writes is off in the Meridian Zotero plugin."
+NOT_OPEN_REFUSED_TEXT = "Nothing was saved. Zotero refused the request ({}), so nothing was opened or cancelled."
+NOT_OPEN_TEXT = "Nothing was saved. Zotero did not grant a write at once: {}. The request was cancelled."
+NOT_OPEN_PROMPT_TEXT = (
+    "Nothing was saved. Zotero did not grant a write at once: {}. The request was cancelled. " + PROMPT_STILL_OPEN_WARNING
 )
 NOT_OPEN_CANCEL_FAILED_TEXT = (
     "Nothing was saved. Zotero did not grant a write at once: {}. The request could not be cancelled. "
-    "A prompt may still be open in Zotero. Press Deny there."
+    + PROMPT_STILL_OPEN_WARNING
 )
-KEY_MAY_STAY_LIVE_TEXT = "The write key could not be ended, so it may stay live for up to an hour."
+NOT_OPEN_CANCEL_FAILED_NO_PROMPT_TEXT = (
+    "Nothing was saved. Zotero did not grant a write at once: {}. The request could not be cancelled, and no prompt "
+    "is waiting."
+)
+KEY_MAY_STAY_LIVE_TEXT = (
+    "The write key could not be ended, so it may stay live until Zotero restarts or for up to eight hours."
+)
 LANDED_TEXT = "Landed in Zotero: {}."
 NOTHING_LANDED_TEXT = "Nothing landed in Zotero."
+NOTHING_CONFIRMED_TEXT = "Nothing is confirmed to have landed."
 NOT_SAVED_TEXT = "Not saved: {}."
 NOT_SENT_TEXT = "Not sent: {}."
 NO_ITEMS_AFTER_TEXT = "There were no items after it."
@@ -114,6 +125,11 @@ STOPPED_TEXT = "Saved {} of {} item(s). Stopped at item {}: {}. {} {} {}"
 UNKNOWN_TEXT = (
     "Saved {} of {} item(s). Item {} may or may not have been saved. Check Zotero for it before you retry. {} {}"
 )
+UNEXPECTED_TEXT = (
+    "Saved {} of {} item(s). The save stopped unexpectedly, so item {} may or may not have been saved. "
+    "Check Zotero for it before you retry. {} {}"
+)
+UNEXPECTED_DONE_TEXT = "Saved {} of {} item(s). The save stopped unexpectedly after the last write. Check Zotero before you save again."
 PENDING_REASON = "Zotero is asking a person to answer a prompt"
 DENIED_REASON = "a person refused it"
 UNKNOWN_REASON = "Zotero did not grant it"
@@ -185,12 +201,22 @@ class _Refusal:
 class _NotOpen(Exception):
     """A grant was not granted at once. ``reason`` is a short phrase for the message.
 
-    ``cancel_failed`` is set when the grant existed and the request to cancel it failed, so a prompt may still be open.
+    ``refused`` is set when Zotero refused the grant request itself, so no grant exists. ``prompt_possible`` is set when
+    a prompt could still be on screen. ``cancel_failed`` is set when the grant existed and the request to cancel it failed.
     """
 
-    def __init__(self, reason: str, *, cancel_failed: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        refused: bool = False,
+        prompt_possible: bool = False,
+        cancel_failed: bool = False,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.refused = refused
+        self.prompt_possible = prompt_possible
         self.cancel_failed = cancel_failed
 
 
@@ -235,6 +261,14 @@ def _transport_error(reason: object) -> ZoteroError:
     return ZoteroError("unreachable", UNREACHABLE_TEXT)
 
 
+def _read_error_body(exc: urllib.error.HTTPError) -> bytes:
+    """The body of an error reply. The status is what callers need, so a body that cannot be read is dropped, not raised."""
+    try:
+        return _read_bounded(exc)
+    except (ZoteroError, OSError, http.client.HTTPException, ValueError):
+        return b""
+
+
 def bridge_transport(base_url: str = BRIDGE_BASE_URL) -> Transport:
     """A loopback transport for one base URL. http_request, the default, is this for the bridge on 127.0.0.1:23125.
 
@@ -259,7 +293,7 @@ def bridge_transport(base_url: str = BRIDGE_BASE_URL) -> Transport:
                 return Reply(response.status, _read_bounded(response))
         except urllib.error.HTTPError as exc:
             try:
-                return Reply(exc.code, _read_bounded(exc))
+                return Reply(exc.code, _read_error_body(exc))
             finally:
                 exc.close()
         except urllib.error.URLError as exc:
@@ -296,6 +330,27 @@ def _send(
     if reply.status == 401:
         raise ZoteroError("unauthorized", TOKEN_REFUSED_TEXT)
     return reply
+
+
+def _grant_request(
+    fetch: Transport,
+    method: str,
+    path: str,
+    token: str,
+    *,
+    body: Mapping[str, object] | None = None,
+) -> Reply:
+    """A request in the grant phase. Once the grant request may have reached Zotero, a failure can leave a prompt open.
+
+    A refused connection, a refused token and a timeout are passed on as they are. A timeout's text already warns about a
+    prompt. Any other transport failure gets the prompt warning added.
+    """
+    try:
+        return _send(fetch, method, path, token, body=body)
+    except ZoteroError as exc:
+        if exc.code in ("not_running", "unauthorized", "timeout"):
+            raise
+        raise ZoteroError(exc.code, f"{exc.message} {PROMPT_OPEN_WARNING}") from None
 
 
 def _json_object(body: bytes) -> dict:
@@ -409,12 +464,13 @@ def _batch_problem(items: Sequence[ReadingItem]) -> str | None:
     return None
 
 
-def _not_granted_reason(status: object) -> str:
-    if status == "pending":
-        return PENDING_REASON
+def _not_granted(status: object) -> _NotOpen:
+    """The exception for a grant that is not granted. A denied grant has no prompt left on screen."""
     if status == "denied":
-        return DENIED_REASON
-    return UNKNOWN_REASON
+        return _NotOpen(DENIED_REASON)
+    if status == "pending":
+        return _NotOpen(PENDING_REASON, prompt_possible=True)
+    return _NotOpen(UNKNOWN_REASON, prompt_possible=True)
 
 
 def _open_grant(fetch: Transport, token: str) -> tuple[str, str, dt.datetime | None]:
@@ -424,27 +480,31 @@ def _open_grant(fetch: Transport, token: str) -> tuple[str, str, dt.datetime | N
     reported on the _NotOpen as cancel_failed. A grant with no expires_at is still usable: the expiry is then unknown, and
     the bridge's own refusal (grant_required) stops the batch if the grant has lapsed.
     """
-    reply = _send(fetch, "POST", GRANTS_PATH, token, body={"app_name": APP_NAME})
+    reply = _grant_request(fetch, "POST", GRANTS_PATH, token, body={"app_name": APP_NAME})
     body = _json_object(reply.body)
     grant_id = body.get("grant_id")
     if reply.status not in (200, 202) or not isinstance(grant_id, str) or not grant_id:
-        raise _NotOpen(f"Zotero answered {_error_code(reply)}")
+        raise _NotOpen(_error_code(reply), refused=True)
     try:
         if body.get("status") != "granted":
-            raise _NotOpen(_not_granted_reason(body.get("status")))
-        poll = _send(fetch, "GET", f"{GRANTS_PATH}/{grant_id}", token)
+            raise _not_granted(body.get("status"))
+        poll = _grant_request(fetch, "GET", f"{GRANTS_PATH}/{grant_id}", token)
         grant = _json_object(poll.body)
         if poll.status != 200:
             raise ZoteroError("bad_response", BAD_RESPONSE_TEXT)
         if grant.get("status") != "granted":
-            raise _NotOpen(_not_granted_reason(grant.get("status")))
+            raise _not_granted(grant.get("status"))
         write_key = grant.get("write_key")
         if not isinstance(write_key, str) or not write_key:
             raise ZoteroError("bad_response", BAD_RESPONSE_TEXT)
         expires_at = _parse_time(grant.get("expires_at"))
     except _NotOpen as exc:
         if not _end_grant(fetch, token, grant_id):
-            raise _NotOpen(exc.reason, cancel_failed=True) from None
+            raise _NotOpen(
+                exc.reason,
+                prompt_possible=exc.prompt_possible,
+                cancel_failed=True,
+            ) from None
         raise
     except BaseException:
         _end_grant(fetch, token, grant_id)
@@ -478,10 +538,14 @@ def _create_item(fetch: Transport, token: str, write_key: str, item: ReadingItem
 
 
 def _end_grant(fetch: Transport, token: str, grant_id: str) -> bool:
-    """End a grant at once. True when the bridge confirmed it ended, or it was already gone. Never raises."""
+    """End a grant at once. True when the bridge confirmed it ended, or it was already gone.
+
+    This runs in cleanup, so nothing may escape from it. Any failure is reported as False, and the caller then warns that
+    the key may stay live.
+    """
     try:
         reply = _send(fetch, "DELETE", f"{GRANTS_PATH}/{grant_id}", token)
-    except ZoteroError:
+    except Exception:  # noqa: BLE001 - cleanup must never raise
         return False
     return 200 <= reply.status < 300 or reply.status == 404
 
@@ -495,12 +559,23 @@ def _landed(items: Sequence[ReadingItem], saved: int) -> tuple[str, ...]:
     return tuple(item.title for item in items[:saved])
 
 
-def _landed_text(landed: tuple[str, ...]) -> str:
-    return NOTHING_LANDED_TEXT if not landed else LANDED_TEXT.format("; ".join(landed))
+def _landed_text(landed: tuple[str, ...], *, empty: str = NOTHING_LANDED_TEXT) -> str:
+    return empty if not landed else LANDED_TEXT.format("; ".join(landed))
 
 
 def _span(first: int, last: int) -> str:
     return f"item {first}" if first == last else f"items {first} to {last}"
+
+
+def _not_open_message(exc: _NotOpen) -> str:
+    """The message for a grant that was not granted at once, with the prompt warning only when a prompt may be open."""
+    if exc.refused:
+        return NOT_OPEN_REFUSED_TEXT.format(exc.reason)
+    if exc.cancel_failed:
+        template = NOT_OPEN_CANCEL_FAILED_TEXT if exc.prompt_possible else NOT_OPEN_CANCEL_FAILED_NO_PROMPT_TEXT
+        return template.format(exc.reason)
+    template = NOT_OPEN_PROMPT_TEXT if exc.prompt_possible else NOT_OPEN_TEXT
+    return template.format(exc.reason)
 
 
 def _grant_ended(items: Sequence[ReadingItem], saved: int) -> SaveResult:
@@ -536,8 +611,32 @@ def _unknown(items: Sequence[ReadingItem], saved: int, number: int) -> SaveResul
     total = len(items)
     landed = _landed(items, saved)
     rest = NOT_SENT_TEXT.format(_span(number + 1, total)) if number < total else NO_ITEMS_AFTER_TEXT
-    message = UNKNOWN_TEXT.format(saved, total, number, _landed_text(landed), rest)
+    message = UNKNOWN_TEXT.format(saved, total, number, _landed_text(landed, empty=NOTHING_CONFIRMED_TEXT), rest)
     return SaveResult(UNKNOWN, saved, message, landed)
+
+
+def _unexpected_stop(items: Sequence[ReadingItem], landed: list[str], *, key_may_stay_live: bool) -> SaveResult:
+    """A save that stopped on an error no branch expected. It still lists what landed, and treats the next item as unknown."""
+    total = len(items)
+    saved = len(landed)
+    confirmed = tuple(landed)
+    if saved < total:
+        number = saved + 1
+        rest = NOT_SENT_TEXT.format(_span(number + 1, total)) if number < total else NO_ITEMS_AFTER_TEXT
+        message = UNEXPECTED_TEXT.format(
+            saved,
+            total,
+            number,
+            _landed_text(confirmed, empty=NOTHING_CONFIRMED_TEXT),
+            rest,
+        )
+        if saved == 0:
+            message = f"{message} {PROMPT_OPEN_WARNING}"
+    else:
+        message = UNEXPECTED_DONE_TEXT.format(saved, total)
+    if key_may_stay_live:
+        message = f"{message} {KEY_MAY_STAY_LIVE_TEXT}"
+    return SaveResult(UNKNOWN, saved, message, confirmed)
 
 
 def _write_batch(
@@ -547,21 +646,49 @@ def _write_batch(
     items: Sequence[ReadingItem],
     clock: Callable[[], dt.datetime],
     expires_at: dt.datetime | None,
+    landed: list[str],
 ) -> SaveResult:
-    saved = 0
+    """Write the items in order. Each title that Zotero confirms is appended to ``landed`` as soon as it is confirmed."""
     for number, item in enumerate(items, start=1):
         if _lapsed(clock, expires_at):
-            return _grant_ended(items, saved)
+            return _grant_ended(items, len(landed))
         refusal = _create_item(fetch, token, write_key, item)
         if refusal is None:
-            saved += 1
+            landed.append(item.title)
             continue
+        saved = len(landed)
         if refusal.state == GRANT_EXPIRED:
             return _grant_ended(items, saved)
         if refusal.state == UNKNOWN:
             return _unknown(items, saved, number)
         return _stopped(items, saved, number, refusal)
-    return SaveResult(SAVED, saved, SAVED_TEXT.format(saved), _landed(items, saved))
+    return SaveResult(SAVED, len(landed), SAVED_TEXT.format(len(landed)), tuple(landed))
+
+
+def _save_granted(
+    items: Sequence[ReadingItem],
+    fetch: Transport,
+    token: str,
+    clock: Callable[[], dt.datetime],
+    landed: list[str],
+) -> SaveResult:
+    """The grant and the writes. The grant is ended on every path that got one, and the result says whether it ended."""
+    try:
+        grant_id, write_key, expires_at = _open_grant(fetch, token)
+    except _NotOpen as exc:
+        return SaveResult(NOT_OPEN_FOR_WRITES, 0, _not_open_message(exc))
+    except ZoteroError as exc:
+        state = BRIDGE_OFF if exc.code == "not_running" else ERROR
+        return SaveResult(state, 0, exc.message)
+    try:
+        result = _write_batch(fetch, token, write_key, items, clock, expires_at, landed)
+    except Exception:  # noqa: BLE001 - the batch must still report what landed, whatever failed
+        ended = _end_grant(fetch, token, grant_id)
+        return _unexpected_stop(items, landed, key_may_stay_live=not ended)
+    ended = _end_grant(fetch, token, grant_id)
+    if ended:
+        return result
+    return replace(result, message=f"{result.message} {KEY_MAY_STAY_LIVE_TEXT}")
 
 
 def save_items(
@@ -571,7 +698,7 @@ def save_items(
     token_path: Path | None = None,
     now: Callable[[], dt.datetime] | None = None,
 ) -> SaveResult:
-    """Save the items as one batch: one grant, one write per item, then the grant ends. Never raises.
+    """Save the items as one batch: one grant, one write per item, then the grant ends. Always returns a result.
 
     The batch is checked before any request. A grant that is not granted at once writes nothing. A refusal stops the
     batch. The result names the titles that landed, the items not saved, and an item whose write got no answer, which
@@ -586,21 +713,11 @@ def save_items(
         return SaveResult(BRIDGE_OFF, 0, NO_TOKEN_TEXT)
     fetch = http_request if transport is None else transport
     clock = _utc_now if now is None else now
+    landed: list[str] = []
     try:
-        grant_id, write_key, expires_at = _open_grant(fetch, token)
-    except _NotOpen as exc:
-        template = NOT_OPEN_CANCEL_FAILED_TEXT if exc.cancel_failed else NOT_OPEN_TEXT
-        return SaveResult(NOT_OPEN_FOR_WRITES, 0, template.format(exc.reason))
-    except ZoteroError as exc:
-        state = BRIDGE_OFF if exc.code == "not_running" else ERROR
-        return SaveResult(state, 0, exc.message)
-    try:
-        result = _write_batch(fetch, token, write_key, items, clock, expires_at)
-    finally:
-        ended = _end_grant(fetch, token, grant_id)
-    if ended:
-        return result
-    return replace(result, message=f"{result.message} {KEY_MAY_STAY_LIVE_TEXT}")
+        return _save_granted(items, fetch, token, clock, landed)
+    except Exception:  # noqa: BLE001 - last line of defence: a save never raises into the panel
+        return _unexpected_stop(items, landed, key_may_stay_live=True)
 
 
 __all__ = [
@@ -609,6 +726,7 @@ __all__ = [
     "ERROR",
     "GRANT_EXPIRED",
     "NOT_OPEN_FOR_WRITES",
+    "PROMPT_OPEN_WARNING",
     "SAVED",
     "UNAUTHORIZED",
     "UNKNOWN",

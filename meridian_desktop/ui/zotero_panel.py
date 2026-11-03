@@ -7,7 +7,7 @@ picks Start Zotero in a dialog whose default button is Cancel. Results are plain
 labels and plain table cells), so Zotero's text is never read as HTML. The results table is read-only
 and has the shared Copy action (Ctrl+C or the right-click menu). The save section at the foot sends lines of
 reading-list items through the Meridian Zotero bridge. The bridge check runs with the other checks, and Save runs on the
-thread pool as well.
+thread pool as well. A line whose outcome is unknown is held back until the person checks Zotero and presses I checked Zotero.
 """
 
 from __future__ import annotations
@@ -99,8 +99,14 @@ SAVE_PLACEHOLDER = "Title | https://example.org/page"
 SAVE_BUTTON_TEXT = "Save to Zotero"
 SAVING_TEXT = "Saving to Zotero through the Meridian bridge..."
 SAVE_NO_RESULT_TEXT = (
-    "The save ended without a result, so the lines are still in the box. Check Zotero before you save again."
+    "The save ended without a result, so every line is held back. Check Zotero before you save again."
 )
+SAVE_HELD_TEXT = "Save is off until you check Zotero for the held lines and press I checked Zotero."
+HELD_HEADING = (
+    "Held back: these may already be in Zotero, so they are not retried. Check Zotero, then press I checked Zotero."
+)
+HELD_BUTTON_TEXT = "I checked Zotero"
+HELD_RELEASED_TEXT = "Released. Nothing was retried."
 BRIDGE_CHECKING_TEXT = "Bridge: checking..."
 # The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
@@ -232,6 +238,8 @@ class ZoteroPanel(QWidget):
         self._bridge = bridge
         self._saving = False
         self._pending_lines: list[str] = []
+        # Lines whose outcome is unknown. Save stays off while any are held.
+        self._held: list[str] = []
         self._confirm = ask_start if confirm is None else confirm
         self._exe: str | None = None
         self._running: bool | None = None
@@ -318,6 +326,16 @@ class ZoteroPanel(QWidget):
         save_box.addLayout(save_row)
         self._save_result = _label(self, "zotero-save-result", "")
         save_box.addWidget(self._save_result)
+        self._held_heading = _label(self, "zotero-held-heading", HELD_HEADING)
+        self._held_lines = QPlainTextEdit(self)
+        self._held_lines.setObjectName("zotero-held-lines")
+        self._held_lines.setReadOnly(True)
+        self._held_lines.setMinimumHeight(60)
+        self._held_button = QPushButton(HELD_BUTTON_TEXT, self)
+        self._held_button.setObjectName("zotero-held-checked")
+        for widget in (self._held_heading, self._held_lines, self._held_button):
+            save_box.addWidget(widget)
+            widget.setVisible(False)
         layout.addLayout(save_box)
 
         self._refresh_button.clicked.connect(self._on_refresh_clicked)
@@ -325,6 +343,7 @@ class ZoteroPanel(QWidget):
         self._search_button.clicked.connect(self._on_search_clicked)
         self._search_input.returnPressed.connect(self._on_search_clicked)
         self._save_button.clicked.connect(self._on_save_clicked)
+        self._held_button.clicked.connect(self._on_held_checked_clicked)
 
     # ----------------------------------------------------------- status
 
@@ -500,9 +519,25 @@ class ZoteroPanel(QWidget):
             return
         self._bridge_state.setText(result.message)
 
+    def _hold(self, lines: list[str]) -> None:
+        """Hold the lines whose outcome is unknown. Save stays off while any are held, until the person checks Zotero."""
+        self._held = list(lines)
+        self._held_lines.setPlainText("\n".join(self._held))
+        for widget in (self._held_heading, self._held_lines, self._held_button):
+            widget.setVisible(bool(self._held))
+        self._save_button.setEnabled(not self._held and not self._saving)
+
+    @Slot()
+    def _on_held_checked_clicked(self) -> None:
+        self._hold([])
+        self._save_result.setText(HELD_RELEASED_TEXT)
+
     @Slot()
     def _on_save_clicked(self) -> None:
         if self._saving:
+            return
+        if self._held:
+            self._save_result.setText(SAVE_HELD_TEXT)
             return
         text = self._save_input.toPlainText()
         try:
@@ -523,14 +558,18 @@ class ZoteroPanel(QWidget):
         lines, self._pending_lines = self._pending_lines, []
         self._saving = False
         self._save_input.setReadOnly(False)
-        self._save_button.setEnabled(True)
         if failure is None and isinstance(result, zotero_bridge.SaveResult):
-            # The first `saved` lines landed in Zotero, so they leave the box. The rest stay, so nothing is written twice.
-            self._save_input.setPlainText("\n".join(lines[result.saved :]))
+            # The first `saved` lines landed in Zotero, so they leave the box. An unknown line is held back, and the lines
+            # after it were not sent, so they stay in the box.
+            held = lines[result.saved : result.saved + 1] if result.state == zotero_bridge.UNKNOWN else []
+            self._save_input.setPlainText("\n".join(lines[result.saved + len(held) :]))
             self._save_result.setText(result.message)
+            self._hold(held)
         else:
-            # No result came back, so nothing leaves the box, and the person checks Zotero before saving again.
+            # No result came back, so nothing is known about any line. Every line is held back, and the box is cleared.
+            self._save_input.setPlainText("")
             self._save_result.setText(SAVE_NO_RESULT_TEXT)
+            self._hold(lines)
         self._start_bridge_check()
 
 

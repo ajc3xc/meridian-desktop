@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton
 
-from meridian_desktop.ui.zotero_panel import SAVE_NO_RESULT_TEXT, ZoteroPanel
+from meridian_desktop.ui.zotero_panel import HELD_RELEASED_TEXT, SAVE_NO_RESULT_TEXT, ZoteroPanel
 from meridian_desktop.zotero_bridge import (
     ANSWERING,
     ANSWERING_STATUS,
@@ -36,6 +36,7 @@ from meridian_desktop.zotero_bridge import (
     NOT_ANSWERING_TEXT,
     NOT_OPEN_CANCEL_FAILED_TEXT,
     NOT_OPEN_FOR_WRITES,
+    PROMPT_OPEN_WARNING,
     SAVED,
     SAVED_TEXT,
     TIMEOUT_TEXT,
@@ -287,8 +288,17 @@ def test_a_grant_not_granted_at_once_is_cancelled_and_nothing_is_written(tmp_pat
     assert result.state == NOT_OPEN_FOR_WRITES
     assert result.saved == 0
     assert phrase in result.message
+    assert ("Press Deny there." in result.message) == (answer == "pending")
     assert _writes(bridge) == []
     assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
+
+
+def test_a_failed_cancel_of_a_denied_grant_says_no_prompt_is_waiting(tmp_path):
+    bridge = FakeBridge(grant="denied", delete_reply=ZoteroError("unreachable", UNREACHABLE_TEXT))
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == NOT_OPEN_FOR_WRITES
+    assert "The request could not be cancelled, and no prompt is waiting." in result.message
+    assert "Press Deny" not in result.message
 
 
 def test_a_refused_grant_request_reports_the_code_and_has_no_grant_to_cancel(tmp_path):
@@ -296,6 +306,7 @@ def test_a_refused_grant_request_reports_the_code_and_has_no_grant_to_cancel(tmp
     result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path))
     assert result.state == NOT_OPEN_FOR_WRITES
     assert "grant_cooldown" in result.message
+    assert "so nothing was opened or cancelled" in result.message
     assert _writes(bridge) == []
     assert _deletes(bridge) == []
 
@@ -443,6 +454,49 @@ def test_an_unknown_last_item_is_followed_by_no_items(tmp_path):
     assert len(_writes(bridge)) == 3
 
 
+def test_an_unknown_first_item_says_nothing_is_confirmed_to_have_landed(tmp_path):
+    bridge = FakeBridge(writes=[ZoteroError("timeout", TIMEOUT_TEXT)])
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == UNKNOWN
+    assert result.saved == 0
+    assert result.landed == ()
+    assert result.message == (
+        "Saved 0 of 2 item(s). Item 1 may or may not have been saved. Check Zotero for it before you retry. "
+        "Nothing is confirmed to have landed. Not sent: item 2."
+    )
+
+
+def test_an_unexpected_error_mid_batch_still_returns_the_items_that_landed(tmp_path):
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), TimeoutError("timed out")])
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == UNKNOWN
+    assert result.saved == 1
+    assert result.landed == ("First paper",)
+    assert "so item 2 may or may not have been saved" in result.message
+    assert "Landed in Zotero: First paper." in result.message
+    assert KEY_MAY_STAY_LIVE_TEXT not in result.message
+
+
+def test_a_delete_that_raises_in_the_finally_still_returns_the_items_that_landed(tmp_path):
+    bridge = FakeBridge(delete_reply=TimeoutError("timed out"))
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == SAVED
+    assert result.landed == ("First paper", "Second paper")
+    assert result.message == f"{SAVED_TEXT.format(2)} {KEY_MAY_STAY_LIVE_TEXT}"
+
+
+def test_a_timed_out_error_body_keeps_the_status_and_the_items_that_landed(monkeypatch, tmp_path, save_stub):
+    monkeypatch.setattr(zotero_bridge, "TIMEOUT", 0.3)
+    result = save_items(ITEMS, transport=bridge_transport(save_stub), token_path=_token_file(tmp_path))
+    assert result.state == ERROR
+    assert result.saved == 1
+    assert result.landed == ("First paper",)
+    assert result.message == (
+        "Saved 1 of 2 item(s). Stopped at item 2: Zotero answered HTTP 500. Landed in Zotero: First paper. "
+        "Not saved: item 2. Check Zotero before you save again."
+    )
+
+
 def test_the_bridge_stopping_mid_batch_is_bridge_off(tmp_path):
     bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), ZoteroError("not_running", NOT_ANSWERING_TEXT)])
     result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
@@ -485,6 +539,21 @@ def test_a_lost_grant_request_warns_that_a_prompt_may_be_open_and_cancels_nothin
     assert _deletes(bridge) == []
 
 
+def test_a_reset_grant_request_warns_that_a_prompt_may_be_open(tmp_path):
+    bridge = FakeBridge(grant_error=ZoteroError("unreachable", UNREACHABLE_TEXT))
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == ERROR
+    assert result.message == f"{UNREACHABLE_TEXT} {PROMPT_OPEN_WARNING}"
+    assert _writes(bridge) == []
+
+
+def test_a_refused_connection_at_the_grant_request_warns_of_nothing(tmp_path):
+    bridge = FakeBridge(grant_error=ZoteroError("not_running", NOT_ANSWERING_TEXT))
+    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == BRIDGE_OFF
+    assert result.message == NOT_ANSWERING_TEXT
+
+
 def test_a_grant_without_an_expiry_field_is_unknown_not_a_failure(tmp_path):
     bridge = FakeBridge(expires_at=None)
     result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
@@ -522,7 +591,7 @@ def test_a_successful_cancel_of_a_pending_grant_still_says_cancelled(tmp_path):
     bridge = FakeBridge(grant="pending")
     result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
     assert "The request was cancelled." in result.message
-    assert "may still be open" not in result.message
+    assert "A prompt may still be open in Zotero. Press Deny there." in result.message
 
 
 @pytest.mark.parametrize(
@@ -545,7 +614,7 @@ def test_a_failed_cancel_of_a_granted_key_says_the_key_may_stay_live(tmp_path, w
     result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
     assert result.state == state
     assert result.message.endswith(f" {KEY_MAY_STAY_LIVE_TEXT}")
-    assert "may stay live for up to an hour" in result.message
+    assert "may stay live until Zotero restarts or for up to eight hours" in result.message
 
 
 def test_a_grant_already_gone_when_cancelled_is_not_reported_as_live(tmp_path):
@@ -746,6 +815,72 @@ def stub_base():
         server.server_close()
 
 
+class _SaveStubHandler(BaseHTTPRequestHandler):
+    """A stub bridge for a whole save: a grant, the items, and the grant's end.
+
+    The second item's reply has its status and headers at once, and its body only after the client has given up.
+    """
+
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *args):
+        return
+
+    def _reply(self, status, payload):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def do_POST(self):  # noqa: N802 - http.server naming
+        self._read_body()
+        if self.path == "/v1/grants":
+            self._reply(202, _json({"grant_id": GRANT_ID, "status": "granted"}))
+        elif self.path == "/v1/items":
+            self.server.item_posts += 1
+            if self.server.item_posts == 1:
+                self._reply(201, _json({"key": "AAAA0001"}))
+            else:
+                self.send_response(500)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                time.sleep(1.0)
+                try:
+                    self.wfile.write(b"x" * 100)
+                except OSError:
+                    return
+        else:
+            self._reply(404, _json({}))
+
+    def do_GET(self):  # noqa: N802
+        payload = {"grant_id": GRANT_ID, "status": "granted", "expires_at": "2099-01-01T00:00:00Z", "write_key": WRITE_KEY}
+        self._reply(200, _json(payload))
+
+    def do_DELETE(self):  # noqa: N802
+        self._read_body()
+        self._reply(200, _json({"grant_id": GRANT_ID, "status": "revoked"}))
+
+
+@pytest.fixture
+def save_stub():
+    """A stub bridge for one whole save, on a loopback port of its own."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SaveStubHandler)
+    server.daemon_threads = True
+    server.item_posts = 0
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_the_real_transport_sends_the_bearer_and_the_grant_key_and_no_origin(stub_base):
     transport = bridge_transport(stub_base)
     reply = transport(
@@ -860,14 +995,36 @@ def test_the_real_transport_maps_an_unanswered_port_to_not_running():
     assert info.value.message == NOT_ANSWERING_TEXT
 
 
-def test_the_real_transport_refuses_a_host_that_is_not_loopback():
-    with pytest.raises(ZoteroError):
+def test_a_host_that_is_not_loopback_is_refused_before_any_socket(monkeypatch):
+    """The refusal comes before an opener is built. The opener is stubbed to fail the test if it is ever reached."""
+
+    def opener_reached(*args, **kwargs):
+        raise AssertionError("an opener was built for a host that is not loopback")
+
+    monkeypatch.setattr(urllib.request, "build_opener", opener_reached)
+    with pytest.raises(ZoteroError) as info:
         bridge_transport("http://192.0.2.1:9")("GET", "/v1/status", {}, None, 0.5)
+    assert info.value.code == "not_loopback"
 
 
-def test_the_default_transport_is_the_bridge_on_its_own_port():
-    assert zotero_bridge.BRIDGE_BASE_URL == "http://127.0.0.1:23125"
-    assert zotero_bridge.http_request is not None
+# Captured when this module is imported, before conftest replaces the bridge's default transport with a refusal.
+_REAL_DEFAULT_TRANSPORT = zotero_bridge.http_request
+
+
+def test_the_default_transport_targets_the_bridge_on_its_own_port(monkeypatch):
+    """The default transport calls the bridge's own address. The opener is stubbed, so the URL is read without a socket."""
+    seen: list[str] = []
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            seen.append(request.full_url)
+            raise urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: _Opener())
+    with pytest.raises(ZoteroError) as info:
+        _REAL_DEFAULT_TRANSPORT("GET", "/v1/status", {}, None, 0.5)
+    assert seen == ["http://127.0.0.1:23125/v1/status"]
+    assert info.value.code == "not_running"
 
 
 def test_a_refused_status_check_over_the_real_transport_is_bridge_off(monkeypatch, tmp_path):
@@ -1034,7 +1191,7 @@ def test_a_second_save_after_success_posts_zero_items(qtbot, tmp_path):
     assert len(bridge.batches) == batches_before
 
 
-def test_an_unknown_item_stays_in_the_box_so_nothing_is_retried_by_accident(qtbot, tmp_path):
+def test_an_unknown_item_is_held_back_and_a_second_save_posts_nothing(qtbot, tmp_path):
     fake = FakeBridge(writes=[Reply(201, _json({"key": "A"})), ZoteroError("timeout", TIMEOUT_TEXT)])
     token = _token_file(tmp_path)
     bridge = PanelBridge(save=lambda items: save_items(items, transport=fake, token_path=token, now=_clock(NOW)))
@@ -1042,10 +1199,15 @@ def test_an_unknown_item_stays_in_the_box_so_nothing_is_retried_by_accident(qtbo
     _box(panel).setPlainText(_lines("Paper 1", "Paper 2", "Paper 3"))
     _click_save(panel)
     qtbot.waitUntil(lambda: "may or may not have been saved" in _text(panel, "zotero-save-result"), timeout=5000)
-    assert _box(panel).toPlainText() == _lines("Paper 2", "Paper 3")
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 2")
+    assert _box(panel).toPlainText() == _lines("Paper 3")
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+    posted = len(_writes(fake))
+    _click_save(panel)  # Save is off while a line is held, so this posts nothing
+    assert len(_writes(fake)) == posted
 
 
-def test_a_save_with_no_result_leaves_the_box_as_typed(qtbot, tmp_path):
+def test_a_save_with_no_result_holds_every_line_back(qtbot, tmp_path):
     typed = _lines("Paper 1", "Paper 2")
 
     def broken(items):
@@ -1056,4 +1218,40 @@ def test_a_save_with_no_result_leaves_the_box_as_typed(qtbot, tmp_path):
     _box(panel).setPlainText(typed)
     _click_save(panel)
     qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == SAVE_NO_RESULT_TEXT, timeout=5000)
-    assert _box(panel).toPlainText() == typed
+    assert _box(panel).toPlainText() == ""
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == typed
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+
+
+def test_checking_zotero_releases_the_held_line_without_retrying_it(qtbot, tmp_path):
+    fake = FakeBridge(writes=[Reply(201, _json({"key": "A"})), ZoteroError("timeout", TIMEOUT_TEXT)])
+    token = _token_file(tmp_path)
+    bridge = PanelBridge(save=lambda items: save_items(items, transport=fake, token_path=token, now=_clock(NOW)))
+    panel = _save_panel(qtbot, bridge)
+    _box(panel).setPlainText(_lines("Paper 1", "Paper 2", "Paper 3"))
+    _click_save(panel)
+    qtbot.waitUntil(lambda: "may or may not have been saved" in _text(panel, "zotero-save-result"), timeout=5000)
+    _named(panel, QPushButton, "zotero-held-checked").click()
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
+    assert _named(panel, QPushButton, "zotero-save-button").isEnabled()
+    assert _text(panel, "zotero-save-result") == HELD_RELEASED_TEXT
+    posted = len(_writes(fake))
+    _click_save(panel)
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == SAVED_TEXT.format(1), timeout=5000)
+    assert len(_writes(fake)) == posted + 1
+    assert json.loads(_writes(fake)[-1][3])["fields"]["title"] == "Paper 3"
+    assert _box(panel).toPlainText() == ""
+
+
+def test_a_refusal_after_two_items_land_keeps_only_the_lines_that_did_not_land(qtbot, tmp_path):
+    fake = FakeBridge(
+        writes=[Reply(201, _json({"key": "A"})), Reply(201, _json({"key": "B"})), Reply(422, _error("invalid_fields"))]
+    )
+    token = _token_file(tmp_path)
+    bridge = PanelBridge(save=lambda items: save_items(items, transport=fake, token_path=token, now=_clock(NOW)))
+    panel = _save_panel(qtbot, bridge)
+    _box(panel).setPlainText(_lines("Paper 1", "Paper 2", "Paper 3", "Paper 4", "Paper 5"))
+    _click_save(panel)
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result").startswith("Saved 2 of 5"), timeout=5000)
+    assert _box(panel).toPlainText() == _lines("Paper 3", "Paper 4", "Paper 5")
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
