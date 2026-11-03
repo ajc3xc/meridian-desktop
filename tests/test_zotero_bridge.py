@@ -10,9 +10,10 @@ import datetime as dt
 import json
 import os
 import re
-import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -789,13 +790,26 @@ def test_the_real_transport_maps_a_slow_reply_to_timeout(stub_base):
     assert info.value.message == TIMEOUT_TEXT
 
 
-def test_the_real_transport_maps_a_refused_port_to_not_running():
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
+def _failing_opener(error: Exception):
+    """A stand-in for urllib's build_opener whose open raises ``error``, so no socket is ever opened."""
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            raise error
+
+    def build_opener(*handlers):
+        return _Opener()
+
+    return build_opener
+
+
+def test_a_refused_connection_maps_to_not_running(monkeypatch):
+    """The refusal is injected. On this machine a closed loopback port times out instead of refusing, so a real
+    refused-port socket would not test the mapping."""
+    refused = urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+    monkeypatch.setattr(urllib.request, "build_opener", _failing_opener(refused))
     with pytest.raises(ZoteroError) as info:
-        bridge_transport(f"http://127.0.0.1:{port}")("GET", "/v1/status", {}, None, 2.0)
+        bridge_transport("http://127.0.0.1:9")("GET", "/v1/status", {}, None, 2.0)
     assert info.value.code == "not_running"
     assert info.value.message == NOT_ANSWERING_TEXT
 
@@ -810,13 +824,11 @@ def test_the_default_transport_is_the_bridge_on_its_own_port():
     assert zotero_bridge.http_request is not None
 
 
-def test_a_refused_status_check_over_the_real_transport_is_bridge_off(tmp_path):
-    """The real transport, pointed at a port with nothing listening, reports bridge_off and sends no token."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    result = bridge_status(transport=bridge_transport(f"http://127.0.0.1:{port}"), token_path=_token_file(tmp_path))
+def test_a_refused_status_check_over_the_real_transport_is_bridge_off(monkeypatch, tmp_path):
+    """A refused connection through the real transport's error mapping reports bridge_off."""
+    refused = urllib.error.URLError(ConnectionRefusedError(111, "refused"))
+    monkeypatch.setattr(urllib.request, "build_opener", _failing_opener(refused))
+    result = bridge_status(transport=bridge_transport("http://127.0.0.1:9"), token_path=_token_file(tmp_path))
     assert result == BridgeStatus(BRIDGE_OFF, NOT_ANSWERING_STATUS)
 
 
