@@ -79,6 +79,18 @@ def no_real_zotero_reads(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_zotero_journal(tmp_path, monkeypatch):
+    """The Zotero save journal lives in the desktop state folder. Each test gets its own, so no held line leaks between tests.
+
+    A test that relaunches a panel passes its own journal path, so the relaunch reads the same file the first window wrote.
+    """
+    from meridian_desktop import zotero_journal
+
+    path = tmp_path / "zotero_saves" / zotero_journal.JOURNAL_NAME
+    monkeypatch.setattr(zotero_journal, "default_path", lambda: path)
+
+
+@pytest.fixture(autouse=True)
 def no_real_zotero_bridge_writes(monkeypatch):
     """The Meridian Zotero bridge on 127.0.0.1:23125 writes into the owner's own Zotero library, so no test may reach it.
 
