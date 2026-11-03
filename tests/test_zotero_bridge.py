@@ -1621,6 +1621,7 @@ def test_a_save_click_while_another_window_holds_the_journal_returns_at_once_and
         _click_save(panel)
         assert time.monotonic() - started < 1.0
         qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == BUSY_TEXT, timeout=3000)
+        assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
     assert bridge.batches == []
     assert _box(panel).toPlainText() == _lines("Paper 1")
 
