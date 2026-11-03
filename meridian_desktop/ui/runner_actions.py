@@ -152,10 +152,15 @@ class RunnerActions(QObject):
         log_path: Path | None = None,
         locate: LocateFn | None = None,
         choose_folder: FolderChooser | None = None,
+        spawn: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._log_path = log_path
+        # The process runner the default controls use. None means subprocess.run. Tests pass a fake.
+        self._spawn = spawn
+        # Set by the window that owns these controls. See set_on_started.
+        self._on_started: Callable[[int, str], None] | None = None
         self._make_control = make_control if make_control is not None else self._default_control
         self._confirm = confirm if confirm is not None else ask_control
         self._find_zotero = find_zotero if find_zotero is not None else zotero_client.find_zotero_exe
@@ -175,8 +180,14 @@ class RunnerActions(QObject):
     def _log(self) -> Path:
         return self._log_path if self._log_path is not None else default_log_path()
 
+    def set_on_started(self, callback: Callable[[int, str], None]) -> None:
+        """Call ``callback(pid, core checkout)`` when a local start is confirmed with a pid. Later controls use it."""
+        self._on_started = callback
+
     def _default_control(self, python: str, cwd: str) -> RunnerControl:
-        return RunnerControl(python, cwd, log_path=self._log())
+        if self._spawn is None:
+            return RunnerControl(python, cwd, log_path=self._log())
+        return RunnerControl(python, cwd, spawn=self._spawn, log_path=self._log())
 
     @property
     def locating(self) -> bool:
@@ -207,8 +218,18 @@ class RunnerActions(QObject):
             tunnel_autostart=settings.tunnel_autostart,
         )
 
-    def control(self, python: str, cwd: str) -> RunnerControl:
-        return self._make_control(python, cwd)
+    def control(self, python: str, cwd: str) -> Any:
+        control = self._make_control(python, cwd)
+        # Every control this object hands out gets the window's start hook, including one from a make_control factory.
+        # A control without set_on_started cannot take the hook, so that is an error here, not a silent gap later.
+        if self._on_started is not None:
+            attach = getattr(control, "set_on_started", None)
+            if not callable(attach):
+                raise TypeError(
+                    f"{type(control).__name__} has no set_on_started, so the start hook cannot be attached to it",
+                )
+            attach(self._on_started)
+        return control
 
     def ask(self, parent: QWidget | None, title: str, body: str, confirm_text: str) -> bool:
         return self._confirm(parent, title, body, confirm_text)

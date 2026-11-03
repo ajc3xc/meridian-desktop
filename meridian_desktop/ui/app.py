@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from meridian_desktop import custom_connectors, install, local_cache, token_store, updater
 from meridian_desktop.desktop_log import start_desktop_log
+from meridian_desktop.restart_check import RestartWatch
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.tray import MeridianTray
@@ -101,6 +102,8 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
     args = list(sys.argv[1:] if argv is None else argv)
     smoke = SMOKE_FLAG in args
     after_update = _after_update_version(args)
+    # The baseline for the restart notice, taken before the first-run dialog, so it matches the code loaded at launch.
+    restart_watch = RestartWatch()
 
     # The desktop's own log starts before anything else is built. --smoke writes no log file.
     if not smoke:
@@ -137,6 +140,7 @@ def main(argv: list[str] | None = None, *, settings_path: Path | None = None, fi
         runner_actions=actions,
         # A --smoke run makes no hosted request, so the connection bar's check is refused as an unreachable host would be.
         connection_transport=_refuse_request if smoke else None,
+        restart_watch=restart_watch,
     )
     tray = MeridianTray(window, app)
     window.show()

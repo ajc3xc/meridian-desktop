@@ -319,9 +319,11 @@ class _FakeWindow:
         record_apps_entry=None,
         runner_actions=None,
         connection_transport=None,
+        restart_watch=None,
     ):
-        # The app passes the update folder, the Apps entry writer, the shared runner controls and the connection bar's
-        # transport as well. The fake takes them and ignores them, so the start-order assertions are unchanged.
+        # The app passes the update folder, the Apps entry writer, the shared runner controls, the connection bar's
+        # transport and the restart watch as well. The fake takes them and ignores them, so the start-order
+        # assertions are unchanged.
         _FakeWindow.events.append("window")
 
     def show(self):
