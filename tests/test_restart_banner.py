@@ -208,3 +208,30 @@ def test_a_confirmed_local_start_from_the_window_is_watched(qtbot, settings_path
     assert not watch.check().server
     os.utime(server_file, ns=(started + NANOS_PER_SECOND, started + NANOS_PER_SECOND))
     assert watch.check() == Restart(server=True)
+
+
+def test_a_start_through_a_make_control_factory_is_watched(qtbot, settings_path, tmp_path):
+    # A factory that builds the control itself, as a test or another caller might. Its controls still reach the watch.
+    checkout = tmp_path / "core"
+    server_file = _write(checkout / "meridian" / "server.py")
+    store = SettingsStore(settings_path)
+    store.save(Settings(mode="local", core_checkout=str(checkout), core_python=sys.executable))
+    started = BASE_NS + 10 * NANOS_PER_SECOND
+    watch = RestartWatch(
+        modules={}, frozen=False, executable="", started_ns_of=lambda pid: started if pid == 4321 else GONE,
+    )
+    spawn = _FakeSpawn(_done({"scope": "local", "child": {"state": "running", "pid": 4321}}))
+
+    def make_control(python, cwd):
+        return rc.RunnerControl(python, cwd, spawn=spawn, log_path=tmp_path / "control.log")
+
+    actions = RunnerActions(store, make_control=make_control)
+    window = MainWindow(store, runner_actions=actions, restart_watch=watch)
+    qtbot.addWidget(window)
+
+    result = actions.control(sys.executable, str(checkout)).start("local")
+
+    assert result.outcome == rc.CONFIRMED
+    assert not watch.check().server
+    os.utime(server_file, ns=(started + NANOS_PER_SECOND, started + NANOS_PER_SECOND))
+    assert watch.check() == Restart(server=True)

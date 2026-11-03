@@ -1,6 +1,7 @@
 """The restart notice: a strip above the tabs that shows when code or the local server changed on disk. GUI thread only.
 
-The check is a few stat calls, so it runs on the GUI thread every CHECK_INTERVAL_MS. Dismiss hides the strip. It comes
+The check is a few stat calls, plus one process query for a server this window started. It runs on the GUI thread every
+CHECK_INTERVAL_MS. Dismiss hides the strip. It comes
 back only when the set of changed files or the server state is different from the set the owner dismissed. When the
 notice clears, the dismissed set is forgotten too, so a later change of the same kind is shown again.
 """

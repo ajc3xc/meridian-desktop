@@ -1,14 +1,16 @@
 """Tests for the restart-needed check: the baseline, the server watch, the banner text and the start hook. No Qt.
 
 Every file is written under tmp_path and its modification time is set by hand, so nothing depends on the clock. The
-watch is given explicit modules and process readers, so a test never reads the real sys.modules or starts a process,
-except the two Windows tests that read the creation time of a real process.
+watch is given explicit modules and process readers, so a test never reads the real sys.modules or starts a process.
+The Windows reader is tested with a fake kernel32. Two tests read the creation time of a real process on Windows.
 """
 
+import ctypes
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import ModuleType
@@ -21,11 +23,11 @@ from meridian_desktop.restart_check import (
     FileStamp,
     Restart,
     RestartWatch,
+    ServerFiles,
     banner_text,
     display_name,
     package_files,
     process_started_ns,
-    server_source_stamps,
 )
 
 BASE_NS = 1_700_000_000_000_000_000
@@ -33,6 +35,8 @@ NANOS_PER_SECOND = 1_000_000_000
 # NTFS keeps 100 ns steps, so an edit a nanosecond after a time is stored as that same time. Tests step by seconds.
 LATER_NS = BASE_NS + 60 * NANOS_PER_SECOND
 NANOS_PER_HOUR = 3600 * NANOS_PER_SECOND
+# The FILETIME tick count of the Unix epoch: 100 ns ticks from 1601-01-01.
+WINDOWS_EPOCH_TICKS = 116_444_736_000_000_000
 
 
 def _set_mtime(path, ns):
@@ -293,10 +297,13 @@ def test_a_size_change_with_the_same_timestamp_is_caught(tmp_path):
 
 
 def test_a_non_python_file_under_the_server_package_does_not_mark_it_stale(tmp_path):
+    # The file exists before the start, so the snapshot would hold it if the .py filter were missing. Changing it after
+    # the start must then mark the server stale. It does not, so the filter is what keeps it out.
     checkout, _source, alive = _server_setup(tmp_path)
+    page = _write(checkout / "meridian" / "static" / "page.js", mtime=BASE_NS)
     watch = _watch({}, started_ns_of=_reader(alive))
     watch.note_server_started(4321, str(checkout))
-    _write(checkout / "meridian" / "static" / "page.js", mtime=LATER_NS)
+    _set_mtime(page, LATER_NS)
     assert not watch.check().server
 
 
@@ -345,10 +352,26 @@ def test_an_unreadable_creation_time_keeps_the_watch_and_it_is_read_again(tmp_pa
     assert watch.check().server
 
 
-def test_a_server_whose_start_time_cannot_be_read_is_not_watched(tmp_path):
+def test_a_server_whose_start_time_cannot_be_read_at_the_start_is_recorded_and_read_again(tmp_path):
     checkout, source, _alive = _server_setup(tmp_path)
-    watch = _watch({}, started_ns_of=_no_process)
+    reading = {"value": None}
+    watch = _watch({}, started_ns_of=lambda pid: reading["value"])
     watch.note_server_started(4321, str(checkout))
+    _set_mtime(source, LATER_NS)
+    assert watch.check().server  # recorded anyway, so the changed file is reported
+    reading["value"] = GONE
+    assert not watch.check().server  # only GONE drops it
+
+
+def test_a_start_time_learned_after_the_start_catches_a_reused_pid(tmp_path):
+    checkout, source, _alive = _server_setup(tmp_path)
+    started = BASE_NS + 10 * NANOS_PER_SECOND
+    reading = {"value": None}
+    watch = _watch({}, started_ns_of=lambda pid: reading["value"])
+    watch.note_server_started(4321, str(checkout))
+    reading["value"] = started  # the start time is readable from now on
+    assert not watch.check().server
+    reading["value"] = started + 999  # the PID now belongs to another process
     _set_mtime(source, LATER_NS)
     assert not watch.check().server
 
@@ -394,19 +417,175 @@ def test_clearing_a_gone_server_does_not_drop_a_newer_start(tmp_path):
     assert watch.check().server  # the newer start is still watched
 
 
-def test_server_source_stamps_lists_python_files_only_and_a_missing_folder_is_empty(tmp_path):
+def test_a_start_and_checks_on_two_threads_leave_a_consistent_record(tmp_path):
+    checkout, _source, alive = _server_setup(tmp_path)
+    alive[5555] = alive[4321]
+    watch = _watch({}, started_ns_of=_reader(alive))
+    errors = []
+    results = []
+
+    def starts():
+        try:
+            for index in range(200):
+                watch.note_server_started(4321 if index % 2 else 5555, str(checkout))
+        except Exception as error:  # the test reports any failure from the other thread
+            errors.append(error)
+
+    def checks():
+        try:
+            for _ in range(200):
+                results.append(watch.check())
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=starts), threading.Thread(target=checks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(results) == 200 and all(isinstance(result, Restart) for result in results)
+    assert watch.check() == Restart()
+
+
+def test_server_files_lists_python_files_only_and_a_missing_folder_is_empty(tmp_path):
     root = tmp_path / "meridian"
     _write(root / "a.py", mtime=BASE_NS)
     _write(root / "sub" / "b.py", mtime=LATER_NS)
     _write(root / "data.json", mtime=LATER_NS + NANOS_PER_HOUR)
-    stamps = server_source_stamps(root)
-    assert sorted(os.path.basename(path) for path in stamps) == ["a.py", "b.py"]
+    files = ServerFiles(root)
+    assert sorted(os.path.basename(path) for path in files.stamps) == ["a.py", "b.py"]
     b_path = os.path.join(str(root), "sub", "b.py")
-    assert stamps[b_path] == FileStamp(LATER_NS, os.stat(b_path).st_size)
-    assert server_source_stamps(tmp_path / "missing") == {}
+    assert files.stamps[b_path] == FileStamp(LATER_NS, os.stat(b_path).st_size)
+    assert ServerFiles(tmp_path / "missing").stamps == {}
 
 
-# ----------------------------------------------------------- the process creation time
+def test_a_server_file_that_cannot_be_read_at_the_start_gets_its_baseline_on_a_later_check(tmp_path, monkeypatch):
+    checkout, source, alive = _server_setup(tmp_path)
+    real_stat = os.stat
+    monkeypatch.setattr(os, "stat", _locked_stat(source, real_stat))
+    watch = _watch({}, started_ns_of=_reader(alive))
+    watch.note_server_started(4321, str(checkout))
+    monkeypatch.setattr(os, "stat", real_stat)
+    assert not watch.check().server  # the first readable stamp becomes its baseline
+    _set_mtime(source, alive[4321] + NANOS_PER_SECOND)
+    assert watch.check() == Restart(server=True)
+
+
+def test_an_unlistable_server_folder_is_listed_on_a_later_check_and_its_files_join(tmp_path, monkeypatch):
+    checkout, _source, alive = _server_setup(tmp_path)
+    folder = os.path.join(str(checkout / "meridian"), "sub")
+    sub_file = _write(Path(folder) / "c.py", mtime=BASE_NS)
+    real_scandir = os.scandir
+
+    def denied(path="."):
+        if os.path.normcase(os.path.normpath(os.fspath(path))) == os.path.normcase(os.path.normpath(folder)):
+            raise PermissionError(13, "denied", folder)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    watch = _watch({}, started_ns_of=_reader(alive))
+    watch.note_server_started(4321, str(checkout))
+    monkeypatch.setattr(os, "scandir", real_scandir)
+    assert not watch.check().server  # the folder is listed now, and its c.py gets a baseline
+    _set_mtime(sub_file, alive[4321] + NANOS_PER_SECOND)
+    assert watch.check() == Restart(server=True)
+
+
+def test_a_confirmed_stop_does_not_reach_the_watch(tmp_path):
+    calls = []
+    spawn = _FakeSpawn(_done({"scope": "local", "child": {"state": "stopped"}}))
+    assert _control(tmp_path, spawn, calls).stop("local").outcome == rc.CONFIRMED
+    assert calls == []
+
+
+# ----------------------------------------------------------- the Windows process reader, through a fake kernel32
+
+
+class _FakeKernel32:
+    """Stands in for ctypes.WinDLL("kernel32"). OpenProcess, GetProcessTimes and CloseHandle return what the test sets."""
+
+    def __init__(self, *, handle=0x1234, times_ok=True, created=0, exited=0):
+        self.handle = handle
+        self.times_ok = times_ok
+        self.created = created  # FILETIME ticks, 100 ns since 1601
+        self.exited = exited
+        self.closed = []
+
+        def open_process(access, inherit, pid):
+            return self.handle
+
+        def get_process_times(handle, created_ref, exited_ref, kernel_ref, user_ref):
+            if not self.times_ok:
+                return 0
+            _set_filetime(created_ref, self.created)
+            _set_filetime(exited_ref, self.exited)
+            return 1
+
+        def close_handle(handle):
+            self.closed.append(handle)
+            return 1
+
+        self.OpenProcess = open_process
+        self.GetProcessTimes = get_process_times
+        self.CloseHandle = close_handle
+
+
+def _set_filetime(byref_arg, ticks):
+    # ctypes.byref returns an argument holder. Its target is the FILETIME structure the code passed in.
+    target = byref_arg._obj
+    target.dwLowDateTime = ticks & 0xFFFFFFFF
+    target.dwHighDateTime = ticks >> 32
+
+
+@pytest.fixture
+def windows_api(monkeypatch):
+    """Makes process_started_ns take its Windows path, with a fake kernel32 and a chosen last error."""
+
+    def install(fake, last_error=0):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: fake, raising=False)
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error, raising=False)
+
+    return install
+
+
+def test_a_failed_open_for_another_reason_is_unreadable(windows_api):
+    windows_api(_FakeKernel32(handle=0), last_error=6)  # ERROR_INVALID_HANDLE
+    assert process_started_ns(4321) is None
+
+
+def test_access_denied_on_the_pid_of_a_started_server_means_it_was_reused(windows_api):
+    windows_api(_FakeKernel32(handle=0), last_error=5)  # ERROR_ACCESS_DENIED
+    assert process_started_ns(4321) is GONE
+
+
+def test_an_invalid_pid_is_gone(windows_api):
+    windows_api(_FakeKernel32(handle=0), last_error=87)  # ERROR_INVALID_PARAMETER
+    assert process_started_ns(4321) is GONE
+
+
+def test_a_failed_creation_time_query_is_unreadable_and_the_handle_is_closed(windows_api):
+    fake = _FakeKernel32(times_ok=False)
+    windows_api(fake)
+    assert process_started_ns(4321) is None
+    assert fake.closed == [0x1234]
+
+
+def test_a_set_exit_time_is_gone_and_the_handle_is_closed(windows_api):
+    fake = _FakeKernel32(exited=123)
+    windows_api(fake)
+    assert process_started_ns(4321) is GONE
+    assert fake.closed == [0x1234]
+
+
+def test_a_creation_time_is_read_as_unix_nanoseconds(windows_api):
+    windows_api(_FakeKernel32(created=WINDOWS_EPOCH_TICKS + 100_000_000))  # ten seconds after the Unix epoch
+    assert process_started_ns(4321) == 10 * NANOS_PER_SECOND
+
+
+# ----------------------------------------------------------- the real process creation time
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the creation time is read through Windows")

@@ -186,8 +186,8 @@ class RunnerActions(QObject):
 
     def _default_control(self, python: str, cwd: str) -> RunnerControl:
         if self._spawn is None:
-            return RunnerControl(python, cwd, log_path=self._log(), on_started=self._on_started)
-        return RunnerControl(python, cwd, spawn=self._spawn, log_path=self._log(), on_started=self._on_started)
+            return RunnerControl(python, cwd, log_path=self._log())
+        return RunnerControl(python, cwd, spawn=self._spawn, log_path=self._log())
 
     @property
     def locating(self) -> bool:
@@ -219,7 +219,11 @@ class RunnerActions(QObject):
         )
 
     def control(self, python: str, cwd: str) -> RunnerControl:
-        return self._make_control(python, cwd)
+        control = self._make_control(python, cwd)
+        # Every control this object hands out gets the window's start hook, including one from a make_control factory.
+        if self._on_started is not None and isinstance(control, RunnerControl):
+            control.set_on_started(self._on_started)
+        return control
 
     def ask(self, parent: QWidget | None, title: str, body: str, confirm_text: str) -> bool:
         return self._confirm(parent, title, body, confirm_text)

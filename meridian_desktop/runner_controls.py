@@ -329,6 +329,10 @@ class RunnerControl:
         # Called with (pid, core checkout) when a local start is confirmed with a pid. The restart notice watches it.
         self._on_started = on_started
 
+    def set_on_started(self, callback: Callable[[int, str], None]) -> None:
+        """Call ``callback(pid, core checkout)`` when a local start is confirmed with a pid. Set by RunnerActions."""
+        self._on_started = callback
+
     def status(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._run(STATUS, scope)
 
