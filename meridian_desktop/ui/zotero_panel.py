@@ -330,6 +330,7 @@ class ZoteroPanel(QWidget):
         self._held_lines = QPlainTextEdit(self)
         self._held_lines.setObjectName("zotero-held-lines")
         self._held_lines.setReadOnly(True)
+        make_selectable(self._held_lines)
         self._held_lines.setMinimumHeight(60)
         self._held_button = QPushButton(HELD_BUTTON_TEXT, self)
         self._held_button.setObjectName("zotero-held-checked")
