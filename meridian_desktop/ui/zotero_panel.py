@@ -13,12 +13,12 @@ thread pool as well. A line whose outcome is unknown is held back until the pers
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
+from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -111,12 +111,22 @@ STILL_WRITING_TEXT = (
     "Released the lines Zotero confirmed. Lines still being written in another window stay held until they finish."
 )
 BRIDGE_CHECKING_TEXT = "Bridge: checking..."
+JOURNAL_LOADING_TEXT = "The save journal is still loading. Save is off until it is read."
+JOURNAL_CHECK_FAILED_TEXT = "The save journal could not be checked, so saving is off."
+WRITING_ELSEWHERE_TEXT = (
+    "Another window is still writing a line, so it stays held until that write ends. "
+    "If no other window is open, restart the desktop."
+)
+# A busy journal is tried again after this long, so a window that opened while another held the lock recovers.
+JOURNAL_RETRY_MS = 2000
 # The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
 SEARCH = "search"
 ACTION = "action"
 BRIDGE = "bridge"
 SAVE = "save"
+JOURNAL = "journal"
+CLEAR = "clear"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -244,6 +254,114 @@ class _JournalProgress:
         self._journal.finish(self._ids[index], outcome)
 
 
+@dataclass(frozen=True)
+class _JournalState:
+    """What a read or a release of the journal found: the open journal, the held entries if the read finished, and any
+    problem. ``held_lines`` names the lines a backup holds, when the journal cannot be read."""
+
+    journal: zotero_journal.SaveJournal | None
+    held: tuple[zotero_journal.JournalEntry, ...] | None
+    problem: str | None = None
+    busy: bool = False
+    held_lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SaveDone:
+    """What a save run decided, on the worker thread: the result text, how much of the box to keep, the held entries once
+    the run has written them, and any journal problem."""
+
+    message: str
+    keep_from: int
+    held: tuple[zotero_journal.JournalEntry, ...] | None
+    problem: str | None = None
+    busy: bool = False
+
+
+def _journal_state(path: Path, journal: zotero_journal.SaveJournal | None) -> _JournalState:
+    """Open the journal if it is not open yet, and read what is held. Runs on a worker thread."""
+    try:
+        if journal is None:
+            journal = zotero_journal.SaveJournal(path, read_timeout=zotero_journal.UI_READ_TIMEOUT_SECONDS)
+        held = journal.held()
+    except zotero_journal.JournalError as exc:
+        return _JournalState(journal, None, exc.message, exc.busy, exc.held_lines)
+    return _JournalState(journal, tuple(held))
+
+
+def _clear_held(journal: zotero_journal.SaveJournal, entry_ids: list[str]) -> _JournalState:
+    """Release the unknown entries the person checked, then read what is still held. Runs on a worker thread."""
+    try:
+        journal.clear(entry_ids)
+        held = journal.held()
+    except zotero_journal.JournalError as exc:
+        return _JournalState(journal, None, exc.message, exc.busy, exc.held_lines)
+    return _JournalState(journal, tuple(held))
+
+
+def _hold_line(journal: zotero_journal.SaveJournal, line: str) -> tuple[str | None, bool]:
+    """Make sure ``line`` is held. Returns the problem and whether it was busy; both empty when the line is held."""
+    try:
+        if any(entry.line == line for entry in journal.held()):
+            return None, False
+        journal.record_unknown([line])
+    except zotero_journal.JournalError as exc:
+        return exc.message, exc.busy
+    return None, False
+
+
+def _hold_lines(journal: zotero_journal.SaveJournal, lines: list[str]) -> tuple[str | None, bool]:
+    """Hold every line of a save that produced no result. Returns the problem and whether it was busy."""
+    try:
+        journal.record_unknown(lines)
+    except zotero_journal.JournalError as exc:
+        return exc.message, exc.busy
+    return None, False
+
+
+def _record_save(journal: zotero_journal.SaveJournal, lines: list[str], result: Any) -> _SaveDone:
+    """Hold what the save left unknown, then read what is held. A line leaves the box only when its journal entry was
+    written, so a line whose entry failed stays in the box and is not posted again."""
+    problem, busy = None, False
+    if result is None:
+        problem, busy = _hold_lines(journal, lines)
+        keep_from = 0 if problem is not None else len(lines)
+        base = SAVE_NO_RESULT_TEXT
+    elif result.state == zotero_bridge.UNKNOWN and result.saved < len(lines):
+        problem, busy = _hold_line(journal, lines[result.saved])
+        keep_from = result.saved if problem is not None else result.saved + 1
+        base = result.message
+    else:
+        keep_from = result.saved
+        base = result.message
+    message = base if problem is None else f"{problem} {base}"
+    try:
+        held = tuple(journal.held())
+    except zotero_journal.JournalError as exc:
+        return _SaveDone(message, keep_from, None, problem or exc.message, busy if problem else exc.busy)
+    return _SaveDone(message, keep_from, held, problem, busy)
+
+
+def _run_save(journal: zotero_journal.SaveJournal, bridge: Any, items: list, lines: list[str]) -> _SaveDone:
+    """One save, on a worker thread: the guard, the bridge, and the journal entries for what it did.
+
+    The guard reads the journal under its lock, so a window whose list is out of date still refuses a line another window
+    is writing. _JournalProgress writes each item's entry as the item starts and as its outcome is known.
+    """
+    try:
+        held = journal.held()
+    except zotero_journal.JournalError as exc:
+        return _SaveDone(exc.message, 0, None, exc.message, exc.busy)
+    if held:
+        return _SaveDone(SAVE_HELD_TEXT, 0, tuple(held))
+    progress = _JournalProgress(journal, lines)
+    try:
+        result = bridge.save_items(items, progress=progress)
+    except Exception:  # noqa: BLE001 - a save that raises has no result, so every line is held back
+        result = None
+    return _record_save(journal, lines, result)
+
+
 class ZoteroPanel(QWidget):
     """The Zotero tab: status, Start Zotero behind a confirmation, and a read-only library search."""
 
@@ -261,17 +379,18 @@ class ZoteroPanel(QWidget):
         self._bridge = bridge
         self._saving = False
         self._pending_lines: list[str] = []
-        # The save journal: the held lines (outcome unknown) and whether saving is possible at all.
+        # The save journal. It is opened on a worker thread, so until it is open and read, Save is off.
         self._journal: zotero_journal.SaveJournal | None = None
-        self._journal_error: str | None = None
-        # A journal read or write that failed during this run. It stays until the window is closed, and Save stays off.
+        self._journal_path = zotero_journal.default_path() if journal_path is None else journal_path
+        self._journal_loaded = False
+        # A journal failure that stays for the rest of this run, so Save stays off. A busy journal is tried again.
         self._journal_problem: str | None = None
-        self._held_ids: list[str] = []
-        path = zotero_journal.default_path() if journal_path is None else journal_path
-        try:
-            self._journal = zotero_journal.SaveJournal(path)
-        except zotero_journal.JournalError as exc:
-            self._journal_error = exc.message
+        self._journal_busy: str | None = None
+        self._journal_retry = QTimer(self)
+        self._journal_retry.setSingleShot(True)
+        self._journal_retry.timeout.connect(self._start_journal_read)
+        # The held entries from the last read that finished. A read that fails keeps them on screen.
+        self._held_entries: list[zotero_journal.JournalEntry] = []
         self._confirm = ask_start if confirm is None else confirm
         self._exe: str | None = None
         self._running: bool | None = None
@@ -288,9 +407,7 @@ class ZoteroPanel(QWidget):
         self._latest: dict[str, int] = {}
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
-        self._refresh_held()
-        if self._journal_error is not None:
-            self._save_result.setText(self._journal_error)
+        self._start_journal_read()
 
     # ----------------------------------------------------------- layout
 
@@ -367,9 +484,10 @@ class ZoteroPanel(QWidget):
         self._held_lines.setReadOnly(True)
         make_selectable(self._held_lines)
         self._held_lines.setMinimumHeight(60)
+        self._held_note = _label(self, "zotero-held-note", "")
         self._held_button = QPushButton(HELD_BUTTON_TEXT, self)
         self._held_button.setObjectName("zotero-held-checked")
-        for widget in (self._held_heading, self._held_lines, self._held_button):
+        for widget in (self._held_heading, self._held_lines, self._held_note, self._held_button):
             save_box.addWidget(widget)
             widget.setVisible(False)
         layout.addLayout(save_box)
@@ -444,6 +562,10 @@ class ZoteroPanel(QWidget):
             self._on_bridge_ready(done.payload)
         elif done.kind == SAVE:
             self._on_save_ready(done.payload)
+        elif done.kind == JOURNAL:
+            self._on_journal_ready(done.payload)
+        elif done.kind == CLEAR:
+            self._on_clear_ready(done.payload)
 
     def _on_status_ready(self, payload: tuple) -> None:
         result, failure = payload
@@ -555,87 +677,96 @@ class ZoteroPanel(QWidget):
             return
         self._bridge_state.setText(result.message)
 
-    def _refresh_held(self) -> None:
-        """Show the held lines, read from the journal on disk. They survive quitting, so they show again on every launch."""
-        held: list = []
-        if self._journal is not None:
-            try:
-                held = self._journal.held()
-            except zotero_journal.JournalError as exc:
-                self._journal_problem = exc.message
-        self._held_ids = [entry.id for entry in held]
-        self._held_lines.setPlainText("\n".join(entry.line for entry in held))
-        for widget in (self._held_heading, self._held_lines, self._held_button):
-            widget.setVisible(bool(held))
+    # ----------------------------------------------------------- journal
+
+    def _start_journal_read(self) -> None:
+        """Open the journal if it is not open yet, and read what is held. The read runs on a worker thread."""
+        self._start_read(JOURNAL, functools.partial(_journal_state, self._journal_path, self._journal))
+
+    def _on_journal_ready(self, payload: tuple) -> None:
+        state, failure = payload
+        if failure is not None or not isinstance(state, _JournalState):
+            state = _JournalState(self._journal, None, failure or JOURNAL_CHECK_FAILED_TEXT)
+        self._apply_journal_state(state)
+
+    def _apply_journal_state(self, state: _JournalState) -> None:
+        """Show what a read of the journal found. A read that did not finish keeps the held entries of the last one that did."""
+        self._journal_loaded = True
+        if state.journal is not None:
+            self._journal = state.journal
+        if state.problem is None:
+            self._journal_busy = None
+        else:
+            self._note_journal_problem(state.problem, state.busy)
+            self._save_result.setText(state.problem)
+        if state.held is not None:
+            self._show_held(state.held)
+        elif state.held_lines and self._journal is None:
+            # The journal cannot be read, so the lines its backup holds are shown. Nothing can release them from here.
+            self._show_held_lines(state.held_lines, can_clear=False)
         self._update_save_enabled()
 
+    def _note_journal_problem(self, problem: str, busy: bool) -> None:
+        """A busy journal is tried again in a moment. Any other problem stays for the rest of this run."""
+        if busy:
+            self._journal_busy = problem
+            self._journal_retry.start(JOURNAL_RETRY_MS)
+        else:
+            self._journal_problem = problem
+        self._update_save_enabled()
+
+    def _show_held(self, entries: Sequence[zotero_journal.JournalEntry]) -> None:
+        """Show the held lines, read from the journal on disk. They survive quitting, so they show again on every launch."""
+        self._held_entries = list(entries)
+        self._show_held_lines([entry.line for entry in self._held_entries], can_clear=bool(self._held_entries))
+        writing = any(entry.outcome == zotero_journal.WRITING for entry in self._held_entries)
+        self._held_note.setText(WRITING_ELSEWHERE_TEXT if writing else "")
+        self._held_note.setVisible(writing)
+        self._update_save_enabled()
+
+    def _show_held_lines(self, lines: Sequence[str], *, can_clear: bool) -> None:
+        self._held_lines.setPlainText("\n".join(lines))
+        shown = bool(lines)
+        self._held_heading.setVisible(shown)
+        self._held_lines.setVisible(shown)
+        self._held_button.setVisible(shown and can_clear)
+
     def _update_save_enabled(self) -> None:
-        """Save is off while the journal cannot be used or written, while any line is held, and while a save is running."""
+        """Save is off while the journal is not open or cannot be used, while it is busy, while any line is held, and while
+        a save is running."""
         self._save_button.setEnabled(
-            self._journal is not None and self._journal_problem is None and not self._held_ids and not self._saving
+            self._journal is not None
+            and self._journal_problem is None
+            and self._journal_busy is None
+            and not self._held_entries
+            and not self._saving
         )
-
-    def _ensure_held(self, line: str) -> str | None:
-        """Make sure ``line`` is held in the journal. None when it is; otherwise the journal's problem, which also turns
-        Save off for the rest of this run."""
-        if self._journal is None:
-            return self._journal_problem or self._journal_error or zotero_journal.WRITE_FAILED_TEXT
-        try:
-            if any(entry.line == line for entry in self._journal.held()):
-                return None
-            self._journal.record_unknown([line])
-        except zotero_journal.JournalError as exc:
-            self._journal_problem = exc.message
-            self._update_save_enabled()
-            return exc.message
-        return None
-
-    def _record_all(self, lines: list[str]) -> str | None:
-        """Hold every line of a save that produced no result. None when the journal recorded them."""
-        if self._journal is None:
-            return self._journal_problem or self._journal_error or zotero_journal.WRITE_FAILED_TEXT
-        try:
-            self._journal.record_unknown(lines)
-        except zotero_journal.JournalError as exc:
-            self._journal_problem = exc.message
-            self._update_save_enabled()
-            return exc.message
-        return None
 
     @Slot()
     def _on_held_checked_clicked(self) -> None:
         if self._journal is None:
             return
-        try:
-            self._journal.clear(self._held_ids)
-        except zotero_journal.JournalError as exc:
-            self._save_result.setText(exc.message)
-            return
-        self._refresh_held()
-        self._save_result.setText(STILL_WRITING_TEXT if self._held_ids else HELD_RELEASED_TEXT)
+        entry_ids = [entry.id for entry in self._held_entries]
+        self._start_read(CLEAR, functools.partial(_clear_held, self._journal, entry_ids))
+
+    def _on_clear_ready(self, payload: tuple) -> None:
+        state, failure = payload
+        if failure is not None or not isinstance(state, _JournalState):
+            state = _JournalState(self._journal, None, failure or JOURNAL_CHECK_FAILED_TEXT)
+        self._apply_journal_state(state)
+        if state.problem is None:
+            still_writing = any(entry.outcome == zotero_journal.WRITING for entry in state.held or ())
+            self._save_result.setText(STILL_WRITING_TEXT if still_writing else HELD_RELEASED_TEXT)
 
     @Slot()
     def _on_save_clicked(self) -> None:
         if self._saving:
             return
         if self._journal is None:
-            self._save_result.setText(self._journal_error or SAVE_HELD_TEXT)
+            self._save_result.setText(self._journal_problem or self._journal_busy or JOURNAL_LOADING_TEXT)
             return
         if self._journal_problem is not None:
             self._save_result.setText(self._journal_problem)
-            return
-        # The guard reads the journal on disk, under its lock. The list in this window may be out of date, because another
-        # window may be writing a line right now.
-        try:
-            held = self._journal.held()
-        except zotero_journal.JournalError as exc:
-            self._journal_problem = exc.message
-            self._update_save_enabled()
-            self._save_result.setText(exc.message)
-            return
-        if held:
-            self._refresh_held()
-            self._save_result.setText(SAVE_HELD_TEXT)
             return
         text = self._save_input.toPlainText()
         try:
@@ -650,34 +781,31 @@ class ZoteroPanel(QWidget):
         self._save_input.setReadOnly(True)
         self._update_save_enabled()
         self._save_result.setText(SAVING_TEXT)
-        progress = _JournalProgress(self._journal, lines)
-        self._start_read(SAVE, functools.partial(self._bridge.save_items, items, progress=progress))
+        # The guard, the bridge and every journal write run on the worker, so the window never waits on the journal lock.
+        self._start_read(SAVE, functools.partial(_run_save, self._journal, self._bridge, items, lines))
 
     def _on_save_ready(self, payload: tuple) -> None:
-        result, failure = payload
+        done, failure = payload
         lines, self._pending_lines = self._pending_lines, []
         self._saving = False
         self._save_input.setReadOnly(False)
-        if failure is None and isinstance(result, zotero_bridge.SaveResult):
-            # The first `saved` lines landed, so they leave the box. The unknown line, if there is one, leaves the box only
-            # once its journal entry is written. Without that entry it stays, so nothing can be posted twice. The lines after
-            # it were not sent, so they stay too.
-            keep_from = result.saved
-            problem = None
-            if result.state == zotero_bridge.UNKNOWN and result.saved < len(lines):
-                problem = self._ensure_held(lines[result.saved])
-                if problem is None:
-                    keep_from = result.saved + 1
-            message = result.message if problem is None else f"{problem} {result.message}"
-            self._save_input.setPlainText("\n".join(lines[keep_from:]))
-            self._save_result.setText(message)
-        else:
-            # No result came back, so nothing is known about any line. Every line is held, and the box keeps them only if the
-            # journal did not record them.
-            problem = self._record_all(lines)
-            self._save_input.setPlainText("\n".join(lines) if problem is not None else "")
-            self._save_result.setText(SAVE_NO_RESULT_TEXT if problem is None else f"{problem} {SAVE_NO_RESULT_TEXT}")
-        self._refresh_held()
+        if failure is not None or not isinstance(done, _SaveDone):
+            # The save ended without a result the worker could record. Every line stays in the box, and the journal is read
+            # again, so that whatever it did record is held.
+            self._save_input.setPlainText("\n".join(lines))
+            self._save_result.setText(SAVE_NO_RESULT_TEXT)
+            self._start_journal_read()
+            self._update_save_enabled()
+            self._start_bridge_check()
+            return
+        # The lines before keep_from landed, or their journal entry was written, so they leave the box. The rest stay.
+        self._save_input.setPlainText("\n".join(lines[done.keep_from :]))
+        self._save_result.setText(done.message)
+        if done.problem is not None:
+            self._note_journal_problem(done.problem, done.busy)
+        if done.held is not None:
+            self._show_held(done.held)
+        self._update_save_enabled()
         self._start_bridge_check()
 
 

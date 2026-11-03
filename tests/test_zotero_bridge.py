@@ -11,6 +11,8 @@ import json
 import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -22,8 +24,15 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton
 
-from meridian_desktop.ui.zotero_panel import HELD_RELEASED_TEXT, SAVE_HELD_TEXT, SAVE_NO_RESULT_TEXT, ZoteroPanel
-from meridian_desktop.zotero_journal import journal_unreadable_text
+from meridian_desktop.ui.zotero_panel import (
+    HELD_RELEASED_TEXT,
+    SAVE_HELD_TEXT,
+    SAVE_NO_RESULT_TEXT,
+    STILL_WRITING_TEXT,
+    WRITING_ELSEWHERE_TEXT,
+    ZoteroPanel,
+)
+from meridian_desktop.zotero_journal import LOCK_SUFFIX, _lock_file, _unlock_file, journal_unreadable_text
 from meridian_desktop.zotero_bridge import (
     ANSWERING,
     ANSWERING_STATUS,
@@ -1298,6 +1307,7 @@ def _save_panel(qtbot, bridge, journal_path=None):
     panel.show()
     qtbot.waitExposed(panel)
     qtbot.waitUntil(lambda: panel.findChild(QPushButton, "zotero-refresh").isEnabled(), timeout=5000)
+    qtbot.waitUntil(lambda: panel._journal_loaded, timeout=5000)  # the journal is read on a worker thread
     return panel
 
 
@@ -1443,9 +1453,9 @@ def test_checking_zotero_releases_the_held_line_without_retrying_it(qtbot, tmp_p
     _click_save(panel)
     qtbot.waitUntil(lambda: "may or may not have been saved" in _text(panel, "zotero-save-result"), timeout=5000)
     _named(panel, QPushButton, "zotero-held-checked").click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == HELD_RELEASED_TEXT, timeout=5000)
     assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
     assert _named(panel, QPushButton, "zotero-save-button").isEnabled()
-    assert _text(panel, "zotero-save-result") == HELD_RELEASED_TEXT
     posted = len(_writes(fake))
     _click_save(panel)
     qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == SAVED_TEXT.format(1), timeout=5000)
@@ -1529,7 +1539,7 @@ def test_a_second_window_refuses_a_line_another_window_is_writing(qtbot, tmp_pat
     other.begin(_lines("Paper 1"))
     _box(second).setPlainText(_lines("Paper 1"))
     _click_save(second)
-    assert _text(second, "zotero-save-result") == SAVE_HELD_TEXT
+    qtbot.waitUntil(lambda: _text(second, "zotero-save-result") == SAVE_HELD_TEXT, timeout=5000)
     assert bridge.batches == []
     assert _named(second, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
     assert _box(second).toPlainText() == _lines("Paper 1")
@@ -1554,6 +1564,145 @@ def test_a_failed_journal_write_keeps_the_line_in_the_box_with_the_journal_messa
     assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
     assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
     assert zotero_journal.SaveJournal(journal_path).held() == []
+
+
+BUSY_TEXT = "The journal is busy in another window. Try again in a moment."
+
+
+@contextmanager
+def _window_holds_journal_lock(journal_path):
+    """Another window holds the journal's lock for as long as the block runs."""
+    holder = open(journal_path.with_name(journal_path.name + LOCK_SUFFIX), "a+b")
+    _lock_file(holder)
+    try:
+        yield
+    finally:
+        _unlock_file(holder)
+        holder.close()
+
+
+def _exited_pid() -> int:
+    """The id of a process that has already exited, so no running process has it."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _watched(real, name, seen):
+    """Wrap one journal method so that each call records whether it ran on the GUI thread."""
+
+    def wrapper(self, *args, **kwargs):
+        seen.append((name, threading.current_thread() is threading.main_thread()))
+        return real(self, *args, **kwargs)
+
+    return wrapper
+
+
+def test_a_journal_held_by_another_window_returns_at_once_and_says_busy(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    with _window_holds_journal_lock(journal_path):
+        started = time.monotonic()
+        panel = ZoteroPanel(client=StubZotero(), bridge=PanelBridge(), journal_path=journal_path)
+        qtbot.addWidget(panel)
+        assert time.monotonic() - started < 1.0
+        panel.show()
+        qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == BUSY_TEXT, timeout=3000)
+        assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+
+
+def test_a_save_click_while_another_window_holds_the_journal_returns_at_once_and_posts_nothing(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    bridge = PanelBridge()
+    panel = _save_panel(qtbot, bridge, journal_path)
+    _box(panel).setPlainText(_lines("Paper 1"))
+    with _window_holds_journal_lock(journal_path):
+        _named(panel, QPushButton, "zotero-save-button").setEnabled(True)  # bypass the disabled button: the busy guard stops it
+        started = time.monotonic()
+        _click_save(panel)
+        assert time.monotonic() - started < 1.0
+        qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == BUSY_TEXT, timeout=3000)
+    assert bridge.batches == []
+    assert _box(panel).toPlainText() == _lines("Paper 1")
+
+
+def test_journal_work_never_runs_on_the_gui_thread(qtbot, tmp_path, monkeypatch):
+    journal_path = tmp_path / "zotero_saves.json"
+    seen: list[tuple[str, bool]] = []
+    for name in ("held", "begin", "finish", "record_unknown", "clear"):
+        real = getattr(zotero_journal.SaveJournal, name)
+        monkeypatch.setattr(zotero_journal.SaveJournal, name, _watched(real, name, seen))
+    fake = FakeBridge(writes=[Reply(201, _json({"key": "A"})), ZoteroError("timeout", TIMEOUT_TEXT)])
+    token = _token_file(tmp_path)
+    bridge = PanelBridge(
+        save=lambda items, progress: save_items(items, transport=fake, token_path=token, now=_clock(NOW), progress=progress)
+    )
+    panel = _save_panel(qtbot, bridge, journal_path)
+    _box(panel).setPlainText(_lines("Paper 1", "Paper 2"))
+    _click_save(panel)
+    qtbot.waitUntil(lambda: "may or may not have been saved" in _text(panel, "zotero-save-result"), timeout=5000)
+    _named(panel, QPushButton, "zotero-held-checked").click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == HELD_RELEASED_TEXT, timeout=5000)
+    assert {"held", "begin", "finish", "clear"} <= {name for name, _ in seen}
+    assert not [name for name, on_gui in seen if on_gui]
+
+
+def test_an_unreadable_journal_after_a_good_read_keeps_the_held_lines_and_shows_why(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    zotero_journal.SaveJournal(journal_path).record_unknown([_lines("Paper 1")])
+    panel = _save_panel(qtbot, PanelBridge(), journal_path)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    journal_path.write_text("{not json", encoding="utf-8")  # the file is damaged after the last good read
+    _box(panel).setPlainText(_lines("Paper 2"))
+    _named(panel, QPushButton, "zotero-save-button").setEnabled(True)  # bypass the disabled button: the guard must read
+    _click_save(panel)
+    expected = journal_unreadable_text(journal_path, (_lines("Paper 1"),))
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == expected, timeout=5000)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert _box(panel).toPlainText() == _lines("Paper 2")  # nothing was sent
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+
+
+def test_an_unreadable_journal_at_start_names_its_held_lines_and_shows_them_without_a_way_to_release(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    zotero_journal.SaveJournal(journal_path).record_unknown([_lines("Paper 1")])
+    journal_path.write_text("{not json", encoding="utf-8")
+    panel = _save_panel(qtbot, PanelBridge(), journal_path)
+    assert _text(panel, "zotero-save-result") == journal_unreadable_text(journal_path, (_lines("Paper 1"),))
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert not _named(panel, QPushButton, "zotero-held-checked").isVisible()
+
+
+def test_a_line_another_running_window_is_writing_is_noted_and_checking_zotero_does_not_release_it(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    zotero_journal.SaveJournal(journal_path).begin(_lines("Paper 1"))  # owned by this process, which is running
+    panel = _save_panel(qtbot, PanelBridge(), journal_path)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert _text(panel, "zotero-held-note") == WRITING_ELSEWHERE_TEXT
+    _named(panel, QPushButton, "zotero-held-checked").click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == STILL_WRITING_TEXT, timeout=5000)
+    assert "another window" in _text(panel, "zotero-save-result")
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+
+
+def test_a_line_whose_window_has_exited_is_held_as_unknown_and_checking_zotero_releases_it(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    entry = {
+        "id": "dead",
+        "line": _lines("Paper 1"),
+        "outcome": "writing",
+        "at": "2026-11-03T05:00:00+00:00",
+        "owner_pid": _exited_pid(),
+        "owner_started": "1",
+    }
+    journal_path.write_text(json.dumps({"version": 1, "entries": [entry]}), encoding="utf-8")
+    panel = _save_panel(qtbot, PanelBridge(), journal_path)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert not _named(panel, QLabel, "zotero-held-note").isVisible()
+    _named(panel, QPushButton, "zotero-held-checked").click()
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == HELD_RELEASED_TEXT, timeout=5000)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
+    assert _named(panel, QPushButton, "zotero-save-button").isEnabled()
 
 
 def test_a_quit_mid_save_keeps_the_outcome_of_each_line_that_landed(qtbot, tmp_path):
