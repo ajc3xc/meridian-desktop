@@ -1,7 +1,7 @@
 """Shared test setup. Qt runs on the offscreen platform, so no display is needed.
 
 For the whole session the keyring module uses an in-memory backend, and HOME,
-USERPROFILE, LOCALAPPDATA and APPDATA point at a temp directory. CODEX_HOME is unset,
+USERPROFILE, LOCALAPPDATA, APPDATA and MERIDIAN_LOCAL_RUNNER_STATE_DIR point at a temp directory. CODEX_HOME is unset,
 so Codex's config falls under that temp home too. So no test can reach the real OS
 credential store, the real user home directory, or the real Claude Desktop and Codex
 config files, even by accident.
@@ -28,6 +28,8 @@ def isolated_keyring_and_home(tmp_path_factory):
         mp.setenv("USERPROFILE", str(home))
         mp.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
         mp.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+        # The Meridian Zotero bridge reads this variable before the home folder, so it is redirected too.
+        mp.setenv("MERIDIAN_LOCAL_RUNNER_STATE_DIR", str(home / ".meridian" / "local_runner"))
         mp.delenv("CODEX_HOME", raising=False)
         keyring.set_keyring(backend)
         yield backend

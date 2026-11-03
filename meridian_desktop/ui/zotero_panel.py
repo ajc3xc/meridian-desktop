@@ -98,6 +98,9 @@ SAVE_INTRO = (
 SAVE_PLACEHOLDER = "Title | https://example.org/page"
 SAVE_BUTTON_TEXT = "Save to Zotero"
 SAVING_TEXT = "Saving to Zotero through the Meridian bridge..."
+SAVE_NO_RESULT_TEXT = (
+    "The save ended without a result, so the lines are still in the box. Check Zotero before you save again."
+)
 BRIDGE_CHECKING_TEXT = "Bridge: checking..."
 # The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
@@ -228,6 +231,7 @@ class ZoteroPanel(QWidget):
         self._client = client
         self._bridge = bridge
         self._saving = False
+        self._pending_lines: list[str] = []
         self._confirm = ask_start if confirm is None else confirm
         self._exe: str | None = None
         self._running: bool | None = None
@@ -500,24 +504,33 @@ class ZoteroPanel(QWidget):
     def _on_save_clicked(self) -> None:
         if self._saving:
             return
+        text = self._save_input.toPlainText()
         try:
-            items = self._bridge.parse_lines(self._save_input.toPlainText())
+            items = self._bridge.parse_lines(text)
         except zotero_bridge.BridgeInputError as exc:
             self._save_result.setText(exc.message)
             return
+        # parse_lines makes one item per non-blank line, in order, so these lines line up with the items.
+        self._pending_lines = [line.strip() for line in text.splitlines() if line.strip()]
         self._saving = True
+        self._save_input.setReadOnly(True)
         self._save_button.setEnabled(False)
         self._save_result.setText(SAVING_TEXT)
         self._start_read(SAVE, functools.partial(self._bridge.save_items, items))
 
     def _on_save_ready(self, payload: tuple) -> None:
         result, failure = payload
+        lines, self._pending_lines = self._pending_lines, []
         self._saving = False
+        self._save_input.setReadOnly(False)
         self._save_button.setEnabled(True)
-        if failure is not None or not isinstance(result, zotero_bridge.SaveResult):
-            self._save_result.setText(failure or CHECK_FAILED_TEXT.format("NoResult"))
-        else:
+        if failure is None and isinstance(result, zotero_bridge.SaveResult):
+            # The first `saved` lines landed in Zotero, so they leave the box. The rest stay, so nothing is written twice.
+            self._save_input.setPlainText("\n".join(lines[result.saved :]))
             self._save_result.setText(result.message)
+        else:
+            # No result came back, so nothing leaves the box, and the person checks Zotero before saving again.
+            self._save_result.setText(SAVE_NO_RESULT_TEXT)
         self._start_bridge_check()
 
 
