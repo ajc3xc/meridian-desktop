@@ -5,6 +5,7 @@ Each test uses its own journal in pytest's temp folder. No test touches the real
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -14,11 +15,16 @@ from meridian_desktop.zotero_journal import (
     HELD_OUTCOMES,
     JOURNAL_NAME,
     LANDED,
+    LINE_HELD_TEXT,
+    LOCK_SUFFIX,
+    LOCK_TIMEOUT_TEXT,
     REFUSED,
     UNKNOWN,
     WRITING,
     JournalError,
     SaveJournal,
+    _lock_file,
+    _unlock_file,
     default_path,
     journal_unreadable_text,
 )
@@ -138,3 +144,108 @@ def test_old_entries_are_pruned_but_held_entries_are_kept(tmp_path, monkeypatch)
 def test_the_default_journal_sits_beside_the_settings_file():
     assert default_path().name == JOURNAL_NAME
     assert default_path().parent == default_settings_path().parent
+
+
+def _raw_held(path: Path) -> dict[str, str]:
+    """The held entries as the file on disk holds them, read without the journal's own code."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {entry["id"]: entry["outcome"] for entry in raw["entries"] if entry["outcome"] in HELD_OUTCOMES}
+
+
+def test_two_instances_interleaved_never_drop_a_writing_or_unknown_entry(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    first = SaveJournal(path)
+    second = SaveJournal(path)
+    x = first.begin("X | https://example.org/x")
+    assert _raw_held(path) == {x: WRITING}
+    y = second.begin("Y | https://example.org/y")
+    assert _raw_held(path) == {x: WRITING, y: WRITING}
+    first.finish(x, UNKNOWN)
+    assert _raw_held(path) == {x: UNKNOWN, y: WRITING}
+    second.finish(y, LANDED)
+    assert _raw_held(path) == {x: UNKNOWN}
+    z = first.begin("Z | https://example.org/z")
+    assert _raw_held(path) == {x: UNKNOWN, z: WRITING}
+    assert second.clear([x]) == 1
+    assert _raw_held(path) == {z: WRITING}
+    assert first.clear([z]) == 0  # still writing: never cleared
+    assert _raw_held(path) == {z: WRITING}
+    second.finish(z, UNKNOWN)
+    assert _raw_held(path) == {z: UNKNOWN}
+    assert first.clear([z]) == 1
+    assert _raw_held(path) == {}
+
+
+def test_a_second_instance_refuses_a_line_the_first_is_writing_even_if_it_opened_first(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    first = SaveJournal(path)
+    second = SaveJournal(path)  # opened before the first writes anything
+    first.begin(LINE)
+    with pytest.raises(JournalError) as info:
+        second.begin(LINE)
+    assert info.value.message == LINE_HELD_TEXT
+    assert [entry.outcome for entry in second.held()] == [WRITING]
+
+
+def test_clear_leaves_a_writing_entry_alone(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path)
+    writing = journal.begin(LINE)
+    assert journal.clear([writing]) == 0
+    assert [entry.id for entry in SaveJournal(path).held()] == [writing]
+
+
+def test_a_deleted_journal_after_earlier_writes_is_unreadable_and_names_the_held_lines(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path)
+    journal.finish(journal.begin(LINE), UNKNOWN)
+    path.unlink()
+    with pytest.raises(JournalError) as info:
+        SaveJournal(path)
+    assert info.value.held_lines == (LINE,)
+    assert LINE in info.value.message
+    assert "Check Zotero before moving or fixing" in info.value.message
+
+
+def test_a_truncated_journal_is_unreadable_and_names_the_held_lines(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path)
+    journal.finish(journal.begin(LINE), UNKNOWN)
+    raw = path.read_bytes()
+    path.write_bytes(raw[: len(raw) // 2])
+    with pytest.raises(JournalError) as info:
+        SaveJournal(path)
+    assert info.value.held_lines == (LINE,)
+    assert LINE in info.value.message
+
+
+def test_a_transient_permission_error_on_replace_is_retried(tmp_path, monkeypatch):
+    path = tmp_path / JOURNAL_NAME
+    real_replace = os.replace
+    refusals: list[str] = []
+
+    def flaky(source, target):
+        if Path(target) == path and not refusals:
+            refusals.append(str(target))
+            raise PermissionError("sharing violation")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    journal = SaveJournal(path)
+    journal.begin(LINE)
+    assert refusals  # the first replace was refused, and the write went through on the retry
+    assert [entry.line for entry in SaveJournal(path).held()] == [LINE]
+
+
+def test_a_lock_held_by_another_process_times_out_with_a_fixed_message(tmp_path):
+    path = tmp_path / JOURNAL_NAME
+    journal = SaveJournal(path, lock_timeout=0.2)
+    holder = open(path.with_name(path.name + LOCK_SUFFIX), "a+b")
+    _lock_file(holder)
+    try:
+        with pytest.raises(JournalError) as info:
+            journal.held()
+        assert info.value.message == LOCK_TIMEOUT_TEXT
+    finally:
+        _unlock_file(holder)
+        holder.close()

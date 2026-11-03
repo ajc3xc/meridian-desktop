@@ -69,7 +69,7 @@ from meridian_desktop.zotero_client import (
     ZoteroError,
     ZoteroStatus,
 )
-from meridian_desktop import zotero_bridge
+from meridian_desktop import zotero_bridge, zotero_journal
 
 TOKEN = "zb-test-token-7f3c"
 WRITE_KEY = "zb-write-key-9a1d"
@@ -1519,6 +1519,41 @@ def test_a_second_save_after_relaunch_posts_nothing(qtbot, tmp_path):
     _click_save(relaunched)
     qtbot.waitUntil(lambda: _text(relaunched, "zotero-save-result") == SAVE_HELD_TEXT, timeout=5000)
     assert len(_writes(fake)) == posted
+
+
+def test_a_second_window_refuses_a_line_another_window_is_writing(qtbot, tmp_path):
+    journal_path = tmp_path / "zotero_saves.json"
+    bridge = PanelBridge()
+    second = _save_panel(qtbot, bridge, journal_path)  # built first, so this window's own list is empty
+    other = zotero_journal.SaveJournal(journal_path)  # the other window is writing this line right now
+    other.begin(_lines("Paper 1"))
+    _box(second).setPlainText(_lines("Paper 1"))
+    _click_save(second)
+    assert _text(second, "zotero-save-result") == SAVE_HELD_TEXT
+    assert bridge.batches == []
+    assert _named(second, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 1")
+    assert _box(second).toPlainText() == _lines("Paper 1")
+
+
+def test_a_failed_journal_write_keeps_the_line_in_the_box_with_the_journal_message(qtbot, tmp_path, monkeypatch):
+    journal_path = tmp_path / "zotero_saves.json"
+    bridge_text = "Nothing is known about Paper 1 yet."
+    bridge = PanelBridge(result=SaveResult(UNKNOWN, 0, bridge_text))
+    panel = _save_panel(qtbot, bridge, journal_path)
+
+    def disk_full(target, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(zotero_journal, "_atomic_write", disk_full)
+    typed = _lines("Paper 1", "Paper 2")
+    _box(panel).setPlainText(typed)
+    _click_save(panel)
+    expected = f"{zotero_journal.WRITE_FAILED_TEXT} {bridge_text}"
+    qtbot.waitUntil(lambda: _text(panel, "zotero-save-result") == expected, timeout=5000)
+    assert _box(panel).toPlainText() == typed
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == ""
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
+    assert zotero_journal.SaveJournal(journal_path).held() == []
 
 
 def test_a_quit_mid_save_keeps_the_outcome_of_each_line_that_landed(qtbot, tmp_path):

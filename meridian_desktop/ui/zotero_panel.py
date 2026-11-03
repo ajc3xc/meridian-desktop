@@ -107,6 +107,9 @@ HELD_HEADING = (
 )
 HELD_BUTTON_TEXT = "I checked Zotero"
 HELD_RELEASED_TEXT = "Released. Nothing was retried."
+STILL_WRITING_TEXT = (
+    "Released the lines Zotero confirmed. Lines still being written in another window stay held until they finish."
+)
 BRIDGE_CHECKING_TEXT = "Bridge: checking..."
 # The kinds of read the panel runs. Each kind has at most one read in flight.
 STATUS = "status"
@@ -261,6 +264,8 @@ class ZoteroPanel(QWidget):
         # The save journal: the held lines (outcome unknown) and whether saving is possible at all.
         self._journal: zotero_journal.SaveJournal | None = None
         self._journal_error: str | None = None
+        # A journal read or write that failed during this run. It stays until the window is closed, and Save stays off.
+        self._journal_problem: str | None = None
         self._held_ids: list[str] = []
         path = zotero_journal.default_path() if journal_path is None else journal_path
         try:
@@ -551,8 +556,13 @@ class ZoteroPanel(QWidget):
         self._bridge_state.setText(result.message)
 
     def _refresh_held(self) -> None:
-        """Show the held lines from the journal. They survive quitting, so they are shown again on every launch."""
-        held = self._journal.held() if self._journal is not None else []
+        """Show the held lines, read from the journal on disk. They survive quitting, so they show again on every launch."""
+        held: list = []
+        if self._journal is not None:
+            try:
+                held = self._journal.held()
+            except zotero_journal.JournalError as exc:
+                self._journal_problem = exc.message
         self._held_ids = [entry.id for entry in held]
         self._held_lines.setPlainText("\n".join(entry.line for entry in held))
         for widget in (self._held_heading, self._held_lines, self._held_button):
@@ -560,13 +570,37 @@ class ZoteroPanel(QWidget):
         self._update_save_enabled()
 
     def _update_save_enabled(self) -> None:
-        """Save is off while the journal cannot be used, while any line is held, and while a save is running."""
-        self._save_button.setEnabled(self._journal is not None and not self._held_ids and not self._saving)
+        """Save is off while the journal cannot be used or written, while any line is held, and while a save is running."""
+        self._save_button.setEnabled(
+            self._journal is not None and self._journal_problem is None and not self._held_ids and not self._saving
+        )
 
-    def _held_contains(self, line: str) -> bool:
+    def _ensure_held(self, line: str) -> str | None:
+        """Make sure ``line`` is held in the journal. None when it is; otherwise the journal's problem, which also turns
+        Save off for the rest of this run."""
         if self._journal is None:
-            return False
-        return any(entry.line == line for entry in self._journal.held())
+            return self._journal_problem or self._journal_error or zotero_journal.WRITE_FAILED_TEXT
+        try:
+            if any(entry.line == line for entry in self._journal.held()):
+                return None
+            self._journal.record_unknown([line])
+        except zotero_journal.JournalError as exc:
+            self._journal_problem = exc.message
+            self._update_save_enabled()
+            return exc.message
+        return None
+
+    def _record_all(self, lines: list[str]) -> str | None:
+        """Hold every line of a save that produced no result. None when the journal recorded them."""
+        if self._journal is None:
+            return self._journal_problem or self._journal_error or zotero_journal.WRITE_FAILED_TEXT
+        try:
+            self._journal.record_unknown(lines)
+        except zotero_journal.JournalError as exc:
+            self._journal_problem = exc.message
+            self._update_save_enabled()
+            return exc.message
+        return None
 
     @Slot()
     def _on_held_checked_clicked(self) -> None:
@@ -578,7 +612,7 @@ class ZoteroPanel(QWidget):
             self._save_result.setText(exc.message)
             return
         self._refresh_held()
-        self._save_result.setText(HELD_RELEASED_TEXT)
+        self._save_result.setText(STILL_WRITING_TEXT if self._held_ids else HELD_RELEASED_TEXT)
 
     @Slot()
     def _on_save_clicked(self) -> None:
@@ -587,7 +621,20 @@ class ZoteroPanel(QWidget):
         if self._journal is None:
             self._save_result.setText(self._journal_error or SAVE_HELD_TEXT)
             return
-        if self._held_ids:
+        if self._journal_problem is not None:
+            self._save_result.setText(self._journal_problem)
+            return
+        # The guard reads the journal on disk, under its lock. The list in this window may be out of date, because another
+        # window may be writing a line right now.
+        try:
+            held = self._journal.held()
+        except zotero_journal.JournalError as exc:
+            self._journal_problem = exc.message
+            self._update_save_enabled()
+            self._save_result.setText(exc.message)
+            return
+        if held:
+            self._refresh_held()
             self._save_result.setText(SAVE_HELD_TEXT)
             return
         text = self._save_input.toPlainText()
@@ -612,29 +659,26 @@ class ZoteroPanel(QWidget):
         self._saving = False
         self._save_input.setReadOnly(False)
         if failure is None and isinstance(result, zotero_bridge.SaveResult):
-            # The first `saved` lines landed in Zotero, so they leave the box. An unknown line is held in the journal and
-            # leaves the box too. The lines after it were not sent, so they stay.
-            held_index = result.saved if result.state == zotero_bridge.UNKNOWN and result.saved < len(lines) else None
-            rest = lines[result.saved + (1 if held_index is not None else 0) :]
-            if held_index is not None and not self._held_contains(lines[held_index]):
-                self._record_unknown([lines[held_index]])
-            self._save_input.setPlainText("\n".join(rest))
-            self._save_result.setText(result.message)
+            # The first `saved` lines landed, so they leave the box. The unknown line, if there is one, leaves the box only
+            # once its journal entry is written. Without that entry it stays, so nothing can be posted twice. The lines after
+            # it were not sent, so they stay too.
+            keep_from = result.saved
+            problem = None
+            if result.state == zotero_bridge.UNKNOWN and result.saved < len(lines):
+                problem = self._ensure_held(lines[result.saved])
+                if problem is None:
+                    keep_from = result.saved + 1
+            message = result.message if problem is None else f"{problem} {result.message}"
+            self._save_input.setPlainText("\n".join(lines[keep_from:]))
+            self._save_result.setText(message)
         else:
-            # No result came back, so nothing is known about any line. Every line is held back, and the box is cleared.
-            self._record_unknown(lines)
-            self._save_input.setPlainText("")
-            self._save_result.setText(SAVE_NO_RESULT_TEXT)
+            # No result came back, so nothing is known about any line. Every line is held, and the box keeps them only if the
+            # journal did not record them.
+            problem = self._record_all(lines)
+            self._save_input.setPlainText("\n".join(lines) if problem is not None else "")
+            self._save_result.setText(SAVE_NO_RESULT_TEXT if problem is None else f"{problem} {SAVE_NO_RESULT_TEXT}")
         self._refresh_held()
         self._start_bridge_check()
-
-    def _record_unknown(self, lines: list[str]) -> None:
-        if self._journal is None:
-            return
-        try:
-            self._journal.record_unknown(lines)
-        except zotero_journal.JournalError as exc:
-            self._save_result.setText(exc.message)
 
 
 __all__ = [
