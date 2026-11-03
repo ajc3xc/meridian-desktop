@@ -152,12 +152,15 @@ class RunnerActions(QObject):
         log_path: Path | None = None,
         locate: LocateFn | None = None,
         choose_folder: FolderChooser | None = None,
-        on_started: Callable[[int, str], None] | None = None,
+        spawn: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._log_path = log_path
-        self._on_started = on_started
+        # The process runner the default controls use. None means subprocess.run. Tests pass a fake.
+        self._spawn = spawn
+        # Set by the window that owns these controls. See set_on_started.
+        self._on_started: Callable[[int, str], None] | None = None
         self._make_control = make_control if make_control is not None else self._default_control
         self._confirm = confirm if confirm is not None else ask_control
         self._find_zotero = find_zotero if find_zotero is not None else zotero_client.find_zotero_exe
@@ -177,8 +180,14 @@ class RunnerActions(QObject):
     def _log(self) -> Path:
         return self._log_path if self._log_path is not None else default_log_path()
 
+    def set_on_started(self, callback: Callable[[int, str], None]) -> None:
+        """Call ``callback(pid, core checkout)`` when a local start is confirmed with a pid. Later controls use it."""
+        self._on_started = callback
+
     def _default_control(self, python: str, cwd: str) -> RunnerControl:
-        return RunnerControl(python, cwd, log_path=self._log(), on_started=self._on_started)
+        if self._spawn is None:
+            return RunnerControl(python, cwd, log_path=self._log(), on_started=self._on_started)
+        return RunnerControl(python, cwd, spawn=self._spawn, log_path=self._log(), on_started=self._on_started)
 
     @property
     def locating(self) -> bool:

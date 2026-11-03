@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         update_root: Path | None = None,
         record_apps_entry: updater.AppsEntryWriter | None = None,
         connection_transport: Transport | None = None,
+        restart_watch: RestartWatch | None = None,
     ) -> None:
         super().__init__()
         self._store = settings_store if settings_store is not None else SettingsStore()
@@ -292,15 +293,15 @@ class MainWindow(QMainWindow):
         # from the core Python and folder in Settings. The status call never starts or stops anything. The
         # Start, Stop and Restart controls use runner_actions instead, and they stay off until the owner turns them on.
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
-        # What this window runs, taken now. The restart notice compares the disk with it. A local start the owner confirms
-        # hands its pid to the same watch, so the notice also covers the server this window started.
-        self._restart_watch = RestartWatch()
+        # What this window runs. The app takes this baseline before the first-run dialog, so it matches what was loaded at
+        # launch. Tests pass a watch with fake readers.
+        self._restart_watch = restart_watch if restart_watch is not None else RestartWatch()
         # The runner controls (the Tunnel panel and the Settings runner block). Tests pass fakes. The app reads Settings.
-        self._runner_actions = (
-            runner_actions
-            if runner_actions is not None
-            else RunnerActions(self._store, on_started=self._restart_watch.note_server_started)
-        )
+        self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
+        # A local start that the owner confirms through these controls hands its pid to the window's watch. Any real
+        # RunnerActions gets this, built here or handed in. A fake without the method is left alone.
+        if isinstance(self._runner_actions, RunnerActions):
+            self._runner_actions.set_on_started(self._restart_watch.note_server_started)
         # The tools read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
         self._tools_status_read = (

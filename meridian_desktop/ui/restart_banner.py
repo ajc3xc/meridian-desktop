@@ -1,7 +1,8 @@
 """The restart notice: a strip above the tabs that shows when code or the local server changed on disk. GUI thread only.
 
 The check is a few stat calls, so it runs on the GUI thread every CHECK_INTERVAL_MS. Dismiss hides the strip. It comes
-back only when the set of changed files or the server state is different from the set the owner dismissed.
+back only when the set of changed files or the server state is different from the set the owner dismissed. When the
+notice clears, the dismissed set is forgotten too, so a later change of the same kind is shown again.
 """
 
 from __future__ import annotations
@@ -48,7 +49,12 @@ class RestartBanner(QFrame):
     def check_now(self) -> None:
         """Compare the disk with the baseline and show or hide the strip. The timer calls this every interval."""
         self._restart = self._watch.check()
-        if not self._restart.needed or self._key(self._restart) == self._dismissed_key:
+        if not self._restart.needed:
+            # The notice has cleared, so a later change is new even if it matches one the owner dismissed before.
+            self._dismissed_key = None
+            self.hide()
+            return
+        if self._key(self._restart) == self._dismissed_key:
             self.hide()
             return
         self._label.setText(banner_text(self._restart))
