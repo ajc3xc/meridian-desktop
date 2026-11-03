@@ -319,12 +319,15 @@ class RunnerControl:
         spawn: Callable[..., Any] = subprocess.run,
         log_path: Path | None = None,
         clock: Callable[[], dt.datetime] = _utc_now,
+        on_started: Callable[[int, str], None] | None = None,
     ) -> None:
         self._python = python or ""
         self._cwd = cwd or ""
         self._spawn = spawn
         self._log_path = log_path
         self._clock = clock
+        # Called with (pid, core checkout) when a local start is confirmed with a pid. The restart notice watches it.
+        self._on_started = on_started
 
     def status(self, scope: str = DEFAULT_SCOPE) -> ControlResult:
         return self._run(STATUS, scope)
@@ -339,6 +342,14 @@ class RunnerControl:
         result = self._run(subcommand, scope)
         if result.outcome != REFUSED:
             self._log(subcommand, scope, result)
+        if (
+            self._on_started is not None
+            and subcommand == START
+            and scope == SCOPE_LOCAL
+            and result.outcome == CONFIRMED
+            and result.pid is not None
+        ):
+            self._on_started(result.pid, self._cwd)
         return result
 
     def _run(self, subcommand: str, scope: str) -> ControlResult:

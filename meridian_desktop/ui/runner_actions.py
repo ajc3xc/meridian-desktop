@@ -152,10 +152,12 @@ class RunnerActions(QObject):
         log_path: Path | None = None,
         locate: LocateFn | None = None,
         choose_folder: FolderChooser | None = None,
+        on_started: Callable[[int, str], None] | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._log_path = log_path
+        self._on_started = on_started
         self._make_control = make_control if make_control is not None else self._default_control
         self._confirm = confirm if confirm is not None else ask_control
         self._find_zotero = find_zotero if find_zotero is not None else zotero_client.find_zotero_exe
@@ -176,7 +178,7 @@ class RunnerActions(QObject):
         return self._log_path if self._log_path is not None else default_log_path()
 
     def _default_control(self, python: str, cwd: str) -> RunnerControl:
-        return RunnerControl(python, cwd, log_path=self._log())
+        return RunnerControl(python, cwd, log_path=self._log(), on_started=self._on_started)
 
     @property
     def locating(self) -> bool:

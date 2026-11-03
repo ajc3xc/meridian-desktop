@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 from meridian_desktop import local_client, token_store, updater, zotero_client
 from meridian_desktop.data_source import STATE_OK, DataSources, resolve
 from meridian_desktop.hosted_client import Transport
+from meridian_desktop.restart_check import RestartWatch
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import SettingsStore
@@ -79,6 +80,7 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.gpu_jobs_panel import GpuJobsPanel
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
+from meridian_desktop.ui.restart_banner import RestartBanner
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
@@ -290,8 +292,15 @@ class MainWindow(QMainWindow):
         # from the core Python and folder in Settings. The status call never starts or stops anything. The
         # Start, Stop and Restart controls use runner_actions instead, and they stay off until the owner turns them on.
         self._tunnel_runner = tunnel_runner if tunnel_runner is not None else _ConfiguredRunner(self._store)
+        # What this window runs, taken now. The restart notice compares the disk with it. A local start the owner confirms
+        # hands its pid to the same watch, so the notice also covers the server this window started.
+        self._restart_watch = RestartWatch()
         # The runner controls (the Tunnel panel and the Settings runner block). Tests pass fakes. The app reads Settings.
-        self._runner_actions = runner_actions if runner_actions is not None else RunnerActions(self._store)
+        self._runner_actions = (
+            runner_actions
+            if runner_actions is not None
+            else RunnerActions(self._store, on_started=self._restart_watch.note_server_started)
+        )
         # The tools read (a no-argument callable that returns ToolsStatus). Tests pass a fake. The app reads
         # the core Python and folder in Settings. It starts and stops nothing.
         self._tools_status_read = (
@@ -317,6 +326,9 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self._connection_bar)
         layout.addLayout(self._build_mode_bar(central))
+        # Hidden until the code or the local server changes on disk. Dismiss hides it, and it returns only for a new change.
+        self._restart_banner = RestartBanner(self._restart_watch, parent=central)
+        layout.addWidget(self._restart_banner)
 
         # The status-bar notice holds the one update check of this window, and Home's Updates card reads its result, so
         # it is built before the tabs and added to the status bar below. The bar is hidden unless a release is downloading
