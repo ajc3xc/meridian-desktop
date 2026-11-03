@@ -371,8 +371,10 @@ def test_a_start_time_learned_after_the_start_catches_a_reused_pid(tmp_path):
     watch.note_server_started(4321, str(checkout))
     reading["value"] = started  # the start time is readable from now on
     assert not watch.check().server
-    reading["value"] = started + 999  # the PID now belongs to another process
     _set_mtime(source, LATER_NS)
+    # Still watched once the start time is known: the edit is reported before any PID reuse is simulated.
+    assert watch.check() == Restart(server=True)
+    reading["value"] = started + 999  # only now does the PID belong to another process
     assert not watch.check().server
 
 
@@ -417,36 +419,87 @@ def test_clearing_a_gone_server_does_not_drop_a_newer_start(tmp_path):
     assert watch.check().server  # the newer start is still watched
 
 
-def test_a_start_and_checks_on_two_threads_leave_a_consistent_record(tmp_path):
-    checkout, _source, alive = _server_setup(tmp_path)
-    alive[5555] = alive[4321]
-    watch = _watch({}, started_ns_of=_reader(alive))
-    errors = []
-    results = []
+class _PausingWatch(RestartWatch):
+    """A watch whose clear of the server record can pause, so another thread can start a replacement inside a check.
 
-    def starts():
+    ``pause_clear`` is called once, just before the first clear of the record to None. The record itself is stored in
+    the instance dict, so the property below does not recurse.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.pause_clear = None
+        super().__init__(*args, **kwargs)
+
+    @property
+    def _server(self):
+        return self.__dict__.get("_server_record")
+
+    @_server.setter
+    def _server(self, value):
+        pause = self.pause_clear
+        if value is None and pause is not None:
+            self.pause_clear = None
+            pause()
+        self.__dict__["_server_record"] = value
+
+
+def test_a_replacement_started_while_a_check_clears_the_old_record_survives_the_check(tmp_path):
+    """A check clears the old record, and a new start for another PID lands inside that clear.
+
+    The check reads the old PID, which its reader reports GONE. Just before it clears the record, it pauses. The new
+    start runs on another thread, released by a barrier, and replaces the record during the pause. Then the check
+    finishes its clear. The replacement must survive. Without the lock around the clear, the clear stores None after
+    the replacement and drops it. With the lock, the start waits for the check, so the pause times out and the
+    replacement is stored after the clear.
+    """
+    checkout, source, alive = _server_setup(tmp_path)
+    alive[5555] = alive[4321]
+    retired = {"value": False}
+
+    def reader(pid):
+        if pid == 4321 and retired["value"]:
+            return GONE
+        return alive.get(pid, GONE)
+
+    watch = _PausingWatch(modules={}, frozen=False, executable="", started_ns_of=reader)
+    watch.note_server_started(4321, str(checkout))
+    retired["value"] = True
+    in_clear = threading.Event()
+    replaced = threading.Event()
+
+    def pause():
+        in_clear.set()
+        replaced.wait(timeout=2)  # with the lock, the start below waits for this check, so this times out
+
+    watch.pause_clear = pause
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def check_side():
         try:
-            for index in range(200):
-                watch.note_server_started(4321 if index % 2 else 5555, str(checkout))
+            barrier.wait(timeout=30)
+            watch.check()
         except Exception as error:  # the test reports any failure from the other thread
             errors.append(error)
 
-    def checks():
+    def start_side():
         try:
-            for _ in range(200):
-                results.append(watch.check())
+            barrier.wait(timeout=30)
+            in_clear.wait(timeout=10)
+            watch.note_server_started(5555, str(checkout))
+            replaced.set()
         except Exception as error:
             errors.append(error)
 
-    threads = [threading.Thread(target=starts), threading.Thread(target=checks)]
+    threads = [threading.Thread(target=check_side), threading.Thread(target=start_side)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=60)
-    assert not any(thread.is_alive() for thread in threads)
+    assert not any(thread.is_alive() for thread in threads), "a thread hung"
     assert errors == []
-    assert len(results) == 200 and all(isinstance(result, Restart) for result in results)
-    assert watch.check() == Restart()
+    _set_mtime(source, alive[5555] + NANOS_PER_SECOND)
+    assert watch.check().server, "the replacement start was dropped by the check that was clearing the old record"
 
 
 def test_server_files_lists_python_files_only_and_a_missing_folder_is_empty(tmp_path):
@@ -493,9 +546,55 @@ def test_an_unlistable_server_folder_is_listed_on_a_later_check_and_its_files_jo
     assert watch.check() == Restart(server=True)
 
 
+def test_a_pending_server_file_missing_for_a_moment_is_baselined_again_and_its_later_edit_is_seen(tmp_path, monkeypatch):
+    checkout, source, alive = _server_setup(tmp_path)
+    real_stat = os.stat
+    monkeypatch.setattr(os, "stat", _locked_stat(source, real_stat))
+    watch = _watch({}, started_ns_of=_reader(alive))
+    watch.note_server_started(4321, str(checkout))  # the file cannot be read at the start, so it is pending
+    monkeypatch.setattr(os, "stat", real_stat)
+    os.remove(source)  # missing for a moment, as an editor's save can leave it
+    assert not watch.check().server  # still pending, not dropped
+    _write(source, mtime=BASE_NS)  # back again, and baselined on this check
+    assert not watch.check().server
+    _set_mtime(source, alive[4321] + NANOS_PER_SECOND)  # the later edit must be seen
+    assert watch.check() == Restart(server=True)
+
+
+def test_a_newly_readable_folder_is_listed_a_bounded_number_of_steps_per_tick(tmp_path, monkeypatch):
+    root = tmp_path / "meridian"
+    folder = os.path.join(str(root), "sub")
+    for index in range(10):
+        _write(Path(folder) / f"m{index}.py", mtime=BASE_NS)
+    real_scandir = os.scandir
+
+    def denied(path="."):
+        if os.path.normcase(os.path.normpath(os.fspath(path))) == os.path.normcase(os.path.normpath(folder)):
+            raise PermissionError(13, "denied", folder)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    files = ServerFiles(root)
+    monkeypatch.setattr(os, "scandir", real_scandir)
+    monkeypatch.setattr("meridian_desktop.restart_check.MAX_ENTRIES_PER_TICK", 3)
+
+    def in_folder():
+        return {path for path in files.tracked() if os.path.dirname(path) == folder}
+
+    files.refresh()
+    assert len(in_folder()) <= 3  # one tick lists at most the cap
+    ticks = 1
+    while len(in_folder()) < 10 and ticks < 20:
+        files.refresh()
+        ticks += 1
+    assert len(in_folder()) == 10
+    assert ticks > 1  # the folder needed more than one tick, so the cap was really in force
+
+
 def test_a_confirmed_stop_does_not_reach_the_watch(tmp_path):
     calls = []
-    spawn = _FakeSpawn(_done({"scope": "local", "child": {"state": "stopped"}}))
+    # The stop reply names the pid it stopped, so a guard that wrongly sends STOP to the hook would have something to send.
+    spawn = _FakeSpawn(_done({"scope": "local", "child": {"state": "stopped", "pid": 4321}}))
     assert _control(tmp_path, spawn, calls).stop("local").outcome == rc.CONFIRMED
     assert calls == []
 

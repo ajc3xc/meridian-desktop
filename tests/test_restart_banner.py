@@ -10,6 +10,7 @@ import subprocess
 import sys
 from types import ModuleType
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QPushButton
 
@@ -235,3 +236,39 @@ def test_a_start_through_a_make_control_factory_is_watched(qtbot, settings_path,
     assert not watch.check().server
     os.utime(server_file, ns=(started + NANOS_PER_SECOND, started + NANOS_PER_SECOND))
     assert watch.check() == Restart(server=True)
+
+
+class _HookedControl:
+    """A control that can take the start hook, as RunnerControl does."""
+
+    def __init__(self):
+        self.hook = None
+
+    def set_on_started(self, callback):
+        self.hook = callback
+
+
+class _UnhookedControl:
+    """A control with no set_on_started, so a start hook has nowhere to go."""
+
+
+def test_a_control_with_set_on_started_takes_the_hook(qtbot, settings_path):
+    actions = RunnerActions(SettingsStore(settings_path), make_control=lambda python, cwd: _HookedControl())
+
+    def hook(pid, cwd):
+        return None
+
+    actions.set_on_started(hook)
+    assert actions.control("python", "core").hook is hook
+
+
+def test_a_control_without_set_on_started_is_refused_when_a_hook_is_set(qtbot, settings_path):
+    actions = RunnerActions(SettingsStore(settings_path), make_control=lambda python, cwd: _UnhookedControl())
+    actions.set_on_started(lambda pid, cwd: None)
+    with pytest.raises(TypeError, match="set_on_started"):
+        actions.control("python", "core")
+
+
+def test_without_a_hook_a_control_without_set_on_started_is_returned_as_it_is(qtbot, settings_path):
+    actions = RunnerActions(SettingsStore(settings_path), make_control=lambda python, cwd: _UnhookedControl())
+    assert isinstance(actions.control("python", "core"), _UnhookedControl)

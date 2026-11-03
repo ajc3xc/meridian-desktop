@@ -218,11 +218,17 @@ class RunnerActions(QObject):
             tunnel_autostart=settings.tunnel_autostart,
         )
 
-    def control(self, python: str, cwd: str) -> RunnerControl:
+    def control(self, python: str, cwd: str) -> Any:
         control = self._make_control(python, cwd)
         # Every control this object hands out gets the window's start hook, including one from a make_control factory.
-        if self._on_started is not None and isinstance(control, RunnerControl):
-            control.set_on_started(self._on_started)
+        # A control without set_on_started cannot take the hook, so that is an error here, not a silent gap later.
+        if self._on_started is not None:
+            attach = getattr(control, "set_on_started", None)
+            if not callable(attach):
+                raise TypeError(
+                    f"{type(control).__name__} has no set_on_started, so the start hook cannot be attached to it",
+                )
+            attach(self._on_started)
         return control
 
     def ask(self, parent: QWidget | None, title: str, body: str, confirm_text: str) -> bool:
