@@ -42,6 +42,8 @@ from meridian_desktop.ui.zotero_panel import (
     START_CANCELLED_TEXT,
     START_HINT_NOT_INSTALLED,
     START_HINT_RUNNING,
+    BRIDGE_CHECKING_TEXT,
+    STATUS,
     ZoteroPanel,
     ask_start,
     results_text,
@@ -492,6 +494,17 @@ def test_a_search_still_running_when_its_panel_is_deleted_does_not_keep_the_pane
 # ----------------------------------------------------------- a result for another owner, or a superseded status check
 
 
+def _status_deliveries(emitted):
+    """The status checks' deliveries only. Each refresh also runs a bridge check, which this test does not follow."""
+    return [item for item in emitted if item.value.kind == STATUS]
+
+
+def _wait_bridge_result(qtbot, panel):
+    """The bridge check runs after each refresh. Its result can land after the refresh button is enabled, so wait for it."""
+    state = _named(panel, QLabel, "zotero-bridge-state")
+    qtbot.waitUntil(lambda: state.text() != BRIDGE_CHECKING_TEXT, timeout=5000)
+
+
 def test_a_result_from_another_owner_or_from_a_superseded_status_check_is_dropped(qtbot):
     """A sibling panel's answer, and an answer from a status check that this panel's newer check superseded, show nothing.
 
@@ -507,16 +520,19 @@ def test_a_result_from_another_owner_or_from_a_superseded_status_check_is_droppe
     with recording_deliveries() as emitted:
         _named(panel, QPushButton, "zotero-refresh").click()
         _wait_idle_refresh(qtbot, panel)
-        assert len(emitted) == 1
-        own_first = emitted[0]
+        _wait_bridge_result(qtbot, panel)
+        assert len(_status_deliveries(emitted)) == 1
+        own_first = _status_deliveries(emitted)[0]
         shown_first = visible_state(panel)
         _named(sibling, QPushButton, "zotero-refresh").click()
         _wait_idle_refresh(qtbot, sibling)
-        assert len(emitted) == 2
+        _wait_bridge_result(qtbot, sibling)
+        assert len(_status_deliveries(emitted)) == 2
         assert visible_state(panel) == shown_first
         fake.status_value = NOT_READY
         _named(panel, QPushButton, "zotero-refresh").click()
         _wait_idle_refresh(qtbot, panel)
+        _wait_bridge_result(qtbot, panel)
         shown_second = visible_state(panel)
         assert shown_second != shown_first
         emit(own_first)  # this panel's answer from the first check, which the second check superseded

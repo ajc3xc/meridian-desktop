@@ -1,7 +1,7 @@
 """Shared test setup. Qt runs on the offscreen platform, so no display is needed.
 
 For the whole session the keyring module uses an in-memory backend, and HOME,
-USERPROFILE, LOCALAPPDATA and APPDATA point at a temp directory. CODEX_HOME is unset,
+USERPROFILE, LOCALAPPDATA, APPDATA and MERIDIAN_LOCAL_RUNNER_STATE_DIR point at a temp directory. CODEX_HOME is unset,
 so Codex's config falls under that temp home too. So no test can reach the real OS
 credential store, the real user home directory, or the real Claude Desktop and Codex
 config files, even by accident.
@@ -28,6 +28,8 @@ def isolated_keyring_and_home(tmp_path_factory):
         mp.setenv("USERPROFILE", str(home))
         mp.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
         mp.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+        # The Meridian Zotero bridge reads this variable before the home folder, so it is redirected too.
+        mp.setenv("MERIDIAN_LOCAL_RUNNER_STATE_DIR", str(home / ".meridian" / "local_runner"))
         mp.delenv("CODEX_HOME", raising=False)
         keyring.set_keyring(backend)
         yield backend
@@ -74,6 +76,40 @@ def no_real_zotero_reads(monkeypatch):
 
     monkeypatch.setattr(zotero_client, "_tasklist_output", no_process_listed)
     monkeypatch.setattr(zotero_client, "http_get", api_not_running)
+
+
+@pytest.fixture(autouse=True)
+def isolated_zotero_journal(tmp_path, monkeypatch):
+    """The Zotero save journal lives in the desktop state folder. Each test gets its own, so no held line leaks between tests.
+
+    A test that relaunches a panel passes its own journal path, so the relaunch reads the same file the first window wrote.
+    """
+    from meridian_desktop import zotero_journal
+
+    path = tmp_path / "zotero_saves" / zotero_journal.JOURNAL_NAME
+    monkeypatch.setattr(zotero_journal, "default_path", lambda: path)
+
+
+@pytest.fixture(autouse=True)
+def no_real_zotero_bridge_writes(monkeypatch):
+    """The Meridian Zotero bridge on 127.0.0.1:23125 writes into the owner's own Zotero library, so no test may reach it.
+
+    Every request through the bridge's default transport is refused here, without a socket. A write (POST or DELETE)
+    that a test attempts is recorded, and the test fails at teardown, even when the code went on to swallow the
+    refusal. Reads are refused the same way. The Zotero API on 127.0.0.1:23119 is covered by no_real_zotero_reads.
+    """
+    from meridian_desktop import zotero_bridge, zotero_client
+
+    writes: list[str] = []
+
+    def refused(method, path, headers, body, timeout):
+        if method != "GET":
+            writes.append(f"{method} {path}")
+        raise zotero_client.ZoteroError("not_running", zotero_bridge.NOT_ANSWERING_TEXT)
+
+    monkeypatch.setattr(zotero_bridge, "http_request", refused)
+    yield writes
+    assert not writes, f"a test tried to write to the Zotero bridge: {writes}"
 
 
 @pytest.fixture(autouse=True)
