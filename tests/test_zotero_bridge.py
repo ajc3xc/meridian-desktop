@@ -10,10 +10,12 @@ import datetime as dt
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -804,12 +806,56 @@ def _failing_opener(error: Exception):
 
 
 def test_a_refused_connection_maps_to_not_running(monkeypatch):
-    """The refusal is injected. On this machine a closed loopback port times out instead of refusing, so a real
-    refused-port socket would not test the mapping."""
+    """The refusal is injected, so this tests the mapping alone and opens no socket."""
     refused = urllib.error.URLError(ConnectionRefusedError(111, "refused"))
     monkeypatch.setattr(urllib.request, "build_opener", _failing_opener(refused))
     with pytest.raises(ZoteroError) as info:
         bridge_transport("http://127.0.0.1:9")("GET", "/v1/status", {}, None, 2.0)
+    assert info.value.code == "not_running"
+    assert info.value.message == NOT_ANSWERING_TEXT
+
+
+def test_a_connect_timeout_maps_to_not_running(monkeypatch):
+    """A connect that times out means nothing answered within the connect window, so the bridge is not running."""
+    timed_out = urllib.error.URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(urllib.request, "build_opener", _failing_opener(timed_out))
+    with pytest.raises(ZoteroError) as info:
+        bridge_transport("http://127.0.0.1:9")("GET", "/v1/status", {}, None, 2.0)
+    assert info.value.code == "not_running"
+    assert info.value.message == NOT_ANSWERING_TEXT
+
+
+def test_a_reply_that_never_comes_stays_a_timeout(monkeypatch):
+    """A reply that never comes is raised as a bare TimeoutError, not wrapped, so it stays a timeout."""
+    monkeypatch.setattr(urllib.request, "build_opener", _failing_opener(TimeoutError("timed out")))
+    with pytest.raises(ZoteroError) as info:
+        bridge_transport("http://127.0.0.1:9")("GET", "/v1/status", {}, None, 2.0)
+    assert info.value.code == "timeout"
+    assert info.value.message == TIMEOUT_TEXT
+
+
+@contextmanager
+def _unanswered_loopback_url():
+    """A loopback URL whose port is bound but not listening.
+
+    The probe stays bound while the URL is used. A port that was bound and then closed can be handed to the client as its
+    own source port, and then the client connects to itself and waits for a reply instead of being refused.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    try:
+        yield f"http://127.0.0.1:{probe.getsockname()[1]}"
+    finally:
+        probe.close()
+
+
+def test_the_real_transport_maps_an_unanswered_port_to_not_running():
+    """This machine does not refuse a connection to a port with nothing listening. It leaves the attempt unanswered, so
+    the connect window runs out, and the test passes here through the connect timeout. On a machine that refuses the
+    connection, the same test passes through the refusal. Either way the answer is not_running."""
+    with _unanswered_loopback_url() as base:
+        with pytest.raises(ZoteroError) as info:
+            bridge_transport(base)("GET", "/v1/status", {}, None, 0.5)
     assert info.value.code == "not_running"
     assert info.value.message == NOT_ANSWERING_TEXT
 

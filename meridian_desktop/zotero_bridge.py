@@ -84,7 +84,7 @@ NO_TOKEN_TEXT = (
     "Nothing was saved and no request was sent."
 )
 NOT_ANSWERING_TEXT = (
-    "The Meridian Zotero bridge did not answer on 127.0.0.1:23125. Open Zotero with the Meridian plugin running."
+    "Nothing answered on 127.0.0.1:23125 within the connect window. Open Zotero with the Meridian plugin running."
 )
 UNREACHABLE_TEXT = "The Meridian Zotero bridge could not be reached on 127.0.0.1:23125."
 TIMEOUT_TEXT = (
@@ -125,7 +125,10 @@ ITEM_LOST_REASON = "the reply was lost"
 ITEM_GRANT_ENDED = "the write grant is no longer live"
 ANSWERING_STATUS = "Bridge: answering on 127.0.0.1:23125."
 NO_TOKEN_STATUS = "Bridge: off. Its token file is missing or empty."
-NOT_ANSWERING_STATUS = "Bridge: off. Nothing answers on 127.0.0.1:23125, so Zotero or its Meridian plugin is not running."
+NOT_ANSWERING_STATUS = (
+    "Bridge: off. Nothing answered on 127.0.0.1:23125 within the connect window, so Zotero or its Meridian plugin "
+    "is not running."
+)
 UNAUTHORIZED_STATUS = "Bridge: running, but it refused the token."
 STATUS_ERROR_STATUS = "Bridge: could not be checked ({})."
 
@@ -220,11 +223,15 @@ def read_token(path: Path | None = None) -> str | None:
 
 
 def _transport_error(reason: object) -> ZoteroError:
-    """A refused connection means nothing is listening, so the bridge is off. A timeout and anything else are reported as such."""
-    if isinstance(reason, ConnectionRefusedError):
+    """Map the reason urllib gives for a request that failed before a reply.
+
+    urllib wraps a failure in URLError only while it connects or sends the request. A refused connection, or a timeout
+    inside URLError, therefore means nothing answered within the connect window, so the bridge is not running. The
+    request is small, so a timeout while sending it is not expected here. A reply that never comes is not wrapped: its
+    timeout is raised as a bare TimeoutError and handled as a timeout by the caller.
+    """
+    if isinstance(reason, (ConnectionRefusedError, TimeoutError)):
         return ZoteroError("not_running", NOT_ANSWERING_TEXT)
-    if isinstance(reason, TimeoutError):
-        return ZoteroError("timeout", TIMEOUT_TEXT)
     return ZoteroError("unreachable", UNREACHABLE_TEXT)
 
 
