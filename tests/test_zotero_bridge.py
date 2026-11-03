@@ -485,16 +485,47 @@ def test_a_delete_that_raises_in_the_finally_still_returns_the_items_that_landed
     assert result.message == f"{SAVED_TEXT.format(2)} {KEY_MAY_STAY_LIVE_TEXT}"
 
 
-def test_a_timed_out_error_body_keeps_the_status_and_the_items_that_landed(monkeypatch, tmp_path, save_stub):
+def test_a_timed_out_error_body_leaves_the_item_unknown_and_keeps_the_items_that_landed(
+    monkeypatch, tmp_path, save_stub
+):
+    """The 500's body never arrives in time. The status is kept, and a 500 on an item write is unknown, not refused."""
     monkeypatch.setattr(zotero_bridge, "TIMEOUT", 0.3)
     result = save_items(ITEMS, transport=bridge_transport(save_stub), token_path=_token_file(tmp_path))
-    assert result.state == ERROR
+    assert result.state == UNKNOWN
     assert result.saved == 1
     assert result.landed == ("First paper",)
     assert result.message == (
-        "Saved 1 of 2 item(s). Stopped at item 2: Zotero answered HTTP 500. Landed in Zotero: First paper. "
-        "Not saved: item 2. Check Zotero before you save again."
+        "Saved 1 of 2 item(s). Item 2 may or may not have been saved. Check Zotero for it before you retry. "
+        "Landed in Zotero: First paper. There were no items after it."
     )
+
+
+def test_a_server_error_on_an_item_write_is_unknown_not_refused(tmp_path):
+    """The bridge may have created the item before it failed, so the item is unknown and is not retried."""
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(500, _error("internal"))])
+    result = save_items(THREE_ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == UNKNOWN
+    assert result.saved == 1
+    assert result.landed == ("First paper",)
+    assert result.message == (
+        "Saved 1 of 3 item(s). Item 2 may or may not have been saved. Check Zotero for it before you retry. "
+        "Landed in Zotero: First paper. Not sent: item 3."
+    )
+    assert len(_writes(bridge)) == 2
+    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
+
+
+@pytest.mark.parametrize("status", [400, 404, 409])
+def test_a_client_error_on_an_item_write_is_still_a_refusal(tmp_path, status):
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(status, _error("bad_request"))])
+    result = save_items(THREE_ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+    assert result.state == ERROR
+    assert result.saved == 1
+    assert result.message == (
+        f"Saved 1 of 3 item(s). Stopped at item 2: Zotero answered HTTP {status}. Landed in Zotero: First paper. "
+        "Not saved: items 2 to 3. Check Zotero before you save again."
+    )
+    assert len(_writes(bridge)) == 2
 
 
 def test_the_bridge_stopping_mid_batch_is_bridge_off(tmp_path):
@@ -1241,6 +1272,22 @@ def test_checking_zotero_releases_the_held_line_without_retrying_it(qtbot, tmp_p
     assert len(_writes(fake)) == posted + 1
     assert json.loads(_writes(fake)[-1][3])["fields"]["title"] == "Paper 3"
     assert _box(panel).toPlainText() == ""
+
+
+def test_a_server_error_on_an_item_write_is_held_and_a_second_save_posts_nothing(qtbot, tmp_path):
+    fake = FakeBridge(writes=[Reply(201, _json({"key": "A"})), Reply(500, _error("internal"))])
+    token = _token_file(tmp_path)
+    bridge = PanelBridge(save=lambda items: save_items(items, transport=fake, token_path=token, now=_clock(NOW)))
+    panel = _save_panel(qtbot, bridge)
+    _box(panel).setPlainText(_lines("Paper 1", "Paper 2", "Paper 3"))
+    _click_save(panel)
+    qtbot.waitUntil(lambda: "may or may not have been saved" in _text(panel, "zotero-save-result"), timeout=5000)
+    assert _named(panel, QPlainTextEdit, "zotero-held-lines").toPlainText() == _lines("Paper 2")
+    assert _box(panel).toPlainText() == _lines("Paper 3")
+    posted = len(_writes(fake))
+    _click_save(panel)  # Save is off while the line is held
+    assert len(_writes(fake)) == posted
+    assert not _named(panel, QPushButton, "zotero-save-button").isEnabled()
 
 
 def test_a_refusal_after_two_items_land_keeps_only_the_lines_that_did_not_land(qtbot, tmp_path):

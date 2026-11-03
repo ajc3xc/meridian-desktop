@@ -138,6 +138,7 @@ ITEM_HTTP_TEXT = "Zotero answered HTTP {}"
 ITEM_BRIDGE_STOPPED = "the bridge stopped answering"
 ITEM_TOKEN_REFUSED = "the bridge refused its token"
 ITEM_LOST_REASON = "the reply was lost"
+ITEM_SERVER_ERROR = "the bridge answered with a server error"
 ITEM_GRANT_ENDED = "the write grant is no longer live"
 ANSWERING_STATUS = "Bridge: answering on 127.0.0.1:23125."
 NO_TOKEN_STATUS = "Bridge: off. Its token file is missing or empty."
@@ -534,6 +535,9 @@ def _create_item(fetch: Transport, token: str, write_key: str, item: ReadingItem
         return _Refusal(GRANT_EXPIRED, ITEM_GRANT_ENDED)
     if reply.status == 422:
         return _Refusal(ERROR, ITEM_REFUSED_TEXT.format(_error_code(reply)))
+    if reply.status >= 500:
+        # The bridge may have created the item before it failed, so this is unknown, not refused.
+        return _Refusal(UNKNOWN, ITEM_SERVER_ERROR)
     return _Refusal(ERROR, ITEM_HTTP_TEXT.format(reply.status))
 
 
