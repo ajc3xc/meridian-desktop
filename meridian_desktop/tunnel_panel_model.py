@@ -1,18 +1,21 @@
 """The words and rows of the Tunnel panel (ui/tunnel_panel.py). Pure Python: no Qt import.
 
-The Tunnel panel is the one place in the desktop for the tunnel. It shows four things, and this module makes the
+The Tunnel panel is the one place in the desktop for the tunnel. It shows six things, and this module makes the
 text and the rows for each one:
 
 - the status: connected or not, and when the tunnel was last checked (from tunnel_status.TunnelStatus);
 - the two lanes: the direct lane (claude.ai reaches Meridian core and Tigris directly) and the tunnel lane, with one
   line on what each lane needs;
+- the slots: the tunnel's fixed slot ports (slot_ports.SLOT_PORTS), one row each. The tunnel status holds no per-slot
+  data, so every slot's state says it is not reported;
+- the recent log: the last LOG_TAIL_LINES lines of the tunnel log, already redacted by log_tail.read_tunnel_log_tail;
 - the tool groups the tunnel exposes, each on or off, using the existing tool-group settings (tool_catalog.py and the
   disabled_tools setting);
 - the custom connectors, with their tunnel_exposed flag, and the custom_tunnel_opt_in setting, which is off by default.
 
-Nothing here starts, stops, saves or reads a file. The panel calls the status check and the saves; this module only
-turns their answers into words and rows. A state that is not running is never shown as connected (local-trust
-contract, rule 7).
+Nothing here starts, stops, saves or reads a file. The panel calls the status check, the log read and the saves; this
+module only turns their answers into words and rows. A state that is not running is never shown as connected
+(local-trust contract, rule 7).
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from meridian_desktop import custom_connectors, tool_catalog, tunnel_status
+from meridian_desktop import custom_connectors, log_tail, slot_ports, tool_catalog, tunnel_status
+from meridian_desktop.log_tail import LogTail
 from meridian_desktop.settings_store import Settings
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, TunnelStatus
 
@@ -59,6 +63,27 @@ TUNNEL_LANE_NEEDS = (
 TUNNEL_LANE_LIVE = "Live."
 TUNNEL_LANE_NOT_LIVE = "Not live: the tunnel is not running."
 TUNNEL_LANE_UNKNOWN = "Not live: the tunnel status is unknown."
+
+# The slot table. Its rows are the tunnel's fixed slot ports. The tunnel status holds no per-slot state, so every row
+# says so, and no slot is ever shown as listening, running or connected from here.
+SLOTS_HEADING = "Slots"
+SLOTS_INTRO = (
+    "The tunnel's slot ports, from the fixed table in this desktop. The tunnel status does not report a state for each "
+    "slot, so each state says so. Nothing here checks a port."
+)
+SLOT_COLUMNS = ("Slot", "Port", "State")
+SLOT_STATE_NOT_REPORTED = "Not reported by the tunnel status."
+
+# The recent log: the end of the tunnel log file, read through log_tail. The panel only reads it, and writes nothing.
+LOG_HEADING = "Recent tunnel log"
+LOG_TAIL_LINES = 50
+LOG_INTRO = (
+    f"The last {LOG_TAIL_LINES} lines of the tunnel log, with secret values redacted. "
+    "The panel only reads the log. Nothing is written to it."
+)
+LOG_NOT_READ_TEXT = "Not read yet. Press Check now to read the log."
+LOG_EMPTY_TEXT = "The tunnel log is empty."
+LOG_FAILED_TEXT = "The tunnel log could not be read. Press Check now to read it again."
 
 # The tool groups. Each switch is the existing MCP tools setting, so it is the same as the group switch in Settings.
 GROUPS_INTRO = (
@@ -125,6 +150,15 @@ class ConnectorRow:
     usable: bool
     tunnel_exposed: bool
     note: str
+
+
+@dataclass(frozen=True)
+class SlotRow:
+    """One tunnel slot port: its name, its loopback port, and the state the tunnel status gives for it."""
+
+    slot: str
+    port: int
+    state: str
 
 
 def panel_status(status: TunnelStatus | None, failure: str | None = None) -> PanelStatus:
@@ -206,11 +240,43 @@ def connector_rows(raw: Sequence, opt_in: bool) -> tuple[ConnectorRow, ...]:
     return tuple(rows)
 
 
+def slot_rows() -> tuple[SlotRow, ...]:
+    """One row for each slot port, in the order of slot_ports.SLOT_PORTS. TunnelStatus holds no slot data, so every
+    state is SLOT_STATE_NOT_REPORTED. A slot is never shown as listening, running or connected from here."""
+    return tuple(SlotRow(slot, port, SLOT_STATE_NOT_REPORTED) for slot, port in slot_ports.SLOT_PORTS)
+
+
+def log_lines(tail: LogTail | None) -> tuple[str, ...]:
+    """The last LOG_TAIL_LINES lines of one log read. A read that is missing, unreadable or failed has no lines."""
+    if tail is None or tail.status != log_tail.STATUS_OK:
+        return ()
+    return tail.lines[-LOG_TAIL_LINES:]
+
+
+def log_message(tail: LogTail | None) -> str:
+    """The one line under the log: why it has no lines to show, or "" when it has some."""
+    if tail is None:
+        return LOG_FAILED_TEXT
+    if tail.status == log_tail.STATUS_NO_LOG_YET:
+        return log_tail.NO_LOG_YET_TEXT
+    if tail.status == log_tail.STATUS_UNREADABLE:
+        return log_tail.UNREADABLE_TEXT
+    if tail.status != log_tail.STATUS_OK:
+        return LOG_FAILED_TEXT
+    return "" if tail.lines else LOG_EMPTY_TEXT
+
+
 __all__ = [
     "CHECKING_TEXT",
     "CHECK_BUTTON_TEXT",
     "CONNECTED_HEADLINE",
     "CONNECTORS_HEADING",
+    "LOG_EMPTY_TEXT",
+    "LOG_FAILED_TEXT",
+    "LOG_HEADING",
+    "LOG_INTRO",
+    "LOG_NOT_READ_TEXT",
+    "LOG_TAIL_LINES",
     "NOT_CHECKED_HEADLINE",
     "PANEL_CHECK_HINT",
     "CONNECTORS_INTRO",
@@ -230,6 +296,11 @@ __all__ = [
     "PANEL_INTRO",
     "PANEL_TITLE",
     "PanelStatus",
+    "SLOTS_HEADING",
+    "SLOTS_INTRO",
+    "SLOT_COLUMNS",
+    "SLOT_STATE_NOT_REPORTED",
+    "SlotRow",
     "STATUS_HEADING",
     "TUNNEL_LANE_NAME",
     "UNKNOWN_HEADLINE",
@@ -238,5 +309,8 @@ __all__ = [
     "group_rows",
     "group_toggle_keys",
     "lanes",
+    "log_lines",
+    "log_message",
     "panel_status",
+    "slot_rows",
 ]

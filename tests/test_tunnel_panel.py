@@ -10,18 +10,22 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QPlainTextEdit, QPushButton, QTableWidget, QWidget
 
-from meridian_desktop import tool_catalog
+from meridian_desktop import log_tail, slot_ports, tool_catalog
 from meridian_desktop import tunnel_panel_model as model
+from meridian_desktop.log_tail import LogTail
 from meridian_desktop.runner_client import RunnerResult
 from meridian_desktop.runner_controls import RunnerControl
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, UNKNOWN, TunnelStatus
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.scope_controls import TUNNEL_OFF_TEXT
+from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.tunnel_check import TunnelReadJob
 from meridian_desktop.ui.tunnel_panel import PROBLEM_TEXT, TunnelPanel
 
 PY = "C:/Users/tester/core-env/python.exe"
@@ -95,7 +99,7 @@ def _actions(settings_path, spawn, confirm, tmp_path):
     )
 
 
-def _panel(qtbot, settings_path, tmp_path, status_call=None, spawn=None, confirm=None):
+def _panel(qtbot, settings_path, tmp_path, status_call=None, spawn=None, confirm=None, log_path=None):
     spawn = spawn if spawn is not None else Spawn()
     confirm = confirm if confirm is not None else Confirm()
     actions = _actions(settings_path, spawn, confirm, tmp_path)
@@ -103,6 +107,7 @@ def _panel(qtbot, settings_path, tmp_path, status_call=None, spawn=None, confirm
         SettingsStore(settings_path),
         actions,
         status_call if status_call is not None else runner_reply("running"),
+        log_path=log_path if log_path is not None else tmp_path / "tunnel.log",  # a temp file, never the real log
     )
     qtbot.addWidget(panel)
     return panel, spawn, confirm
@@ -367,6 +372,178 @@ def test_the_tunnel_panel_is_its_own_tab_and_settings_has_no_copy(qtbot, setting
     settings_index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Settings")
     settings_page = window.tabs.widget(settings_index)
     assert settings_page.findChild(TunnelPanel) is None
+
+
+# ------------------------------------------------------------------ the slot table and the recent log (no Qt)
+
+
+def _numbered(count: int) -> tuple[str, ...]:
+    return tuple(f"line {n}" for n in range(1, count + 1))
+
+
+def _cells(table: QTableWidget, row: int) -> list[str]:
+    return [table.item(row, column).text() for column in range(table.columnCount())]
+
+
+def test_the_slot_table_has_one_row_per_slot_port_and_never_claims_a_state():
+    rows = model.slot_rows()
+    assert [(row.slot, row.port) for row in rows] == list(slot_ports.SLOT_PORTS)
+    assert len(rows) == 14
+    assert all(row.state == model.SLOT_STATE_NOT_REPORTED for row in rows)
+    assert not any(word in row.state.lower() for row in rows for word in ("listening", "running", "connected"))
+
+
+def test_the_recent_log_shows_only_the_last_fifty_lines():
+    tail = LogTail(log_tail.STATUS_OK, Path("tunnel.log"), _numbered(120))
+    assert model.LOG_TAIL_LINES == 50
+    assert model.log_lines(tail) == _numbered(120)[-50:]
+    assert model.log_lines(tail)[0] == "line 71"
+    short = LogTail(log_tail.STATUS_OK, Path("tunnel.log"), _numbered(3))
+    assert model.log_lines(short) == _numbered(3)
+
+
+def test_a_log_with_no_lines_to_show_says_why():
+    path = Path("tunnel.log")
+    assert model.log_lines(None) == () and model.log_message(None) == model.LOG_FAILED_TEXT
+
+    missing = LogTail(log_tail.STATUS_NO_LOG_YET, path, (), log_tail.NO_LOG_YET_TEXT)
+    assert model.log_lines(missing) == ()
+    assert model.log_message(missing) == log_tail.NO_LOG_YET_TEXT
+
+    unreadable = LogTail(log_tail.STATUS_UNREADABLE, path, (), log_tail.UNREADABLE_TEXT)
+    assert model.log_lines(unreadable) == ()
+    assert model.log_message(unreadable) == log_tail.UNREADABLE_TEXT
+
+    empty = LogTail(log_tail.STATUS_OK, path, ())
+    assert model.log_lines(empty) == ()
+    assert model.log_message(empty) == model.LOG_EMPTY_TEXT
+
+    with_lines = LogTail(log_tail.STATUS_OK, path, ("a line",))
+    assert model.log_message(with_lines) == ""
+
+    unknown_status = LogTail("something-else", path, ("a line",))
+    assert model.log_lines(unknown_status) == ()
+    assert model.log_message(unknown_status) == model.LOG_FAILED_TEXT
+
+
+def test_the_read_job_delivers_the_status_and_the_log_tail_together():
+    delivered: list[tuple] = []
+    tail = LogTail(log_tail.STATUS_OK, Path("tunnel.log"), ("a line",))
+    TunnelReadJob(lambda: _status(RUNNING), lambda: tail, delivered.append).run()
+    assert delivered == [(_status(RUNNING), None, tail)]
+
+
+def test_a_status_read_that_raises_is_delivered_with_its_class_name_only():
+    delivered: list[tuple] = []
+
+    def failing_status() -> TunnelStatus:
+        raise RuntimeError("a detail the panel must not show")
+
+    TunnelReadJob(failing_status, lambda: None, delivered.append).run()
+    status, failure, tail = delivered[0]
+    assert status is None and failure == "RuntimeError" and tail is None
+    assert "a detail the panel must not show" not in repr(delivered)
+
+
+def test_a_log_read_that_raises_is_delivered_as_not_read():
+    delivered: list[tuple] = []
+
+    def failing_log() -> LogTail:
+        raise OSError("the disk went away")
+
+    TunnelReadJob(lambda: _status(NOT_RUNNING), failing_log, delivered.append).run()
+    status, failure, tail = delivered[0]
+    assert status.state == NOT_RUNNING and failure is None and tail is None
+    assert model.log_message(tail) == model.LOG_FAILED_TEXT
+
+
+def test_a_read_job_whose_delivery_is_gone_does_not_raise():
+    def gone(_payload) -> None:
+        raise RuntimeError("the shared delivery object was deleted")
+
+    TunnelReadJob(lambda: _status(RUNNING), lambda: None, gone).run()
+
+
+# ------------------------------------------------------------------ the slot table and the recent log (the widget)
+
+
+def test_the_slot_table_lists_each_slot_port_and_keeps_every_state_not_reported_while_running(
+    qtbot, settings_path, tmp_path,
+):
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"))
+    table = panel.findChild(QTableWidget, "tunnelpanel-slots")
+    expected = [[slot, str(port), model.SLOT_STATE_NOT_REPORTED] for slot, port in slot_ports.SLOT_PORTS]
+    assert table.rowCount() == len(slot_ports.SLOT_PORTS) == 14
+    assert [_cells(table, row) for row in range(table.rowCount())] == expected
+
+    # The status says running, and the table still reports no slot state, because the status carries no slot data.
+    _check_and_wait(qtbot, panel, "Connected")
+    assert [_cells(table, row) for row in range(table.rowCount())] == expected
+
+
+def test_the_recent_log_shows_the_last_fifty_lines_of_a_temp_file_with_secrets_redacted(qtbot, settings_path, tmp_path):
+    log = tmp_path / "tunnel.log"
+    body = [f"line {n}" for n in range(1, 120)] + ["connected with token=s3cr3t"]
+    log.write_text("\n".join(body) + "\n", encoding="utf-8")
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=log)
+
+    _check_and_wait(qtbot, panel, "Connected")
+
+    view = panel.findChild(QPlainTextEdit, "tunnelpanel-log")
+    expected = [f"line {n}" for n in range(71, 120)] + ["connected with token=[redacted]"]
+    assert view.toPlainText().split("\n") == expected
+    assert len(view.toPlainText().split("\n")) == 50
+    assert "s3cr3t" not in view.toPlainText()
+    assert view.isReadOnly() is True
+    assert _label(panel, "tunnelpanel-log-message").isHidden() is True
+
+
+def test_a_missing_tunnel_log_says_no_log_yet_and_shows_no_lines(qtbot, settings_path, tmp_path):
+    panel, _spawn, _confirm = _panel(
+        qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=tmp_path / "absent" / "tunnel.log",
+    )
+    assert _label(panel, "tunnelpanel-log-message").text() == model.LOG_NOT_READ_TEXT
+
+    _check_and_wait(qtbot, panel, "Connected")
+
+    assert panel.findChild(QPlainTextEdit, "tunnelpanel-log").toPlainText() == ""
+    assert _label(panel, "tunnelpanel-log-message").text() == log_tail.NO_LOG_YET_TEXT
+    assert _label(panel, "tunnelpanel-log-message").isHidden() is False
+
+
+def test_a_tunnel_log_that_cannot_be_read_says_so(qtbot, settings_path, tmp_path):
+    # A directory is not a readable file, so the log read reports it as unreadable and the panel shows that.
+    panel, _spawn, _confirm = _panel(
+        qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=tmp_path,
+    )
+
+    _check_and_wait(qtbot, panel, "Connected")
+
+    assert panel.findChild(QPlainTextEdit, "tunnelpanel-log").toPlainText() == ""
+    assert _label(panel, "tunnelpanel-log-message").text() == log_tail.UNREADABLE_TEXT
+
+
+def test_the_log_is_read_again_on_each_check(qtbot, settings_path, tmp_path):
+    log = tmp_path / "tunnel.log"
+    log.write_text("first\nsecond\n", encoding="utf-8")
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=log)
+    view = panel.findChild(QPlainTextEdit, "tunnelpanel-log")
+    _check_and_wait(qtbot, panel, "Connected")
+    assert view.toPlainText() == "first\nsecond"
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("third\n")
+    panel.check()
+
+    qtbot.waitUntil(lambda: view.toPlainText() == "first\nsecond\nthird", timeout=5000)
+
+
+def test_a_delivered_log_that_is_not_a_tail_is_shown_as_not_read(qtbot, settings_path, tmp_path):
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
+    # The panel's own owner token and generation, with a log value that is not a LogTail: it must not be shown.
+    shared_delivery().delivered.emit(Delivered(panel._owner, (panel._generation, (None, None, "not a log tail"))))
+    assert _label(panel, "tunnelpanel-log-message").text() == model.LOG_FAILED_TEXT
+    assert panel.findChild(QPlainTextEdit, "tunnelpanel-log").toPlainText() == ""
 
 
 @pytest.fixture(autouse=True)
