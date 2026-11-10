@@ -55,6 +55,7 @@ from meridian_desktop.zotero_bridge import (
     PROMPT_OPEN_WARNING,
     SAVED,
     SAVED_TEXT,
+    STATUS_ERROR_STATUS,
     TIMEOUT_TEXT,
     UNAUTHORIZED,
     UNKNOWN,
@@ -78,7 +79,7 @@ from meridian_desktop.zotero_client import (
     ZoteroError,
     ZoteroStatus,
 )
-from meridian_desktop import zotero_bridge, zotero_journal
+from meridian_desktop import local_client, zotero_bridge, zotero_journal
 
 TOKEN = "zb-test-token-7f3c"
 WRITE_KEY = "zb-write-key-9a1d"
@@ -957,6 +958,110 @@ def test_bridge_status_is_off_when_nothing_answers(tmp_path):
     assert result == BridgeStatus(BRIDGE_OFF, NOT_ANSWERING_STATUS)
 
 
+def _raising_transport(code):
+    """A transport whose request fails with ZoteroError(code), as the real transport reports a failed request."""
+
+    def transport(method, path, headers, body, timeout):
+        raise ZoteroError(code, "fixed text")
+
+    return transport
+
+
+def _status_answer(status):
+    """A transport that answers every request with a bare HTTP status and an empty object."""
+
+    def transport(method, path, headers, body, timeout):
+        return Reply(status, b"{}")
+
+    return transport
+
+
+CHECK_TEXT = "Check that Zotero is open with the Meridian Zotero bridge installed, then press Refresh."
+
+
+def test_the_bridge_off_lines_name_the_address_and_what_to_do(tmp_path):
+    refused = bridge_status(transport=_raising_transport("not_running"), token_path=_token_file(tmp_path))
+    no_token = bridge_status(transport=FakeBridge(), token_path=tmp_path / "missing")
+    assert refused.message == (
+        "Bridge: off. Nothing answered on 127.0.0.1:23125 within the connect window. " + CHECK_TEXT
+    )
+    assert no_token.message == (
+        "Bridge: off. Its token file is missing or empty, so nothing is sent to 127.0.0.1:23125. " + CHECK_TEXT
+    )
+    for result in (refused, no_token):
+        assert result.state == BRIDGE_OFF
+        assert "Meridian server" not in result.message
+
+
+@pytest.mark.parametrize(
+    "transport, reason",
+    [
+        (_raising_transport("timeout"), "The bridge did not answer in time"),
+        (_raising_transport("unreachable"), "The bridge could not be reached"),
+        (_raising_transport("too_large"), "The bridge gave no usable answer"),
+        (_status_answer(500), "HTTP 500"),
+    ],
+)
+def test_the_could_not_be_checked_line_names_the_address_and_what_to_do(tmp_path, transport, reason):
+    result = bridge_status(transport=transport, token_path=_token_file(tmp_path))
+    expected = "Bridge: could not be checked on 127.0.0.1:23125. " + reason + ". " + CHECK_TEXT
+    assert result == BridgeStatus(ERROR, expected)
+    assert result.message == STATUS_ERROR_STATUS.format(reason)
+    assert "Meridian server" not in result.message
+    assert TOKEN not in result.message
+
+
+def test_the_bridge_check_is_unaffected_when_the_meridian_server_is_off(monkeypatch, tmp_path):
+    """The Meridian server is off, and its client would refuse every call. The bridge check makes no call to it, so the
+    owner sees the bridge's own answer, and no bridge line mentions the Meridian server."""
+    meridian_calls = []
+
+    def meridian_refuses(base_url, path, timeout, transport=None):
+        meridian_calls.append((base_url, path))
+        raise local_client.LocalClientError("not_running", local_client.NOT_RUNNING_MESSAGE)
+
+    def probe_refuses(base_url, timeout=local_client.DEFAULT_TIMEOUT):
+        meridian_calls.append((base_url, "/health"))
+        return local_client.HEALTH_NOT_RUNNING
+
+    monkeypatch.setattr(local_client, "_get", meridian_refuses)
+    monkeypatch.setattr(local_client, "probe_health", probe_refuses)
+    token = _token_file(tmp_path)
+
+    answering = bridge_status(transport=FakeBridge(status=200), token_path=token)
+    off = bridge_status(transport=_raising_transport("not_running"), token_path=token)
+    checked = bridge_status(transport=_raising_transport("unreachable"), token_path=token)
+
+    assert answering == BridgeStatus(ANSWERING, ANSWERING_STATUS)
+    assert off == BridgeStatus(BRIDGE_OFF, NOT_ANSWERING_STATUS)
+    assert checked.state == ERROR
+    assert meridian_calls == []
+    for result in (answering, off, checked):
+        assert "Meridian server" not in result.message
+
+
+def test_the_bridge_module_does_not_import_the_meridian_server_client():
+    assert not hasattr(zotero_bridge, "local_client")
+    assert not hasattr(zotero_bridge, "LocalClientError")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:9",
+        "https://127.0.0.1:9",
+        "http://127.0.0.1.example.com:9",
+        "http://owner@127.0.0.1:9",
+        "http://127.0.0.1:9/?query=1",
+        "http://127.0.0.1:99999",
+    ],
+)
+def test_the_bridge_transport_refuses_any_address_but_http_on_127_0_0_1(base_url):
+    with pytest.raises(ZoteroError) as info:
+        bridge_transport(base_url)("GET", "/v1/status", {}, None, 0.5)
+    assert info.value.code == "not_loopback"
+
+
 # ----------------------------------------------------------- the real transport, against a stub server
 
 
@@ -1332,6 +1437,40 @@ def _click_save(panel):
 def test_the_bridge_state_shows_next_to_the_save_button(qtbot):
     panel = _save_panel(qtbot, PanelBridge(status=BridgeStatus(BRIDGE_OFF, NO_TOKEN_STATUS)))
     qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-state") == NO_TOKEN_STATUS, timeout=5000)
+
+
+class RealStatusBridge:
+    """The panel's bridge: the real status check over the given transport and token file, and the real line reader."""
+
+    def __init__(self, transport, token_path):
+        self._transport = transport
+        self._token_path = token_path
+
+    def parse_lines(self, text):
+        return parse_lines(text)
+
+    def bridge_status(self):
+        return bridge_status(transport=self._transport, token_path=self._token_path)
+
+
+def test_the_panel_bridge_line_names_the_address_when_the_bridge_is_off_and_the_meridian_server_is_off(
+    qtbot, tmp_path, monkeypatch
+):
+    def meridian_must_not_be_called(*args, **kwargs):
+        raise AssertionError("the bridge check must not call the Meridian server")
+
+    monkeypatch.setattr(local_client, "_get", meridian_must_not_be_called)
+    panel = _save_panel(qtbot, RealStatusBridge(_raising_transport("not_running"), _token_file(tmp_path)))
+    qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-state") == NOT_ANSWERING_STATUS, timeout=5000)
+    assert "127.0.0.1:23125" in _text(panel, "zotero-bridge-state")
+    assert "Meridian server" not in _text(panel, "zotero-bridge-state")
+
+
+def test_the_panel_bridge_line_names_the_address_when_the_bridge_check_cannot_finish(qtbot, tmp_path):
+    panel = _save_panel(qtbot, RealStatusBridge(_raising_transport("timeout"), _token_file(tmp_path)))
+    expected = STATUS_ERROR_STATUS.format("The bridge did not answer in time")
+    qtbot.waitUntil(lambda: _text(panel, "zotero-bridge-state") == expected, timeout=5000)
+    assert "127.0.0.1:23125" in _text(panel, "zotero-bridge-state")
 
 
 def test_each_line_is_saved_off_the_ui_thread_and_the_result_is_shown(qtbot):
