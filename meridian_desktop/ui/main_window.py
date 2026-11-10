@@ -73,7 +73,7 @@ from meridian_desktop.hosted_client import Transport
 from meridian_desktop.restart_check import RestartWatch
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import SettingsStore
+from meridian_desktop.settings_store import SettingsStore, SettingsUnreadable
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.connection_bar import ConnectionBar
@@ -183,6 +183,26 @@ def _saved_mode(store: SettingsStore) -> Callable[[], str]:
         return store.load().settings.mode
 
     return read
+
+
+def _saved_only_active(store: SettingsStore) -> bool:
+    """The Sessions tab's "Only projects with active sessions" switch as saved. Read once when the tab is built,
+    from the local settings file. No session or server is read."""
+    return store.load().settings.sessions_only_active_projects
+
+
+def _save_only_active(store: SettingsStore) -> Callable[[bool], bool]:
+    """The save callback for the Sessions tab's switch. It returns False when the file could not be written, so the tab
+    says the choice holds for this session only. It holds no window."""
+
+    def write(value: bool) -> bool:
+        try:
+            store.set_sessions_only_active(value)
+        except (OSError, SettingsUnreadable):
+            return False
+        return True
+
+    return write
 
 
 def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tuple[str, str | None]]:
@@ -368,6 +388,8 @@ class MainWindow(QMainWindow):
                     _saved_projects(self._store, self._sources),
                     _saved_mode(self._store),
                     parent=self.tabs,
+                    only_active=_saved_only_active(self._store),
+                    on_only_active_changed=_save_only_active(self._store),
                 )
             elif name == "GPUs":
                 # Nothing is read on build. The first show and the Refresh button read the GPUs. While the tab stays

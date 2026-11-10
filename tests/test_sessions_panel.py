@@ -23,6 +23,7 @@ from meridian_desktop import hosted_client, sessions_client as sc
 from meridian_desktop.local_client import LocalClientError
 from meridian_desktop.ui.sessions_panel import (
     ACTIVE_COLOR,
+    AGENT_PRESS_TEXT,
     COLUMNS,
     IDLE_COLOR,
     LOADING_TEXT,
@@ -333,12 +334,15 @@ def test_unnamed_row_reads_as_unnamed(qtbot):
     assert session_cells(panel)[0][0] == "(unnamed)"
 
 
-def test_table_is_read_only_and_the_only_button_is_refresh(qtbot):
+def test_tables_are_read_only_and_the_only_buttons_are_the_two_refreshes(qtbot):
     panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
     panel.show()
     settle(qtbot, panel)
     assert table_of(panel).editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert [button.objectName() for button in panel.findChildren(QPushButton)] == ["sessions-refresh"]
+    agents_table = panel.findChild(QTableWidget, "sessions-agents-table")
+    assert agents_table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+    names = sorted(button.objectName() for button in panel.findChildren(QPushButton))
+    assert names == ["sessions-agents-refresh", "sessions-refresh"]
 
 
 def test_every_label_is_selectable(qtbot):
@@ -358,14 +362,13 @@ def test_no_text_says_not_built_yet(qtbot):
     assert "not built yet" not in all_visible_text(panel).lower()
 
 
-def test_running_claude_processes_say_not_connected_and_list_none(qtbot):
-    # No read-only process check exists for Claude Desktop or Claude Code yet, so the tab says so plainly.
+def test_the_agent_section_lists_nothing_on_show_and_never_claims_a_connection(qtbot):
+    # The agent list is read only when its own Refresh button is pressed. Showing the tab lists no process.
     panel, _hosted = make_panel(qtbot, local=FakeLocal(body=body_of([session()])))
     panel.show()
     settle(qtbot, panel)
-    line = panel.findChild(QLabel, "sessions-claude-processes").text()
-    assert "Claude Desktop and Claude Code" in line
-    assert "Not connected" in line
+    assert panel.findChild(QLabel, "sessions-agents-status").text() == AGENT_PRESS_TEXT
+    assert "Not connected" not in all_visible_text(panel)
     # The only session row is the one session the local server sent, never a process.
     assert len(session_cells(panel)) == 1
 

@@ -125,6 +125,9 @@ class Settings:
     # The SSH host names the GPUs tab reads over ssh (meridian_desktop/gpu_jobs.py). Only names from the owner's own ssh
     # config, never a key or a password. save() writes the key only when there is a name.
     gpu_hosts: tuple[str, ...] = ()
+    # The Sessions tab's "Only projects with active sessions" switch (meridian_desktop/ui/sessions_panel.py). Off by
+    # default. save() writes the key only when it is on, so a file that never turned it on keeps the keys it had.
+    sessions_only_active_projects: bool = False
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -316,6 +319,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("gpu_hosts must be a list of SSH host names; using none")
 
+    # sessions_only_active_projects: an absent key means off, with no warning. Only a real true or false is accepted.
+    if "sessions_only_active_projects" in data:
+        value = data["sessions_only_active_projects"]
+        if isinstance(value, bool):
+            values["sessions_only_active_projects"] = value
+        else:
+            problems.append("sessions_only_active_projects must be true or false; using false")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -475,6 +486,9 @@ class SettingsStore:
         if not settings.gpu_hosts:
             # No saved hosts is the default, so a file with none has no such key.
             del data["gpu_hosts"]
+        if not settings.sessions_only_active_projects:
+            # Off is the default, so the Sessions tab's switch is written only once the owner turns it on.
+            del data["sessions_only_active_projects"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -557,6 +571,21 @@ class SettingsStore:
         # A readable file with one bad value is copied aside before the write, as the other writers do.
         self.keep_unreadable_copy()
         updated = replace(self.load().settings, gpu_hosts=hosts)
+        self.save(updated)
+        return updated
+
+    def set_sessions_only_active(self, value: bool) -> Settings:
+        """Save the Sessions tab's "Only projects with active sessions" switch. Every other field in the file is kept.
+
+        A settings file that is not a JSON object is never rebuilt from defaults. It is copied aside when that works,
+        nothing is written, and SettingsUnreadable is raised with the message the owner sees.
+        """
+        if self.is_unreadable():
+            copied = self._keep_copy()
+            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT if copied else SETTINGS_UNREADABLE_NO_COPY_TEXT)
+        # A readable file with one bad value is copied aside before the write, as the other writers do.
+        self.keep_unreadable_copy()
+        updated = replace(self.load().settings, sessions_only_active_projects=bool(value))
         self.save(updated)
         return updated
 
