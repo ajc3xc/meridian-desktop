@@ -21,6 +21,8 @@ from typing import Any
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, QTimer, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import zotero_bridge, zotero_client, zotero_journal
+from meridian_desktop import zotero_bridge, zotero_client, zotero_journal, zotero_scope
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
 from meridian_desktop.zotero_client import (
@@ -48,8 +50,8 @@ from meridian_desktop.zotero_client import (
 )
 
 INTRO_TEXT = (
-    "Zotero is a separate app that runs on this computer. This tab reads its local API "
-    "on 127.0.0.1:23119 and nothing else."
+    "Zotero is a separate app that runs on this computer. Searches and status read its local API on 127.0.0.1:23119. "
+    "Saves go through the Meridian Zotero bridge on 127.0.0.1:23125, which is the only thing that writes."
 )
 NOT_CHECKED_TEXT = "Zotero: not checked yet. Press Refresh to check."
 CHECKING_TEXT = "Checking Zotero..."
@@ -90,6 +92,35 @@ NO_RESULTS_TEXT = "No items in your Zotero library match \"{}\"."
 RESULTS_TEXT = "{} result(s) for \"{}\"."
 LIMIT_TEXT = " Showing the first {}; narrow the search to see fewer."
 RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
+SCOPE_HEADING = "Project scope: the Zotero collection each project searches"
+SCOPE_INTRO = (
+    "Pick a project, then a library and a collection in your Zotero. Searches for that project read only that "
+    "collection. A project with no collection searches your whole library. Saves do not follow this yet, because "
+    "the bridge does not take a collection."
+)
+SCOPE_PROJECT_LABEL = "Project"
+SCOPE_LIBRARY_LABEL = "Library"
+SCOPE_COLLECTION_LABEL = "Collection"
+SCOPE_NO_PROJECTS_TEXT = "No projects were found, so no collection can be set."
+SCOPE_NO_SOURCE_TEXT = "Projects are not available in this window, so no collection can be set."
+SCOPE_LOADING_TEXT = "Loading..."
+SCOPE_NO_LIBRARY_TEXT = "Pick a library first."
+SCOPE_NO_COLLECTIONS_TEXT = "This library has no collections."
+SCOPE_SAVE_TEXT = "Use this collection"
+SCOPE_CLEAR_TEXT = "Clear collection"
+SCOPE_RELOAD_TEXT = "Reload libraries"
+SCOPE_NEED_TEXT = "Pick a project, a library and a collection first. Nothing was saved."
+SCOPE_SAVED_TEXT = "Saved. Searches for {} now read the collection '{}' in {}."
+SCOPE_CLEARED_TEXT = "Cleared. Searches for {} now read the whole library."
+SCOPE_NO_PROJECT_TEXT = "Pick a project to see or set its collection."
+SCOPE_CURRENT_BOUND = "{} searches the collection '{}' in {}."
+SCOPE_CURRENT_UNBOUND = "{} searches your whole library. No collection is set."
+SCOPE_SEARCH_IN = " Searched the collection '{}' in {} for this project."
+SCOPE_SEARCH_WHOLE = " This project has no collection set, so the search covered your whole library."
+SCOPE_SEARCHING_TEXT = "Searching the collection '{}' in {}..."
+LIBRARIES_FAILED_TEXT = "The Zotero libraries could not be read. Press Reload libraries to try again."
+COLLECTIONS_FAILED_TEXT = "The collections could not be read."
+NOT_SAVED_TEXT = "Not saved: the scope file could not be written ({})."
 SAVE_HEADING = "Save to Zotero"
 SAVE_INTRO = (
     "One item per line, as Title | URL. The items go into your Zotero library through the Meridian Zotero bridge. "
@@ -127,6 +158,9 @@ BRIDGE = "bridge"
 SAVE = "save"
 JOURNAL = "journal"
 CLEAR = "clear"
+PROJECTS = "projects"
+LIBRARIES = "libraries"
+COLLECTIONS = "collections"
 
 
 def _label(parent: QWidget, name: str, text: str) -> QLabel:
@@ -372,11 +406,25 @@ class ZoteroPanel(QWidget):
         parent: QWidget | None = None,
         bridge: Any = zotero_bridge,
         journal_path: Path | None = None,
+        projects: Callable[[], Sequence[tuple[str, str, str]]] | None = None,
+        scopes_path: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("zotero-panel")
         self._client = client
         self._bridge = bridge
+        # The Meridian projects as (id, name, parent id), read on a worker. None means this window has no project list.
+        self._projects_source = projects
+        # Which collection each project searches. Read once here, then kept in step with the file by every save and clear.
+        self._scopes_path = zotero_scope.default_path() if scopes_path is None else scopes_path
+        self._scope_read = zotero_scope.read_scopes(self._scopes_path)
+        self._libraries: list[zotero_client.ZoteroLibrary] = []
+        self._collections_by_key: dict[str, str] = {}
+        self._pending_collection_key = ""
+        self._pending_scope_note = ""
+        self._action_text = ""
+        self._load_texts: dict[str, str] = {}
+        self._scope_loaded_once = False
         self._saving = False
         self._pending_lines: list[str] = []
         # The save journal. It is opened on a worker thread, so until it is open and read, Save is off.
@@ -436,6 +484,8 @@ class ZoteroPanel(QWidget):
 
         self._start_result = _label(self, "zotero-start-result", "")
         layout.addWidget(self._start_result)
+
+        self._build_scope(layout)
 
         search_row = QHBoxLayout()
         self._search_input = QLineEdit(self)
@@ -499,6 +549,269 @@ class ZoteroPanel(QWidget):
         self._save_button.clicked.connect(self._on_save_clicked)
         self._held_button.clicked.connect(self._on_held_checked_clicked)
 
+    # ----------------------------------------------------------- project scope
+
+    def _build_scope(self, layout: QVBoxLayout) -> None:
+        layout.addWidget(_label(self, "zotero-scope-heading", SCOPE_HEADING))
+        layout.addWidget(_label(self, "zotero-scope-intro", SCOPE_INTRO))
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self._scope_project = QComboBox(self)
+        self._scope_project.setObjectName("zotero-scope-project")
+        self._scope_library = QComboBox(self)
+        self._scope_library.setObjectName("zotero-scope-library")
+        self._scope_collection = QComboBox(self)
+        self._scope_collection.setObjectName("zotero-scope-collection")
+        rows = (
+            (SCOPE_PROJECT_LABEL, self._scope_project),
+            (SCOPE_LIBRARY_LABEL, self._scope_library),
+            (SCOPE_COLLECTION_LABEL, self._scope_collection),
+        )
+        for row, (caption, combo) in enumerate(rows):
+            grid.addWidget(_label(self, f"zotero-scope-caption-{row}", caption), row, 0)
+            grid.addWidget(combo, row, 1)
+        layout.addLayout(grid)
+
+        actions = QHBoxLayout()
+        self._scope_save = QPushButton(SCOPE_SAVE_TEXT, self)
+        self._scope_save.setObjectName("zotero-scope-save")
+        self._scope_clear = QPushButton(SCOPE_CLEAR_TEXT, self)
+        self._scope_clear.setObjectName("zotero-scope-clear")
+        self._scope_reload = QPushButton(SCOPE_RELOAD_TEXT, self)
+        self._scope_reload.setObjectName("zotero-scope-reload")
+        for button in (self._scope_save, self._scope_clear, self._scope_reload):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self._scope_current = _label(self, "zotero-scope-current", SCOPE_NO_PROJECT_TEXT)
+        self._scope_note = _label(self, "zotero-scope-note", "")
+        self._scope_note.setVisible(False)
+        self._scope_status = _label(self, "zotero-scope-status", "")
+        self._scope_status.setVisible(False)
+        for widget in (self._scope_current, self._scope_note, self._scope_status):
+            layout.addWidget(widget)
+
+        self._scope_project.currentIndexChanged.connect(self._on_scope_project_changed)
+        self._scope_library.currentIndexChanged.connect(self._on_scope_library_changed)
+        self._scope_save.clicked.connect(self._on_scope_save_clicked)
+        self._scope_clear.clicked.connect(self._on_scope_clear_clicked)
+        self._scope_reload.clicked.connect(self._load_libraries)
+        self._scope_library.setEnabled(False)
+        self._scope_collection.setEnabled(False)
+
+    def _scope_message(self, text: str) -> None:
+        """An action's message (save, clear, a refused save). It shows above the load messages until the next change."""
+        self._action_text = text
+        self._render_scope_status()
+
+    def _set_load_text(self, source: str, text: str) -> None:
+        """One load's message (projects, libraries or collections). Each load keeps its own, so one cannot erase another."""
+        self._load_texts[source] = text
+        self._render_scope_status()
+
+    def _render_scope_status(self) -> None:
+        text = self._action_text or " ".join(item for item in self._load_texts.values() if item)
+        self._scope_status.setText(text)
+        self._scope_status.setVisible(bool(text))
+
+    def _selected_project(self) -> str:
+        value = self._scope_project.currentData()
+        return value if isinstance(value, str) else ""
+
+    def _scope_for(self, project_id: str) -> zotero_scope.ProjectScope | None:
+        return self._scope_read.scopes.get(project_id) if project_id else None
+
+    def _current_library(self) -> zotero_client.ZoteroLibrary | None:
+        key = self._scope_library.currentData()
+        if not isinstance(key, str):
+            return None
+        for library in self._libraries:
+            if f"{library.library_type}:{library.library_id}" == key:
+                return library
+        return None
+
+    def _select_library(self, library_type: str, library_id: str) -> None:
+        index = self._scope_library.findData(f"{library_type}:{library_id}")
+        if index < 0:
+            return
+        self._scope_library.blockSignals(True)  # a binding shown on selection must not start a second load
+        self._scope_library.setCurrentIndex(index)
+        self._scope_library.blockSignals(False)
+
+    def _update_current_label(self) -> None:
+        project_id = self._selected_project()
+        if not project_id:
+            self._scope_current.setText(SCOPE_NO_PROJECT_TEXT)
+            return
+        name = self._scope_project.currentText()
+        scope = self._scope_for(project_id)
+        if scope is None:
+            self._scope_current.setText(SCOPE_CURRENT_UNBOUND.format(name))
+        else:
+            self._scope_current.setText(SCOPE_CURRENT_BOUND.format(name, scope.collection_name, scope.library_name))
+
+    def _load_projects(self) -> None:
+        if self._projects_source is None:
+            self._set_load_text("projects", SCOPE_NO_SOURCE_TEXT)
+            return
+        self._start_read(PROJECTS, self._projects_source)
+
+    def _load_libraries(self) -> None:
+        client = self._client
+        self._set_load_text("libraries", SCOPE_LOADING_TEXT)
+        self._start_read(LIBRARIES, lambda: client.list_libraries())
+
+    def _load_collections(self) -> None:
+        library = self._current_library()
+        self._collections_by_key = {}
+        self._scope_collection.setEnabled(False)
+        self._scope_collection.blockSignals(True)
+        self._scope_collection.clear()
+        self._scope_collection.blockSignals(False)
+        if library is None:
+            self._scope_collection.addItem(SCOPE_NO_LIBRARY_TEXT)
+            return
+        self._scope_collection.addItem(SCOPE_LOADING_TEXT)
+        client = self._client
+        self._start_read(COLLECTIONS, lambda: client.list_collections(library))
+
+    def _on_projects_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        if failure is not None:
+            self._set_load_text("projects", failure)
+            return
+        triples = [item for item in (result or []) if isinstance(item, tuple) and len(item) == 3]
+        ordered = sorted(triples, key=lambda item: (item[1] or item[0]).lower())
+        chosen = self._selected_project()
+        self._scope_project.blockSignals(True)
+        self._scope_project.clear()
+        for project_id, name, _parent in ordered:
+            self._scope_project.addItem(name or project_id, project_id)
+        index = self._scope_project.findData(chosen) if chosen else -1
+        self._scope_project.setCurrentIndex(index if index >= 0 else 0)
+        self._scope_project.blockSignals(False)
+        self._set_load_text("projects", "" if ordered else SCOPE_NO_PROJECTS_TEXT)
+        self._on_scope_project_changed(self._scope_project.currentIndex())
+
+    def _on_libraries_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        if failure is not None or not isinstance(result, tuple) or len(result) != 2:
+            self._libraries = []
+            self._scope_library.blockSignals(True)
+            self._scope_library.clear()
+            self._scope_library.blockSignals(False)
+            self._scope_library.setEnabled(False)
+            self._scope_note.setVisible(False)
+            self._set_load_text("libraries", failure or LIBRARIES_FAILED_TEXT)
+            self._load_collections()
+            return
+        libraries, note = result
+        self._libraries = list(libraries)
+        chosen = self._scope_library.currentData()
+        self._scope_library.blockSignals(True)
+        self._scope_library.clear()
+        for library in self._libraries:
+            self._scope_library.addItem(library.name, f"{library.library_type}:{library.library_id}")
+        index = self._scope_library.findData(chosen) if isinstance(chosen, str) else -1
+        self._scope_library.setCurrentIndex(index if index >= 0 else 0)
+        self._scope_library.blockSignals(False)
+        self._scope_library.setEnabled(bool(self._libraries))
+        self._scope_note.setText(note)
+        self._scope_note.setVisible(bool(note))
+        self._set_load_text("libraries", "")
+        self._on_scope_project_changed(0)
+
+    def _on_collections_ready(self, payload: tuple) -> None:
+        result, failure = payload
+        self._scope_collection.blockSignals(True)
+        self._scope_collection.clear()
+        self._collections_by_key = {}
+        if failure is not None:
+            self._scope_collection.addItem(COLLECTIONS_FAILED_TEXT)
+            self._scope_collection.blockSignals(False)
+            self._set_load_text("collections", failure)
+            return
+        rows = zotero_client.collection_rows(list(result or []))
+        if not rows:
+            self._scope_collection.addItem(SCOPE_NO_COLLECTIONS_TEXT)
+            self._scope_collection.blockSignals(False)
+            return
+        for collection, depth in rows:
+            self._collections_by_key[collection.key] = collection.name
+            self._scope_collection.addItem("    " * depth + collection.name, collection.key)
+        wanted = self._pending_collection_key
+        self._pending_collection_key = ""
+        index = self._scope_collection.findData(wanted) if wanted else -1
+        if index >= 0:
+            self._scope_collection.setCurrentIndex(index)
+        self._scope_collection.setEnabled(True)
+        self._scope_collection.blockSignals(False)
+        self._set_load_text("collections", "")
+
+    def _on_scope_project_changed(self, _index: int = 0) -> None:
+        project_id = self._selected_project()
+        self._scope_message("")  # an earlier save or clear message is about another project now
+        self._update_current_label()
+        scope = self._scope_for(project_id)
+        if scope is not None:
+            self._select_library(scope.library_type, scope.library_id)
+            self._pending_collection_key = scope.collection_key
+        else:
+            self._pending_collection_key = ""
+        self._load_collections()
+
+    def _on_scope_library_changed(self, _index: int = 0) -> None:
+        self._pending_collection_key = ""
+        self._load_collections()
+
+    def _on_scope_save_clicked(self) -> None:
+        project_id = self._selected_project()
+        library = self._current_library()
+        key = self._scope_collection.currentData()
+        if not project_id or library is None or not isinstance(key, str) or not self._scope_collection.isEnabled():
+            self._scope_message(SCOPE_NEED_TEXT)
+            return
+        name = self._collections_by_key.get(key, "")
+        try:
+            scope = zotero_scope.ProjectScope(
+                project_id=project_id,
+                library_type=library.library_type,
+                library_id=library.library_id,
+                library_name=library.name,
+                collection_key=key,
+                collection_name=name,
+            )
+            read = zotero_scope.save_scope(scope, self._scopes_path)
+        except zotero_scope.ScopeError as exc:
+            self._scope_message(exc.message)
+            return
+        except OSError as exc:
+            self._scope_message(NOT_SAVED_TEXT.format(exc.__class__.__name__))
+            return
+        self._scope_read = read
+        message = SCOPE_SAVED_TEXT.format(self._scope_project.currentText(), name, library.name)
+        self._scope_message(f"{message} {read.warning}" if read.warning else message)
+        self._update_current_label()
+
+    def _on_scope_clear_clicked(self) -> None:
+        project_id = self._selected_project()
+        if not project_id:
+            self._scope_message(SCOPE_NO_PROJECT_TEXT)
+            return
+        try:
+            read = zotero_scope.clear_scope(project_id, self._scopes_path)
+        except zotero_scope.ScopeError as exc:
+            self._scope_message(exc.message)
+            return
+        except OSError as exc:
+            self._scope_message(NOT_SAVED_TEXT.format(exc.__class__.__name__))
+            return
+        self._scope_read = read
+        message = SCOPE_CLEARED_TEXT.format(self._scope_project.currentText())
+        self._scope_message(f"{message} {read.warning}" if read.warning else message)
+        self._update_current_label()
+
     # ----------------------------------------------------------- status
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
@@ -506,6 +819,8 @@ class ZoteroPanel(QWidget):
         if not self._probed_on_show:
             self._probed_on_show = True
             self._refresh()
+            self._load_projects()
+            self._load_libraries()
 
     @Slot()
     def _on_refresh_clicked(self) -> None:
@@ -566,6 +881,12 @@ class ZoteroPanel(QWidget):
             self._on_journal_ready(done.payload)
         elif done.kind == CLEAR:
             self._on_clear_ready(done.payload)
+        elif done.kind == PROJECTS:
+            self._on_projects_ready(done.payload)
+        elif done.kind == LIBRARIES:
+            self._on_libraries_ready(done.payload)
+        elif done.kind == COLLECTIONS:
+            self._on_collections_ready(done.payload)
 
     def _on_status_ready(self, payload: tuple) -> None:
         result, failure = payload
@@ -644,9 +965,21 @@ class ZoteroPanel(QWidget):
         self._searching = True
         self._pending_query = query
         self._search_button.setEnabled(False)
-        self._search_status.setText(SEARCHING_TEXT)
         self._results.setRowCount(0)
-        self._start_read(SEARCH, functools.partial(self._client.search_items, query))
+        project_id = self._selected_project()
+        scope = self._scope_for(project_id)
+        if scope is None:
+            # With a project picked but no collection set, the note says so; with no project picked, nothing is added.
+            self._pending_scope_note = SCOPE_SEARCH_WHOLE if project_id else ""
+            self._search_status.setText(SEARCHING_TEXT)
+            self._start_read(SEARCH, functools.partial(self._client.search_items, query))
+            return
+        client = self._client
+        library = zotero_client.ZoteroLibrary(scope.library_type, scope.library_id, scope.library_name)
+        key = scope.collection_key
+        self._pending_scope_note = SCOPE_SEARCH_IN.format(scope.collection_name, scope.library_name)
+        self._search_status.setText(SCOPE_SEARCHING_TEXT.format(scope.collection_name, scope.library_name))
+        self._start_read(SEARCH, lambda: client.search_collection_items(query, library, key))
 
     def _on_search_ready(self, payload: tuple) -> None:
         result, failure = payload
@@ -658,7 +991,7 @@ class ZoteroPanel(QWidget):
             return
         items: list[ZoteroItem] = list(result or [])
         self._fill_results(items)
-        self._search_status.setText(results_text(self._pending_query, len(items)))
+        self._search_status.setText(results_text(self._pending_query, len(items)) + self._pending_scope_note)
 
     def _fill_results(self, items: list[ZoteroItem]) -> None:
         self._results.setRowCount(len(items))

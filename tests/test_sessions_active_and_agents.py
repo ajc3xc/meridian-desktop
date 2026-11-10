@@ -69,17 +69,23 @@ def body_of(rows):
 
 
 # Each project in Alpha's tree answers with one session. Core and Parser are idle, Alpha is active, Parser is active.
-MIXED = {
-    PID: body_of([session("root-run", ago(minutes=1))]),
-    PID2: body_of([session("core-idle", ago(hours=3))]),
-    PID3: body_of([session("parser-run", ago(minutes=2))]),
-    PID4: body_of([session("beta-idle", ago(hours=5))]),
-}
-ALL_IDLE = {
-    PID: body_of([session("root-idle", ago(hours=2))]),
-    PID2: body_of([session("core-idle", ago(hours=3))]),
-    PID3: body_of([session("parser-idle", ago(hours=4))]),
-}
+# These are functions, not constants: "active" is judged against the clock, so the timestamps must be taken when a test
+# runs. A constant built at import goes stale during a long suite run and makes the active sessions look idle.
+def mixed():
+    return {
+        PID: body_of([session("root-run", ago(minutes=1))]),
+        PID2: body_of([session("core-idle", ago(hours=3))]),
+        PID3: body_of([session("parser-run", ago(minutes=2))]),
+        PID4: body_of([session("beta-idle", ago(hours=5))]),
+    }
+
+
+def all_idle():
+    return {
+        PID: body_of([session("root-idle", ago(hours=2))]),
+        PID2: body_of([session("core-idle", ago(hours=3))]),
+        PID3: body_of([session("parser-idle", ago(hours=4))]),
+    }
 
 
 class Routed:
@@ -236,7 +242,7 @@ def test_the_summary_says_how_many_projects_the_switch_hid():
 
 def test_the_switch_is_off_on_build_and_building_or_showing_saves_nothing(qtbot):
     saves = []
-    panel = build(qtbot, local=Routed(MIXED), saver=lambda value: saves.append(value) or True)
+    panel = build(qtbot, local=Routed(mixed()), saver=lambda value: saves.append(value) or True)
     panel.show()
     settle(qtbot, panel)
     assert switch_of(panel).text() == ONLY_ACTIVE_TEXT
@@ -246,7 +252,7 @@ def test_the_switch_is_off_on_build_and_building_or_showing_saves_nothing(qtbot)
 
 
 def test_switched_on_it_hides_idle_projects_and_switched_off_it_shows_them_again(qtbot):
-    local = Routed(MIXED)
+    local = Routed(mixed())
     panel = build(qtbot, local=local)
     panel.show()
     settle(qtbot, panel)
@@ -263,7 +269,7 @@ def test_switched_on_it_hides_idle_projects_and_switched_off_it_shows_them_again
 
 def test_the_switch_starts_on_when_the_window_says_so_and_hides_at_once(qtbot):
     saves = []
-    panel = build(qtbot, local=Routed(MIXED), only_active=True, saver=lambda value: saves.append(value) or True)
+    panel = build(qtbot, local=Routed(mixed()), only_active=True, saver=lambda value: saves.append(value) or True)
     panel.show()
     settle(qtbot, panel)
     assert switch_of(panel).isChecked()
@@ -273,7 +279,7 @@ def test_the_switch_starts_on_when_the_window_says_so_and_hides_at_once(qtbot):
 
 def test_each_change_of_the_switch_goes_through_the_window_callback(qtbot):
     saves = []
-    panel = build(qtbot, local=Routed(MIXED), saver=lambda value: saves.append(value) or True)
+    panel = build(qtbot, local=Routed(mixed()), saver=lambda value: saves.append(value) or True)
     panel.show()
     settle(qtbot, panel)
     switch_of(panel).setChecked(True)
@@ -283,7 +289,7 @@ def test_each_change_of_the_switch_goes_through_the_window_callback(qtbot):
 
 
 def test_a_switch_that_cannot_be_saved_still_filters_and_says_it_holds_for_this_session(qtbot):
-    panel = build(qtbot, local=Routed(MIXED), saver=lambda value: False)
+    panel = build(qtbot, local=Routed(mixed()), saver=lambda value: False)
     panel.show()
     settle(qtbot, panel)
     switch_of(panel).setChecked(True)
@@ -295,7 +301,7 @@ def test_a_save_that_raises_counts_as_not_saved_and_its_words_stay_out_of_the_wi
     def broken(_value):
         raise OSError("disk full at C:\\secret\\settings.json")
 
-    panel = build(qtbot, local=Routed(MIXED), saver=broken)
+    panel = build(qtbot, local=Routed(mixed()), saver=broken)
     panel.show()
     settle(qtbot, panel)
     switch_of(panel).setChecked(True)
@@ -305,7 +311,7 @@ def test_a_save_that_raises_counts_as_not_saved_and_its_words_stay_out_of_the_wi
 
 
 def test_a_project_that_could_not_be_read_stays_under_the_switch_with_its_reason(qtbot):
-    panel = build(qtbot, local=Routed(MIXED, statuses={PID2: 404}))
+    panel = build(qtbot, local=Routed(mixed(), statuses={PID2: 404}))
     panel.show()
     settle(qtbot, panel)
     switch_of(panel).setChecked(True)
@@ -314,7 +320,7 @@ def test_a_project_that_could_not_be_read_stays_under_the_switch_with_its_reason
 
 
 def test_with_no_active_session_anywhere_the_table_is_empty_and_says_how_many_are_hidden(qtbot):
-    panel = build(qtbot, local=Routed(ALL_IDLE), only_active=True)
+    panel = build(qtbot, local=Routed(all_idle()), only_active=True)
     panel.show()
     settle(qtbot, panel)
     assert header_labels(panel) == []
@@ -502,7 +508,7 @@ def test_the_working_folder_and_the_snapshot_of_a_real_child_process(tmp_path):
 
 
 def agent_panel(qtbot, lister, folders=None):
-    return build(qtbot, local=Routed(MIXED), lister=lister, folders=folders)
+    return build(qtbot, local=Routed(mixed()), lister=lister, folders=folders)
 
 
 def test_the_agent_list_is_read_only_when_refresh_is_pressed_and_never_on_show(qtbot):

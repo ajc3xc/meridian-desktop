@@ -30,7 +30,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -268,6 +268,14 @@ def item_from_entry(entry: Mapping[str, Any]) -> ZoteroItem:
     )
 
 
+def _items_from_reply(reply: Reply) -> list[ZoteroItem]:
+    if reply.status == 403:
+        raise ZoteroError("api_disabled", DISABLED_MESSAGE)
+    if reply.status != 200:
+        raise ZoteroError(f"http_{reply.status}", _status_message(reply.status))
+    return [item_from_entry(entry) for entry in _json_list(reply.body) if isinstance(entry, dict)]
+
+
 def search_items(
     query: str,
     *,
@@ -279,12 +287,183 @@ def search_items(
     if not term:
         raise ZoteroError("blank_query", BLANK_QUERY_MESSAGE)
     path = f"{ITEMS_PATH}?q={urllib.parse.quote(term, safe='')}&format=json&limit={SEARCH_LIMIT}"
-    reply = _get(path, transport=transport, timeout=timeout)
+    return _items_from_reply(_get(path, transport=transport, timeout=timeout))
+
+
+# ------------------------------------------------------ libraries and collections
+#
+# Read-only, like everything above. The local API serves the user library at /api/users/0 and each group at
+# /api/groups/<id>. Reading one collection's top-level items by path is documented. Listing the groups is less well
+# documented, so when that listing fails the group libraries are left out and the reason is said, not hidden.
+
+USER_LIBRARY_ID = "0"
+USER_LIBRARY_NAME = "My Library"
+USER_PREFIX = "/api/users/0"
+LIBRARY_USER = "user"
+LIBRARY_GROUP = "group"
+GROUPS_PATH = f"{USER_PREFIX}/groups?format=json"
+COLLECTION_PAGE = 100
+COLLECTION_PAGE_LIMIT = 50  # at most 5,000 collections in one library; more is refused, not cut short
+GROUPS_UNAVAILABLE_NOTE = "Zotero did not list its group libraries, so only My Library is offered."
+TOO_MANY_COLLECTIONS_MESSAGE = (
+    f"This library has more than {COLLECTION_PAGE * COLLECTION_PAGE_LIMIT} collections, which the desktop does not read."
+)
+BAD_SCOPE_MESSAGE = "That library or collection is not a valid Zotero id. Nothing was sent to Zotero."
+_COLLECTION_KEY = re.compile(r"[A-Z0-9]{8}")
+_LIBRARY_ID = re.compile(r"[0-9]{1,12}")
+
+
+@dataclass(frozen=True)
+class ZoteroLibrary:
+    """A library Zotero can serve: the user library (id "0") or a group (its numeric id)."""
+
+    library_type: str
+    library_id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ZoteroCollection:
+    """One collection. ``parent_key`` is empty for a top-level collection."""
+
+    key: str
+    name: str
+    parent_key: str
+
+
+def library_prefix(library: ZoteroLibrary) -> str:
+    """The API prefix for a library. Any other id is refused before a request is built."""
+    if library.library_type == LIBRARY_USER and library.library_id == USER_LIBRARY_ID:
+        return USER_PREFIX
+    if library.library_type == LIBRARY_GROUP and _LIBRARY_ID.fullmatch(library.library_id or ""):
+        return f"/api/groups/{library.library_id}"
+    raise ZoteroError("bad_scope", BAD_SCOPE_MESSAGE)
+
+
+def _checked_key(key: str) -> str:
+    if not _COLLECTION_KEY.fullmatch(key or ""):
+        raise ZoteroError("bad_scope", BAD_SCOPE_MESSAGE)
+    return key
+
+
+def list_libraries(
+    *,
+    transport: Transport | None = None,
+    timeout: float = SEARCH_TIMEOUT,
+) -> tuple[list[ZoteroLibrary], str]:
+    """My Library, then each group Zotero lists, by name, as (libraries, note).
+
+    An unreachable local API raises, because then nothing can be read. A failed groups listing keeps My Library and
+    returns the reason in the note.
+    """
+    libraries = [ZoteroLibrary(LIBRARY_USER, USER_LIBRARY_ID, USER_LIBRARY_NAME)]
+    reply = _get(GROUPS_PATH, transport=transport, timeout=timeout)
     if reply.status == 403:
         raise ZoteroError("api_disabled", DISABLED_MESSAGE)
     if reply.status != 200:
-        raise ZoteroError(f"http_{reply.status}", _status_message(reply.status))
-    return [item_from_entry(entry) for entry in _json_list(reply.body) if isinstance(entry, dict)]
+        return libraries, GROUPS_UNAVAILABLE_NOTE
+    try:
+        entries = _json_list(reply.body)
+    except ZoteroError:
+        return libraries, GROUPS_UNAVAILABLE_NOTE
+    groups: list[ZoteroLibrary] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("id")
+        group_id = str(raw_id) if isinstance(raw_id, (int, str)) and not isinstance(raw_id, bool) else ""
+        if not _LIBRARY_ID.fullmatch(group_id):
+            continue
+        data = entry.get("data")
+        name = _field(data.get("name") if isinstance(data, dict) else entry.get("name"))
+        groups.append(ZoteroLibrary(LIBRARY_GROUP, group_id, name or f"Group {group_id}"))
+    groups.sort(key=lambda group: group.name.lower())
+    return libraries + groups, ""
+
+
+def _collection_from(entry: Mapping[str, Any]) -> ZoteroCollection | None:
+    data = entry.get("data")
+    fields: Mapping[str, Any] = data if isinstance(data, dict) else entry
+    key = _field(entry.get("key")) or _field(fields.get("key"))
+    if not _COLLECTION_KEY.fullmatch(key):
+        return None
+    parent = fields.get("parentCollection")
+    parent_key = parent if isinstance(parent, str) and _COLLECTION_KEY.fullmatch(parent) else ""
+    return ZoteroCollection(key=key, name=_field(fields.get("name")) or "(unnamed collection)", parent_key=parent_key)
+
+
+def list_collections(
+    library: ZoteroLibrary,
+    *,
+    transport: Transport | None = None,
+    timeout: float = SEARCH_TIMEOUT,
+) -> list[ZoteroCollection]:
+    """Every collection in one library, flat, each with its parent key. A library too big to read in full is refused."""
+    prefix = library_prefix(library)
+    found: list[ZoteroCollection] = []
+    start = 0
+    for _page in range(COLLECTION_PAGE_LIMIT):
+        path = f"{prefix}/collections?format=json&limit={COLLECTION_PAGE}&start={start}"
+        reply = _get(path, transport=transport, timeout=timeout)
+        if reply.status == 403:
+            raise ZoteroError("api_disabled", DISABLED_MESSAGE)
+        if reply.status != 200:
+            raise ZoteroError(f"http_{reply.status}", _status_message(reply.status))
+        page = [entry for entry in _json_list(reply.body) if isinstance(entry, dict)]
+        found.extend(collection for collection in (_collection_from(entry) for entry in page) if collection)
+        if len(page) < COLLECTION_PAGE:
+            return sorted(found, key=lambda collection: collection.name.lower())
+        start += COLLECTION_PAGE
+    raise ZoteroError("too_many", TOO_MANY_COLLECTIONS_MESSAGE)
+
+
+def collection_rows(collections: Sequence[ZoteroCollection]) -> list[tuple[ZoteroCollection, int]]:
+    """The collections in tree order, each with its depth. One whose parent is not in the list counts as top level."""
+    known = {collection.key for collection in collections}
+    children: dict[str, list[ZoteroCollection]] = {}
+    roots: list[ZoteroCollection] = []
+    for collection in collections:
+        if collection.parent_key and collection.parent_key in known:
+            children.setdefault(collection.parent_key, []).append(collection)
+        else:
+            roots.append(collection)
+    rows: list[tuple[ZoteroCollection, int]] = []
+    placed: set[str] = set()
+
+    def place(node: ZoteroCollection, depth: int) -> None:
+        if node.key in placed:
+            return
+        placed.add(node.key)
+        rows.append((node, depth))
+        for child in sorted(children.get(node.key, []), key=lambda item: item.name.lower()):
+            place(child, depth + 1)
+
+    for root in sorted(roots, key=lambda item: item.name.lower()):
+        place(root, 0)
+    for leftover in sorted(collections, key=lambda item: item.name.lower()):
+        place(leftover, 0)  # only a parent cycle reaches here; each one is still listed once
+    return rows
+
+
+def search_collection_items(
+    query: str,
+    library: ZoteroLibrary,
+    collection_key: str,
+    *,
+    transport: Transport | None = None,
+    timeout: float = SEARCH_TIMEOUT,
+) -> list[ZoteroItem]:
+    """Quick search inside one collection, top-level items only, so child notes and attachments are not listed."""
+    term = query.strip()[:MAX_QUERY_CHARS]
+    if not term:
+        raise ZoteroError("blank_query", BLANK_QUERY_MESSAGE)
+    prefix = library_prefix(library)
+    key = _checked_key(collection_key)
+    path = (
+        f"{prefix}/collections/{key}/items/top?q={urllib.parse.quote(term, safe='')}"
+        f"&format=json&limit={SEARCH_LIMIT}"
+    )
+    return _items_from_reply(_get(path, transport=transport, timeout=timeout))
 
 
 # ---------------------------------------------------------- install and process

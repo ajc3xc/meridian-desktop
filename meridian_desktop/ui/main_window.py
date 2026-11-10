@@ -109,7 +109,9 @@ TAB_SPECS = (
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
 
-ZOTERO_SECTION = "Zotero (the Zotero app on this computer, 127.0.0.1:23119)"
+ZOTERO_SECTION = (
+    "Zotero (the Zotero app on this computer: searches read 127.0.0.1:23119, saves go through the bridge on 127.0.0.1:23125)"
+)
 
 STATUS_MESSAGE = "Home checks each part of Meridian when this window opens, then every five minutes while Home is showing."
 
@@ -216,6 +218,19 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
         return store.load().settings.hosted_url, token_store.get_token(store=secrets)
 
     return read
+
+
+def _zotero_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str, str]]]:
+    """The project list the Zotero tab's scope reads. When no list can be read, the reason reaches the tab as text."""
+    read = _saved_projects(store, sources)
+
+    def scoped() -> list[tuple[str, str, str]]:
+        try:
+            return read()
+        except ProjectsUnavailable as exc:
+            raise zotero_client.ZoteroError("projects_unavailable", str(exc)) from None
+
+    return scoped
 
 
 def _saved_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str, str]]]:
@@ -473,7 +488,9 @@ class MainWindow(QMainWindow):
         self._settings_tab.signedInChanged.connect(self._connection_bar.refresh)
         column.addWidget(self._settings_tab)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
-        column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
+        column.addWidget(
+            ZoteroPanel(client=self._zotero, projects=_zotero_projects(self._store, self._sources), parent=container)
+        )
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
         column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
         column.addWidget(WritingArea(container))
