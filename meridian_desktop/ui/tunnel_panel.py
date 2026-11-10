@@ -2,13 +2,17 @@
 
 It shows, top to bottom:
 
-- Status: connected or not, and when the tunnel was last checked. One read-only status call runs on the thread pool
-  when the panel is first shown, and again when Check now is pressed or a Start or Stop has finished.
+- Status: connected or not, and when the tunnel was last checked. One read-only pass runs on the thread pool when the
+  panel is first shown, and again when Check now is pressed or a Start or Stop has finished. The pass reads the status
+  call and then the tail of the tunnel log.
 - Start, Stop and Restart: the existing tunnel commands, through ScopeControls. Each one asks the owner first, in the same
   dialog as the rest of the runner controls, and the gate (tunnel_control_enabled and the core setup) turns them off with
   the reason shown. The Home tunnel card holds no start or stop control; it opens this panel.
 - Lanes: the direct lane and the tunnel lane. The tunnel lane shows whether it is live, and each lane gets one line on
   what it needs.
+- Slots: the tunnel's slot ports, one row each, with the state the tunnel status reports. The status reports no state for
+  a slot yet, so each row says it is not reported.
+- Recent log: the last 50 lines of the tunnel log, already redacted. The panel only reads it.
 - Tool groups: one switch per group. Each switch saves the existing disabled_tools setting, so it is the same switch as
   the group switch under MCP tools in Settings.
 - Custom connectors: the tunnel opt-in (off by default), and each saved connector with its tunnel flag.
@@ -21,14 +25,28 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Slot
 from PySide6.QtGui import QShowEvent
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from meridian_desktop import custom_connectors, tool_catalog
 from meridian_desktop import tunnel_panel_model as model
 from meridian_desktop.custom_connectors import ConnectorError
+from meridian_desktop.log_tail import LogTail, read_tunnel_log_tail
 from meridian_desktop.runner_client import RunnerResult
 from meridian_desktop.runner_controls import SCOPE_TUNNEL
 from meridian_desktop.settings_store import SettingsStore
@@ -37,11 +55,14 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.text import make_selectable
-from meridian_desktop.ui.tunnel_check import TunnelCheckJob
+from meridian_desktop.ui.tunnel_check import TunnelReadJob
 
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
 PROBLEM_TEXT = "Not saved: the settings file has a problem. Fix or remove that problem first, then try again."
 SAVED_TEXT = "Saved."
+# The slot table and the log pane are capped so the panel does not grow past the tab. Each one scrolls inside its cap.
+SLOT_TABLE_MAX_HEIGHT = 220
+LOG_VIEW_MAX_HEIGHT = 180
 
 
 def _text(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -60,11 +81,31 @@ def _heading(parent: QWidget, name: str, text: str) -> QLabel:
     return label
 
 
+def _slot_table(parent: QWidget) -> QTableWidget:
+    """The slot table, filled once. Its rows never change, and each state says it is not reported."""
+    table = QTableWidget(0, len(model.SLOT_COLUMNS), parent)
+    table.setObjectName("tunnelpanel-slots")
+    table.setHorizontalHeaderLabels(list(model.SLOT_COLUMNS))
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.verticalHeader().setVisible(False)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    table.horizontalHeader().setStretchLastSection(True)
+    table.setMaximumHeight(SLOT_TABLE_MAX_HEIGHT)
+    rows = model.slot_rows()
+    table.setRowCount(len(rows))
+    for row_index, row in enumerate(rows):
+        for column, text in enumerate((row.slot, str(row.port), row.state)):
+            table.setItem(row_index, column, QTableWidgetItem(text))
+    return table
+
+
 class TunnelPanel(QWidget):
     """The Tunnel section. Build it once; call refresh() to show the saved choices again.
 
     ``status_call`` is RunnerClient.status, or a fake in tests. It is called with the tunnel scope only, on the thread
-    pool, and it is read-only. The panel holds the settings store and the runner actions, never a window.
+    pool, and it is read-only. ``log_path`` is the tunnel log to show; None means the path the core writes (see
+    log_tail.tunnel_log_path), and a test passes a temp file. The panel holds the settings store and the runner actions,
+    never a window.
     """
 
     def __init__(
@@ -73,11 +114,13 @@ class TunnelPanel(QWidget):
         actions: RunnerActions,
         status_call: Callable[[str], RunnerResult],
         parent: QWidget | None = None,
+        log_path: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("tunnel-panel")
         self._store = store
         self._status_call = status_call
+        self._log_path = log_path
         self._busy = False
         self._generation = 0
         self._read_once = False
@@ -111,6 +154,11 @@ class TunnelPanel(QWidget):
         self._direct_lane = _text(self, "tunnelpanel-lane-direct")
         self._tunnel_lane = _text(self, "tunnelpanel-lane-tunnel")
 
+        # Slots: the tunnel's slot ports, one row each. The status reports no state for a slot, so each row says so.
+        self._slots_heading = _heading(self, "tunnelpanel-slots-heading", model.SLOTS_HEADING)
+        self._slots_intro = _text(self, "tunnelpanel-slots-intro", model.SLOTS_INTRO)
+        self._slots = _slot_table(self)
+
         # Tool groups: one switch per group, saved as the existing disabled_tools setting.
         self._groups_heading = _heading(self, "tunnelpanel-groups-heading", model.GROUPS_HEADING)
         self._groups_intro = _text(self, "tunnelpanel-groups-intro", model.GROUPS_INTRO)
@@ -140,6 +188,16 @@ class TunnelPanel(QWidget):
         self._message = _text(self, "tunnelpanel-message")
         self._message.setVisible(False)
 
+        # Recent log: the last lines of the tunnel log, read with each check. The pane is read-only and selectable.
+        self._log_heading = _heading(self, "tunnelpanel-log-heading", model.LOG_HEADING)
+        self._log_intro = _text(self, "tunnelpanel-log-intro", model.LOG_INTRO)
+        self._log_message = _text(self, "tunnelpanel-log-message", model.LOG_NOT_READ_TEXT)
+        self._log_view = QPlainTextEdit(self)
+        self._log_view.setObjectName("tunnelpanel-log")
+        self._log_view.setReadOnly(True)
+        make_selectable(self._log_view)  # after setReadOnly, which otherwise allows mouse selection only
+        self._log_view.setMaximumHeight(LOG_VIEW_MAX_HEIGHT)
+
         column = QVBoxLayout(self)
         column.addWidget(heading)
         column.addWidget(intro)
@@ -151,6 +209,9 @@ class TunnelPanel(QWidget):
         column.addWidget(self._lanes_heading)
         column.addWidget(self._direct_lane)
         column.addWidget(self._tunnel_lane)
+        column.addWidget(self._slots_heading)
+        column.addWidget(self._slots_intro)
+        column.addWidget(self._slots)
         column.addWidget(self._groups_heading)
         column.addWidget(self._groups_intro)
         column.addLayout(group_column)
@@ -160,6 +221,10 @@ class TunnelPanel(QWidget):
         column.addWidget(self._connector_box)
         column.addWidget(self._connectors_empty)
         column.addWidget(self._message)
+        column.addWidget(self._log_heading)
+        column.addWidget(self._log_intro)
+        column.addWidget(self._log_message)
+        column.addWidget(self._log_view)
 
         self._render_lanes()
         self.refresh()
@@ -167,7 +232,8 @@ class TunnelPanel(QWidget):
     # ----------------------------------------------------------- the status check
 
     def check(self) -> None:
-        """Read the tunnel status once, on the thread pool. A press while a check runs does nothing. Read-only."""
+        """Read the tunnel status and the tail of the tunnel log once, on the thread pool. A press while a read runs does
+        nothing. Both reads are read-only."""
         if self._busy:
             return
         self._busy = True
@@ -176,13 +242,16 @@ class TunnelPanel(QWidget):
         self._check_button.setEnabled(False)
         self._headline.setText(model.CHECKING_TEXT)
         self._checked.setText("")
-        # The job holds the status call, this panel's owner token and the shared delivery object. Never the panel.
+        # The job holds the status call, the log path, this panel's owner token and the shared delivery object.
+        # It never holds the panel.
         owner = self._owner
         delivery = shared_delivery()
         status_call = self._status_call
+        log_path = self._log_path
         QThreadPool.globalInstance().start(
-            TunnelCheckJob(
+            TunnelReadJob(
                 lambda: read_tunnel_status(status_call),
+                lambda: read_tunnel_log_tail(log_path),
                 lambda payload: delivery.delivered.emit(Delivered(owner, (generation, payload))),
             )
         )
@@ -197,12 +266,15 @@ class TunnelPanel(QWidget):
         generation, payload = item.value
         if generation != self._generation:
             return
-        status, failure = payload if isinstance(payload, tuple) and len(payload) == 2 else (None, None)
+        status, failure, tail = payload if isinstance(payload, tuple) and len(payload) == 3 else (None, None, None)
         if status is not None and not isinstance(status, TunnelStatus):
             status, failure = None, None
+        if tail is not None and not isinstance(tail, LogTail):
+            tail = None
         self._busy = False
         self._check_button.setEnabled(True)
         self._show_status(status, failure)
+        self._show_log(tail)
 
     def _show_status(self, status: TunnelStatus | None, failure: str | None) -> None:
         shown = model.panel_status(status, failure)
@@ -211,6 +283,15 @@ class TunnelPanel(QWidget):
         self._detail.setText(shown.detail)
         self._state = status.state if status is not None else None
         self._render_lanes()
+
+    def _show_log(self, tail: LogTail | None) -> None:
+        """Show the last lines of the log read, and say why there are none. The newest line stays in view."""
+        self._log_view.setPlainText("\n".join(model.log_lines(tail)))
+        scroll = self._log_view.verticalScrollBar()
+        scroll.setValue(scroll.maximum())
+        message = model.log_message(tail)
+        self._log_message.setText(message)
+        self._log_message.setVisible(bool(message))
 
     def _render_lanes(self) -> None:
         direct, tunnel = model.lanes(self._state)
