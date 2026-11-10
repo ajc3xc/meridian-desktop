@@ -60,7 +60,7 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"

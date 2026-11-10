@@ -349,7 +349,7 @@ def test_a_settings_file_with_a_problem_is_not_written_over(qtbot, settings_path
     assert _label(panel, "tunnelpanel-message").text() == PROBLEM_TEXT
 
 
-def test_the_tunnel_panel_is_the_first_section_of_settings(qtbot, settings_path, tmp_path):
+def test_the_tunnel_panel_is_its_own_tab_and_settings_has_no_copy(qtbot, settings_path, tmp_path):
     from meridian_desktop.ui.main_window import MainWindow
 
     spawn, confirm = Spawn(), Confirm()
@@ -359,13 +359,14 @@ def test_the_tunnel_panel_is_the_first_section_of_settings(qtbot, settings_path,
         runner_actions=_actions(settings_path, spawn, confirm, tmp_path),
     )
     qtbot.addWidget(window)
-    index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Settings")
+    index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Tunnel")
     page = window.tabs.widget(index)
-    body = page.findChild(QWidget, "settings-page")
-    first = body.layout().itemAt(0).widget()
-    assert isinstance(first, TunnelPanel)
-    assert first.objectName() == "tunnel-panel"
-    assert window._tunnel_panel is first
+    assert isinstance(page, TunnelPanel)
+    assert page.objectName() == "tunnel-panel"
+    assert window._tunnel_panel is page
+    settings_index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Settings")
+    settings_page = window.tabs.widget(settings_index)
+    assert settings_page.findChild(TunnelPanel) is None
 
 
 @pytest.fixture(autouse=True)

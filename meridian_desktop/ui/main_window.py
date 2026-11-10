@@ -1,4 +1,4 @@
-"""Main window: a connection bar on top, then a mode selector, then five tabs: Home, Projects, Sessions, Search and Settings.
+"""Main window: a connection bar on top, then a mode selector, then seven tabs: Home, Projects, Sessions, GPUs, Search, Tunnel and Settings.
 
 The connection bar (ui/connection_bar.py) is the strip at the very top. It states who is signed in and until when, what
 the desktop is connected to (the hosted URL, with connected, reconnecting or not connected), and the local server when
@@ -94,7 +94,7 @@ from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
-# (tab name, wave that built it). Display order is the tuple order. Five tabs, no more: the rest of the
+# (tab name, wave that built it). Display order is the tuple order. Each tab is a top-level area: the rest of the
 # areas are cards on Home, the Search tab's kinds, or sections of Settings.
 TAB_SPECS = (
     ("Home", 7),
@@ -102,6 +102,7 @@ TAB_SPECS = (
     ("Sessions", 3),
     ("GPUs", 3),
     ("Search", 6),
+    ("Tunnel", 8),
     ("Settings", 2),
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
@@ -374,6 +375,11 @@ class MainWindow(QMainWindow):
                     _saved_runpod_pods(self._store),
                     parent=self.tabs,
                 )
+            elif name == "Tunnel":
+                # The one place for the tunnel: status, Start, Stop and Restart, the lanes, the tool groups and the custom
+                # connectors. Its status is read when the tab is first shown. Settings no longer holds a copy.
+                self._tunnel_panel = TunnelPanel(self._store, self._runner_actions, self._tunnel_runner.status, parent=self.tabs)
+                page = self._tunnel_panel
             elif name == "Search":
                 # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
                 page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
@@ -443,10 +449,6 @@ class MainWindow(QMainWindow):
         container = QWidget(self.tabs)
         container.setObjectName("settings-page")
         column = QVBoxLayout(container)
-        # The Tunnel panel is the one place for the tunnel: its status, Start and Stop, the lanes, the tool groups and the
-        # custom connectors. It sits first, above the connection settings. Its status is read when this page is first shown.
-        self._tunnel_panel = TunnelPanel(self._store, self._runner_actions, self._tunnel_runner.status, parent=container)
-        column.addWidget(self._tunnel_panel)
         column.addWidget(runpod)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
         column.addWidget(ZoteroPanel(client=self._zotero, parent=container))

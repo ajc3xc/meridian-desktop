@@ -11,6 +11,7 @@ runs on the thread pool, so the UI never blocks. Results and errors are plain te
 from __future__ import annotations
 
 import itertools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,8 @@ from typing import Any
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -53,6 +56,31 @@ REMOVE_KEY_CANCELLED_TEXT = "Not removed. The RunPod key is still saved."
 # A removal that failed on the disk. The message names no path and no system text.
 REMOVE_KEY_FAILED_TEXT = "Not removed. The RunPod key could not be deleted from the keychain. Try again."
 NOTHING_HERE_TEXT = "Nothing here yet."
+NOT_REPORTED_TEXT = "not reported"
+OFFER_COLUMNS = ("GPU model", "Provider", "Cloud", "Data center", "Stock", "$ / GPU-hr", "$ / machine-hr", "VRAM / GPU", "vCPU", "RAM")
+OFFER_CLOUD_CHOICES: tuple[tuple[str, str | None], ...] = (
+    ("All clouds", None),
+    ("Secure", "secure"),
+    ("Community", "community"),
+    ("Spot", "spot"),
+)
+OFFER_GPU_COUNT_CHOICES: tuple[int, ...] = (1, 2, 4, 8)
+# Column index -> the offer field that sorts that column as a number. An unknown value sorts last.
+OFFER_SORT_KEYS: dict[int, str] = {
+    5: "price_per_gpu_hour",
+    6: "price_per_hour",
+    7: "vram_gb_per_gpu",
+    8: "vcpu",
+    9: "ram_gb",
+}
+OFFERS_TITLE_TEXT = "GPU offers: RunPod list prices and stock. Read only; nothing here starts or bills a pod."
+OFFERS_UNCHECKED_TEXT = "GPU offers not loaded yet. Press Refresh offers."
+OFFERS_EMPTY_TEXT = "No offers to show. See the status above."
+OFFERS_NOT_CONFIGURED_TEXT = (
+    "RunPod is not configured for the local Meridian server. Save the key, restart the local Meridian server "
+    "so it reads RUNPOD_API_KEY, then refresh."
+)
+OFFER_CAP_INVALID_TEXT = "Max $ / GPU-hr must be a number of 0 or more."
 SERVER_UNCHECKED_TEXT = "Local Meridian server: not checked yet"
 
 
@@ -154,6 +182,103 @@ def describe_pod_list(payload: dict[str, Any], pods: list[dict[str, Any]]) -> st
     if payload.get("has_more_pods") is True:
         text += " More pods exist than this page shows."
     return text
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _usd(value: Any) -> str:
+    number = _number(value)
+    return NOT_REPORTED_TEXT if number is None else f"${number:,.2f}"
+
+
+def _gigabytes(value: Any) -> str:
+    number = _number(value)
+    return NOT_REPORTED_TEXT if number is None else f"{number:g} GB"
+
+
+def _plain(value: Any) -> str:
+    if value is None or value == "":
+        return NOT_REPORTED_TEXT
+    return _truncate(str(value))
+
+
+def offer_row(offer: dict[str, Any]) -> tuple[str, ...]:
+    """The table cells for one offer, as plain text. An unknown value reads 'not reported', never zero."""
+    vcpu = _number(offer.get("vcpu"))
+    return (
+        _plain(offer.get("gpu_model")),
+        _plain(offer.get("provider")),
+        _plain(offer.get("cloud_type")),
+        _plain(offer.get("data_center")),
+        _plain(offer.get("stock_status")),
+        _usd(offer.get("price_per_gpu_hour")),
+        _usd(offer.get("price_per_hour")),
+        _gigabytes(offer.get("vram_gb_per_gpu")),
+        NOT_REPORTED_TEXT if vcpu is None else f"{vcpu:g}",
+        _gigabytes(offer.get("ram_gb")),
+    )
+
+
+def offer_sort_value(offer: dict[str, Any], column: int) -> float:
+    """The number a numeric column sorts by. An unknown value is infinity, so it sorts last."""
+    number = _number(offer.get(OFFER_SORT_KEYS[column]))
+    return math.inf if number is None else number
+
+
+def offer_query(model: str, cloud: str | None, gpus: int, in_stock: bool, max_price: str) -> tuple[dict[str, str], str | None]:
+    """The GET /compute/offers filters for the form. A problem text means the form is invalid, and nothing is sent."""
+    query: dict[str, str] = {"gpu_count": str(gpus)}
+    name = model.strip()
+    if name:
+        query["gpu_model"] = name
+    if cloud:
+        query["cloud_type"] = cloud
+    if in_stock:
+        query["in_stock_only"] = "true"
+    cap = max_price.strip()
+    if cap:
+        try:
+            value = float(cap)
+        except ValueError:
+            return {}, OFFER_CAP_INVALID_TEXT
+        if not math.isfinite(value) or value < 0:
+            return {}, OFFER_CAP_INVALID_TEXT
+        query["max_price_per_gpu_hour"] = repr(value)
+    return query, None
+
+
+def offer_error_code(payload: dict[str, Any]) -> str | None:
+    error = payload.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def describe_offers(payload: dict[str, Any]) -> str:
+    """The status line under the filters: how many offers, and when prices and stock were read."""
+    raw = payload.get("providers")
+    providers = [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
+    prices = next((p["prices_as_of"] for p in providers if p.get("prices_as_of")), None)
+    stock = next((p["stock_as_of"] for p in providers if p.get("stock_as_of")), None)
+    count = payload.get("count") if isinstance(payload.get("count"), int) else 0
+    return f"{count} offer(s). Prices as of {prices or 'unknown'}. Stock as of {stock or 'unknown'}."
+
+
+class _SortItem(QTableWidgetItem):
+    """A table cell that sorts by its UserRole number when it has one, so prices sort as numbers."""
+
+    def __lt__(self, other: object) -> bool:
+        # Compare here, not through super(): on PySide6 a super() call back into this override recurses forever.
+        if not isinstance(other, QTableWidgetItem):
+            return False
+        mine = self.data(Qt.ItemDataRole.UserRole)
+        theirs = other.data(Qt.ItemDataRole.UserRole)
+        if isinstance(mine, float) and isinstance(theirs, float):
+            return mine < theirs
+        return self.text() < other.text()
 
 
 @dataclass
@@ -355,6 +480,7 @@ class RunPodPanel(QWidget):
         header.setStretchLastSection(True)
         enable_table_copy(self._pods)
         layout.addWidget(self._pods, 1)
+        self._build_offers(layout)
         outer.addWidget(self._card)
 
         self._save_button.clicked.connect(self._on_save_clicked)
@@ -362,8 +488,71 @@ class RunPodPanel(QWidget):
         self._test_button.clicked.connect(self._on_test_clicked)
         self._refresh_button.clicked.connect(self._on_refresh_clicked)
 
+    def _build_offers(self, layout: QVBoxLayout) -> None:
+        """The GPU offers section: filters, a refresh, the status line and a sortable table of RunPod list prices."""
+        layout.addWidget(_label(self, "runpod-offers-title", OFFERS_TITLE_TEXT))
+        filters = QHBoxLayout()
+        self._offer_model = QLineEdit(self)
+        self._offer_model.setObjectName("runpod-offers-model")
+        self._offer_model.setPlaceholderText("GPU model, for example 4090")
+        filters.addWidget(self._offer_model, 1)
+        self._offer_cloud = QComboBox(self)
+        self._offer_cloud.setObjectName("runpod-offers-cloud")
+        for label, value in OFFER_CLOUD_CHOICES:
+            self._offer_cloud.addItem(label, value)
+        filters.addWidget(self._offer_cloud)
+        self._offer_gpus = QComboBox(self)
+        self._offer_gpus.setObjectName("runpod-offers-gpus")
+        for count in OFFER_GPU_COUNT_CHOICES:
+            self._offer_gpus.addItem(f"{count} GPU" + ("s" if count > 1 else ""), count)
+        filters.addWidget(self._offer_gpus)
+        self._offer_stock = QCheckBox("In stock only", self)
+        self._offer_stock.setObjectName("runpod-offers-stock")
+        filters.addWidget(self._offer_stock)
+        self._offer_max = QLineEdit(self)
+        self._offer_max.setObjectName("runpod-offers-max")
+        self._offer_max.setPlaceholderText("Max $ / GPU-hr")
+        filters.addWidget(self._offer_max)
+        self._offer_refresh = QPushButton("Refresh offers", self)
+        self._offer_refresh.setObjectName("runpod-offers-refresh")
+        filters.addWidget(self._offer_refresh)
+        layout.addLayout(filters)
+
+        self._offer_status = _label(self, "runpod-offers-status", OFFERS_UNCHECKED_TEXT)
+        layout.addWidget(self._offer_status)
+        self._offers_empty = make_selectable(QLabel(OFFERS_EMPTY_TEXT, self))
+        self._offers_empty.setObjectName("runpod-offers-empty")
+        layout.addWidget(self._offers_empty)
+        self._offers = QTableWidget(0, len(OFFER_COLUMNS), self)
+        self._offers.setObjectName("runpod-offers")
+        self._offers.setVisible(False)
+        self._offers.setMinimumHeight(PODS_MIN_HEIGHT)
+        self._offers.setMaximumHeight(PODS_MAX_HEIGHT)
+        self._offers.setHorizontalHeaderLabels(list(OFFER_COLUMNS))
+        self._offers.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._offers.setSortingEnabled(True)
+        self._offers.verticalHeader().setVisible(False)
+        header = self._offers.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        enable_table_copy(self._offers)
+        layout.addWidget(self._offers, 1)
+        self._offer_refresh.clicked.connect(self._on_offers_clicked)
+
     def _set_busy(self, busy: bool) -> None:
-        for widget in (self._save_button, self._remove_button, self._test_button, self._refresh_button, self._key_input):
+        for widget in (
+            self._save_button,
+            self._remove_button,
+            self._test_button,
+            self._refresh_button,
+            self._key_input,
+            self._offer_refresh,
+            self._offer_model,
+            self._offer_cloud,
+            self._offer_gpus,
+            self._offer_stock,
+            self._offer_max,
+        ):
             widget.setEnabled(not busy)
 
     # ----------------------------------------------------------- jobs
@@ -508,6 +697,72 @@ class RunPodPanel(QWidget):
         """The grid shows when there are rows. Otherwise the one plain 'nothing here yet' line shows."""
         self._pods.setVisible(has_rows)
         self._pods_empty.setVisible(not has_rows)
+
+    # ----------------------------------------------------------- GPU offers
+
+    def _set_offer_status(self, text: str) -> None:
+        self._offer_status.setText(text)
+
+    def _on_offers_clicked(self) -> None:
+        query, problem = offer_query(
+            self._offer_model.text(),
+            self._offer_cloud.currentData(),
+            self._offer_gpus.currentData(),
+            self._offer_stock.isChecked(),
+            self._offer_max.text(),
+        )
+        if problem is not None:
+            self._set_offer_status(problem)
+            return
+        offers = self._client.runpod_offers
+        work = self._work
+        self._submit(lambda: work.local(lambda url, timeout: offers(url, query, timeout)), RunPodPanel._on_offers_done)
+
+    def _on_offers_done(self, result: Any, error: str | None) -> None:
+        outcome = self._take(result, error)
+        if outcome is None:
+            return
+        if outcome.failure is not None:
+            self._clear_offers()
+            self._set_offer_status(outcome.failure)
+            return
+        if outcome.state != local_client.HEALTH_RUNNING:
+            self._clear_offers()
+            self._set_offer_status(not_sent_text(outcome.state))
+            return
+        payload = outcome.payload or {}
+        if payload.get("ok") is not True:
+            self._clear_offers()
+            not_configured = payload.get("status") == "not_configured" or offer_error_code(payload) == "not_configured"
+            self._set_offer_status(
+                OFFERS_NOT_CONFIGURED_TEXT if not_configured else f"RunPod offers failed: {_server_error_text(payload)}"
+            )
+            return
+        raw = payload.get("offers")
+        rows = [offer for offer in raw if isinstance(offer, dict)] if isinstance(raw, list) else []
+        self._fill_offers(rows)
+        self._set_offer_status(describe_offers(payload))
+
+    def _fill_offers(self, offers: list[dict[str, Any]]) -> None:
+        self._offers.setSortingEnabled(False)
+        self._offers.setRowCount(len(offers))
+        for row, offer in enumerate(offers):
+            for column, cell in enumerate(offer_row(offer)):
+                item = _SortItem(cell)
+                if column in OFFER_SORT_KEYS:
+                    item.setData(Qt.ItemDataRole.UserRole, offer_sort_value(offer, column))
+                self._offers.setItem(row, column, item)
+        self._offers.setSortingEnabled(True)
+        self._show_offer_rows(bool(offers))
+
+    def _clear_offers(self) -> None:
+        self._offers.setRowCount(0)
+        self._show_offer_rows(False)
+
+    def _show_offer_rows(self, has_rows: bool) -> None:
+        """The offers table shows when there are rows. Otherwise the one plain line says nothing matched."""
+        self._offers.setVisible(has_rows)
+        self._offers_empty.setVisible(not has_rows)
 
     # ----------------------------------------------------------- first show
 

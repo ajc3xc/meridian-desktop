@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -304,6 +304,25 @@ def runpod_list_pods(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> dict[st
     """
     return _runpod_json(RUNPOD_PODS_PATH, base_url, timeout)
 
+RUNPOD_OFFERS_PATH = "/compute/offers"
+
+
+def offers_path(query: Mapping[str, str] | None = None) -> str:
+    """The path for GET /compute/offers, with only the given query keys encoded."""
+    if not query:
+        return RUNPOD_OFFERS_PATH
+    return RUNPOD_OFFERS_PATH + "?" + urllib.parse.urlencode(dict(query))
+
+
+def runpod_offers(base_url: str, query: Mapping[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """GET /compute/offers with the given filters. Return the parsed JSON object on HTTP 200.
+
+    The body holds ok, status, offers, count, gpu_models, providers and error. A
+    completed read returns 200 even when ok is false, so ``error`` says why. Raise
+    LocalClientError on the same terms as runpod_check.
+    """
+    return _runpod_json(offers_path(query), base_url, timeout)
+
 
 __all__ = [
     "ALLOWED_SCHEME",
@@ -319,7 +338,9 @@ __all__ = [
     "Transport",
     "assert_loopback",
     "list_projects",
+    "offers_path",
     "probe_health",
     "runpod_check",
     "runpod_list_pods",
+    "runpod_offers",
 ]

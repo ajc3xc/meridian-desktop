@@ -12,9 +12,16 @@ import weakref
 import pytest
 import shiboken6
 from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtWidgets import QLabel, QLineEdit, QPushButton, QTableWidget, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton, QTableWidget, QWidget
 
-from meridian_desktop.local_client import HEALTH_ERROR, HEALTH_NOT_MERIDIAN, HEALTH_NOT_RUNNING, HEALTH_RUNNING, LocalClientError
+from meridian_desktop.local_client import (
+    HEALTH_ERROR,
+    HEALTH_NOT_MERIDIAN,
+    HEALTH_NOT_RUNNING,
+    HEALTH_RUNNING,
+    LocalClientError,
+    offers_path,
+)
 from meridian_desktop.secret_store import SecretStoreError
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui.runpod_panel import (
@@ -24,8 +31,15 @@ from meridian_desktop.ui.runpod_panel import (
     REMOVE_KEY_BODY,
     REMOVE_KEY_CANCELLED_TEXT,
     REMOVE_KEY_FAILED_TEXT,
+    OFFER_CAP_INVALID_TEXT,
+    OFFERS_NOT_CONFIGURED_TEXT,
     REMOVE_KEY_TITLE,
     RunPodPanel,
+    describe_offers,
+    offer_error_code,
+    offer_query,
+    offer_row,
+    offer_sort_value,
 )
 
 from _shared_delivery import emit, recording_deliveries, visible_state
@@ -103,6 +117,15 @@ class FakeClient:
             "has_more_pods": False,
             "error": None,
         }
+        self.offers = {
+            "ok": True,
+            "status": "ok",
+            "count": 0,
+            "offers": [],
+            "providers": [],
+            "error": None,
+        }
+        self.offer_queries = []
         self.raise_on = {}
         self.gate = None
         self.calls = []
@@ -127,6 +150,11 @@ class FakeClient:
     def runpod_list_pods(self, base_url, timeout):
         self._note("runpod_list_pods", base_url, timeout)
         return copy.deepcopy(self.listing)
+
+    def runpod_offers(self, base_url, query, timeout):
+        self._note("runpod_offers", base_url, timeout)
+        self.offer_queries.append(dict(query or {}))
+        return copy.deepcopy(self.offers)
 
 
 class FakeConfirm:
@@ -430,6 +458,145 @@ def test_test_key_uses_the_local_url_from_settings(qtbot, make_panel, store, cli
 
 
 # ----------------------------------------------------------------- refresh pods
+
+
+# ----------------------------------------------------------------- GPU offers
+
+OFFER_A = {
+    "gpu_model": "rtx-4090-24gb",
+    "provider": "runpod",
+    "cloud_type": "secure",
+    "data_center": "US-TX-3",
+    "stock_status": "HIGH",
+    "price_per_gpu_hour": 0.69,
+    "price_per_hour": 0.69,
+    "vram_gb_per_gpu": 24.0,
+    "vcpu": 16,
+    "ram_gb": 62.0,
+}
+OFFER_B = {
+    "gpu_model": "a100-80gb",
+    "provider": "runpod",
+    "cloud_type": "community",
+    "data_center": None,
+    "stock_status": None,
+    "price_per_gpu_hour": None,
+    "price_per_hour": None,
+    "vram_gb_per_gpu": 80.0,
+    "vcpu": None,
+    "ram_gb": None,
+}
+OFFERS_OK = {
+    "ok": True,
+    "status": "ok",
+    "count": 2,
+    "offers": [OFFER_A, OFFER_B],
+    "providers": [
+        {
+            "name": "runpod",
+            "status": "ok",
+            "prices_as_of": "2026-11-10 04:00 UTC",
+            "stock_as_of": "2026-11-10 04:01 UTC",
+            "error": None,
+        }
+    ],
+    "error": None,
+}
+
+
+def test_offer_row_reads_unknown_values_as_not_reported_never_zero():
+    assert offer_row(OFFER_A) == (
+        "rtx-4090-24gb", "runpod", "secure", "US-TX-3", "HIGH", "$0.69", "$0.69", "24 GB", "16", "62 GB",
+    )
+    assert offer_row(OFFER_B) == (
+        "a100-80gb", "runpod", "community", "not reported", "not reported", "not reported",
+        "not reported", "80 GB", "not reported", "not reported",
+    )
+
+
+def test_offer_sort_value_puts_an_unknown_price_last():
+    assert offer_sort_value(OFFER_A, 5) == 0.69
+    assert offer_sort_value(OFFER_B, 5) == float("inf")
+
+
+def test_offer_query_sends_only_the_filters_that_are_set():
+    query, problem = offer_query("  4090 ", "secure", 2, True, "0.75")
+    assert problem is None
+    assert query == {
+        "gpu_count": "2",
+        "gpu_model": "4090",
+        "cloud_type": "secure",
+        "in_stock_only": "true",
+        "max_price_per_gpu_hour": "0.75",
+    }
+    assert offer_query("", None, 1, False, "") == ({"gpu_count": "1"}, None)
+
+
+@pytest.mark.parametrize("cap", ["abc", "-1", "nan", "inf"])
+def test_offer_query_refuses_a_bad_price_cap_and_sends_nothing(cap):
+    assert offer_query("", None, 1, False, cap) == ({}, OFFER_CAP_INVALID_TEXT)
+
+
+def test_offers_path_encodes_only_the_given_query():
+    assert offers_path(None) == "/compute/offers"
+    assert offers_path({}) == "/compute/offers"
+    assert offers_path({"gpu_model": "rtx 4090"}) == "/compute/offers?gpu_model=rtx+4090"
+
+
+def test_offer_status_and_error_code_are_read_from_the_payload():
+    assert describe_offers(OFFERS_OK) == (
+        "2 offer(s). Prices as of 2026-11-10 04:00 UTC. Stock as of 2026-11-10 04:01 UTC."
+    )
+    assert describe_offers({"count": 0, "providers": []}) == "0 offer(s). Prices as of unknown. Stock as of unknown."
+    assert offer_error_code({"error": {"code": "not_configured"}}) == "not_configured"
+    assert offer_error_code({"error": "plain text"}) is None
+
+
+def test_offers_refresh_sends_the_filters_and_fills_the_table(qtbot, make_panel, store, client):
+    client.offers = copy.deepcopy(OFFERS_OK)
+    panel = make_panel(store, client)
+    panel.findChild(QLineEdit, "runpod-offers-model").setText("4090")
+    panel.findChild(QCheckBox, "runpod-offers-stock").setChecked(True)
+    press(qtbot, panel, "runpod-offers-refresh")
+    wait_idle(qtbot, panel)
+    assert client.offer_queries[-1] == {"gpu_count": "1", "gpu_model": "4090", "in_stock_only": "true"}
+    table = panel.findChild(QTableWidget, "runpod-offers")
+    assert table.rowCount() == 2
+    assert _cells(table, 0) == offer_row(OFFER_A)
+    assert text_of(panel, "runpod-offers-status") == describe_offers(OFFERS_OK)
+
+
+def test_offers_with_no_key_say_to_restart_the_local_server(qtbot, make_panel, store, client):
+    client.offers = {
+        "ok": False,
+        "status": "not_configured",
+        "count": 0,
+        "offers": [],
+        "providers": [],
+        "error": {"code": "not_configured", "message": "RunPod is not configured on this machine."},
+    }
+    panel = make_panel(store, client)
+    press(qtbot, panel, "runpod-offers-refresh")
+    wait_idle(qtbot, panel)
+    assert text_of(panel, "runpod-offers-status") == OFFERS_NOT_CONFIGURED_TEXT
+    assert panel.findChild(QTableWidget, "runpod-offers").rowCount() == 0
+
+
+def test_a_bad_price_cap_shows_the_message_and_makes_no_offers_call(qtbot, make_panel, store, client):
+    panel = make_panel(store, client)
+    panel.findChild(QLineEdit, "runpod-offers-max").setText("cheap")
+    press(qtbot, panel, "runpod-offers-refresh")
+    assert text_of(panel, "runpod-offers-status") == OFFER_CAP_INVALID_TEXT
+    assert not any(name == "runpod_offers" for name, _base, _timeout in client.calls)
+
+
+def test_an_offers_failure_clears_the_table_and_says_why(qtbot, make_panel, store, client):
+    client.raise_on["runpod_offers"] = LocalClientError("unreachable", "The local Meridian server did not answer.")
+    panel = make_panel(store, client)
+    press(qtbot, panel, "runpod-offers-refresh")
+    wait_idle(qtbot, panel)
+    assert panel.findChild(QTableWidget, "runpod-offers").rowCount() == 0
+    assert text_of(panel, "runpod-offers-status") != ""
 
 
 def _cells(table, row):

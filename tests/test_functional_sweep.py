@@ -20,7 +20,7 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import TAB_NAMES, MainWindow
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Settings")
 # The tabs that show a Refresh button outside any collapsed group: Sessions, GPUs and Search have one at the top, and
 # Settings shows the Zotero panel's Refresh directly.
 TABS_WITH_REFRESH = ("Sessions", "GPUs", "Search", "Settings")
