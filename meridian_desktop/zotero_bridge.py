@@ -55,6 +55,22 @@ MAX_ITEMS = 50
 MAX_TITLE_CHARS = 500
 MAX_URL_CHARS = 2000
 TIMEOUT = 10.0
+# Filing into a collection (collection_keys on POST /v1/items) first shipped in bridge plugin 0.1.4 (commit 0172bb7f).
+# An older bridge would ignore the field and file the item elsewhere, so the save is refused before any grant opens.
+PLACEMENT_MIN_PLUGIN_VERSION = (0, 1, 4)
+COLLECTION_KEY = re.compile(r"^[A-Z0-9]{8}$")
+_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$")
+PLACEMENT_OLD_TEXT = (
+    "Nothing was saved. The Meridian Zotero bridge is older than 0.1.4, so it cannot file items into the project's "
+    "collection. Update the bridge plugin, then try again."
+)
+PLACEMENT_UNKNOWN_TEXT = (
+    "Nothing was saved. The bridge did not say which version it is, so it cannot be checked for filing into the "
+    "project's collection."
+)
+COLLECTION_KEY_TEXT = (
+    "Nothing was saved. The project's Zotero collection key is not valid. Choose the collection again in the Zotero tab."
+)
 # A grant is stopped this long before its expiry, so a write cannot land on the edge of it.
 GRANT_MARGIN = dt.timedelta(seconds=30)
 _SAFE_CODE = re.compile(r"^[a-z][a-z_]{0,39}$")
@@ -608,19 +624,76 @@ def _open_grant(fetch: Transport, token: str, phase: _Phase) -> tuple[str, str, 
     return grant_id, write_key, expires_at
 
 
-def _item_body(item: ReadingItem) -> dict[str, object]:
-    """Title and URL go inside "fields". A top-level title is refused by the bridge with 422 invalid_fields."""
-    return {"item_type": ITEM_TYPE, "fields": {"title": item.title.strip(), "url": item.url.strip()}}
+def _item_body(item: ReadingItem, collection_key: str | None = None) -> dict[str, object]:
+    """Title and URL go inside "fields". A top-level title is refused by the bridge with 422 invalid_fields.
+
+    With a collection key the bridge files the item into that collection as it creates it.
+    """
+    body: dict[str, object] = {"item_type": ITEM_TYPE, "fields": {"title": item.title.strip(), "url": item.url.strip()}}
+    if collection_key is not None:
+        body["collection_keys"] = [collection_key]
+    return body
 
 
-def _create_item(fetch: Transport, token: str, write_key: str, item: ReadingItem) -> _Refusal | None:
+def _parse_version(value: object) -> tuple[tuple[int, int, int], bool] | None:
+    """A plugin version such as 0.1.4 or 0.1.5-beta: its numbers, and whether it is a pre-release. None if it is neither.
+
+    The text is never shown.
+    """
+    if not isinstance(value, str):
+        return None
+    match = _VERSION.fullmatch(value)
+    if match is None:
+        return None
+    numbers = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return numbers, match.group(4) is not None
+
+
+def _can_file_into_collections(version: tuple[tuple[int, int, int], bool]) -> bool:
+    """True from 0.1.4 on. A pre-release of 0.1.4 sorts before 0.1.4, as it does in semantic versioning."""
+    numbers, prerelease = version
+    if numbers == PLACEMENT_MIN_PLUGIN_VERSION:
+        return not prerelease
+    return numbers > PLACEMENT_MIN_PLUGIN_VERSION
+
+
+def _placement_problem(fetch: Transport, token: str) -> SaveResult | None:
+    """None when the bridge can file an item into a collection. Reads only: no grant is asked for and no item is written.
+
+    A status read that fails is reported as an unscoped save reports the same failure, so the message names the real
+    problem. A reply that is not 200, or that names no usable version, is unknown and is refused.
+    """
+    try:
+        reply = _send(fetch, "GET", STATUS_PATH, token)
+    except ZoteroError as exc:
+        if exc.code == "timeout":
+            # A status read never opens a grant, so the grant prompt warning in the grant timeout text does not apply.
+            return SaveResult(ERROR, 0, PLAIN_TIMEOUT_TEXT)
+        return SaveResult(BRIDGE_OFF if exc.code == "not_running" else ERROR, 0, exc.message)
+    if reply.status != 200:
+        return SaveResult(ERROR, 0, PLACEMENT_UNKNOWN_TEXT)
+    version = _parse_version(_json_object(reply.body).get("plugin_version"))
+    if version is None:
+        return SaveResult(ERROR, 0, PLACEMENT_UNKNOWN_TEXT)
+    if not _can_file_into_collections(version):
+        return SaveResult(ERROR, 0, PLACEMENT_OLD_TEXT)
+    return None
+
+
+def _create_item(
+    fetch: Transport,
+    token: str,
+    write_key: str,
+    item: ReadingItem,
+    collection_key: str | None = None,
+) -> _Refusal | None:
     """Write one item. None when Zotero created it. Otherwise the refusal that stops the batch.
 
     Only a 201 confirms the item. A 4xx is a refusal, so nothing was written. Anything else, including a 5xx, a 2xx other
     than 201, a 3xx, a timeout and a lost reply, may have created the item, so it is unknown and is not retried.
     """
     try:
-        reply = _send(fetch, "POST", ITEMS_PATH, token, grant_key=write_key, body=_item_body(item))
+        reply = _send(fetch, "POST", ITEMS_PATH, token, grant_key=write_key, body=_item_body(item, collection_key))
     except ZoteroError as exc:
         if exc.code == "not_running":
             return _Refusal(BRIDGE_OFF, ITEM_BRIDGE_STOPPED)
@@ -759,6 +832,7 @@ def _write_batch(
     expires_at: dt.datetime | None,
     landed: list[str],
     progress: SaveProgress,
+    collection_key: str | None = None,
 ) -> SaveResult:
     """Write the items in order. Each title Zotero confirms is appended to ``landed`` as soon as it is confirmed."""
     for number, item in enumerate(items, start=1):
@@ -769,7 +843,7 @@ def _write_batch(
             progress.started(index)
         except Exception:  # noqa: BLE001 - if the journal cannot record the write, the item is not sent
             return _stopped(items, len(landed), number, _Refusal(ERROR, ITEM_JOURNAL_FAILED))
-        refusal = _create_item(fetch, token, write_key, item)
+        refusal = _create_item(fetch, token, write_key, item, collection_key)
         try:
             progress.finished(index, _outcome(refusal))
         except Exception:  # noqa: BLE001 - a write that landed but was not recorded is reported as unknown
@@ -795,6 +869,7 @@ def _save_granted(
     landed: list[str],
     phase: _Phase,
     progress: SaveProgress,
+    collection_key: str | None = None,
 ) -> SaveResult:
     """The grant and the writes. The grant is ended on every path that got one, and the result says whether it ended."""
     try:
@@ -808,7 +883,7 @@ def _save_granted(
             message = f"{message} {KEY_MAY_STAY_LIVE_TEXT}"
         return SaveResult(state, 0, message)
     try:
-        result = _write_batch(fetch, token, write_key, items, clock, expires_at, landed, progress)
+        result = _write_batch(fetch, token, write_key, items, clock, expires_at, landed, progress, collection_key)
     except Exception:  # noqa: BLE001 - the batch must still report what landed, whatever failed
         phase.grant_ended = _end_grant(fetch, token, grant_id)
         return _unexpected_stop(items, landed, phase)
@@ -825,8 +900,12 @@ def save_items(
     token_path: Path | None = None,
     now: Callable[[], dt.datetime] | None = None,
     progress: SaveProgress | None = None,
+    collection_key: str | None = None,
 ) -> SaveResult:
     """Save the items as one batch: one grant, one write per item, then the grant ends. Always returns a result.
+
+    With ``collection_key`` every item is filed into that collection. A bridge older than 0.1.4, or one that reports no
+    version, is refused before any grant opens, so nothing lands outside the collection.
 
     The batch is checked before any request. A grant that is not granted at once writes nothing. A refusal stops the
     batch. The result names the titles that landed, the items not saved, and an item whose write got no clear answer,
@@ -836,6 +915,8 @@ def save_items(
     problem = _batch_problem(items)
     if problem is not None:
         return SaveResult(ERROR, 0, problem)
+    if collection_key is not None and COLLECTION_KEY.fullmatch(collection_key) is None:
+        return SaveResult(ERROR, 0, COLLECTION_KEY_TEXT)
     token = read_token(token_path)
     if token is None:
         return SaveResult(BRIDGE_OFF, 0, NO_TOKEN_TEXT)
@@ -845,7 +926,11 @@ def save_items(
     landed: list[str] = []
     phase = _Phase()
     try:
-        return _save_granted(items, fetch, token, clock, landed, phase, recorder)
+        if collection_key is not None:
+            refused = _placement_problem(fetch, token)
+            if refused is not None:
+                return refused
+        return _save_granted(items, fetch, token, clock, landed, phase, recorder, collection_key)
     except Exception:  # noqa: BLE001 - last line of defence: a save never raises into the panel
         return _unexpected_stop(items, landed, phase)
 

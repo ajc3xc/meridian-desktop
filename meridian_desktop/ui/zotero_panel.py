@@ -95,8 +95,8 @@ RESULT_COLUMNS = ("Title", "Authors", "Year", "Zotero key")
 SCOPE_HEADING = "Project scope: the Zotero collection each project searches"
 SCOPE_INTRO = (
     "Pick a project, then a library and a collection in your Zotero. Searches for that project read only that "
-    "collection. A project with no collection searches your whole library. Saves do not follow this yet, because "
-    "the bridge does not take a collection."
+    "collection. A project with no collection searches your whole library. Saves go into the project's collection "
+    "when it is in My Library and the bridge plugin is 0.1.4 or newer. Group collections cannot take saves yet."
 )
 SCOPE_PROJECT_LABEL = "Project"
 SCOPE_LIBRARY_LABEL = "Library"
@@ -376,7 +376,60 @@ def _record_save(journal: zotero_journal.SaveJournal, lines: list[str], result: 
     return _SaveDone(message, keep_from, held, problem, busy)
 
 
-def _run_save(journal: zotero_journal.SaveJournal, bridge: Any, items: list, lines: list[str]) -> _SaveDone:
+GROUP_FOLDER_TEXT = (
+    "Nothing was saved. This project's folder is in a group library, and the Zotero bridge files items only into "
+    "My Library. Choose a folder in My Library on the Zotero tab, then try again."
+)
+FOLDER_GONE_TEXT = (
+    "Nothing was saved. This project's folder is no longer in the Zotero scope file, so the save would not go there. "
+    "Choose the folder again on the Zotero tab, or clear it there to save without one, then try again."
+)
+
+
+SCOPE_UNREADABLE_SAVE_TEXT = (
+    "Nothing was saved. The Zotero scope file could not be read, so the save cannot tell which folder this project "
+    "uses. Fix or move that file in the desktop's settings folder, then try again."
+)
+SCOPE_SKIPPED_SAVE_TEXT = (
+    "Nothing was saved. This project's folder entry in the Zotero scope file is not valid, so the save cannot tell "
+    "where it goes. Choose the folder again on the Zotero tab, then try again."
+)
+
+
+def _save_placement(
+    current: zotero_scope.ScopeRead,
+    bound: frozenset[str] | set[str],
+    project_id: str,
+) -> tuple[str | None, str]:
+    """(the collection key a save files into, a refusal). A project with no folder gives (None, "").
+
+    ``current`` is the scope file read at save time, and it decides where a save goes. ``bound`` holds every project this
+    window has seen the file bind, or hold an unusable entry for, and only its own clear removes one. A save refuses when
+    the file is unreadable, since it cannot tell whether the project has a folder. It refuses when the file's entry for
+    the project is not valid. It refuses when a bound project is no longer bound in the file, so nothing goes to the
+    bridge's default collection by mistake. A group folder refuses, since the bridge files items only into My Library.
+    """
+    if current.unreadable:
+        return None, SCOPE_UNREADABLE_SAVE_TEXT
+    if not project_id:
+        return None, ""
+    if project_id in current.skipped:
+        return None, SCOPE_SKIPPED_SAVE_TEXT
+    scope = current.scopes.get(project_id)
+    if scope is None:
+        return (None, FOLDER_GONE_TEXT) if project_id in bound else (None, "")
+    if scope.library_type != zotero_scope.LIBRARY_USER:
+        return None, GROUP_FOLDER_TEXT
+    return scope.collection_key, ""
+
+
+def _run_save(
+    journal: zotero_journal.SaveJournal,
+    bridge: Any,
+    items: list,
+    lines: list[str],
+    collection_key: str | None = None,
+) -> _SaveDone:
     """One save, on a worker thread: the guard, the bridge, and the journal entries for what it did.
 
     The guard reads the journal under its lock, so a window whose list is out of date still refuses a line another window
@@ -390,7 +443,9 @@ def _run_save(journal: zotero_journal.SaveJournal, bridge: Any, items: list, lin
         return _SaveDone(SAVE_HELD_TEXT, 0, tuple(held))
     progress = _JournalProgress(journal, lines)
     try:
-        result = bridge.save_items(items, progress=progress)
+        # A project with a folder files its saves there. Without one the bridge's own choice stands, as before.
+        placed = {} if collection_key is None else {"collection_key": collection_key}
+        result = bridge.save_items(items, progress=progress, **placed)
     except Exception:  # noqa: BLE001 - a save that raises has no result, so every line is held back
         result = None
     return _record_save(journal, lines, result)
@@ -418,6 +473,10 @@ class ZoteroPanel(QWidget):
         # Which collection each project searches. Read once here, then kept in step with the file by every save and clear.
         self._scopes_path = zotero_scope.default_path() if scopes_path is None else scopes_path
         self._scope_read = zotero_scope.read_scopes(self._scopes_path)
+        # The projects this window has seen bound, or with an entry the file could not use. A save for one of them that the
+        # file no longer binds is refused until this window chooses or clears its folder. Only a clear removes a project.
+        self._bound_projects: set[str] = set()
+        self._learn_bindings(self._scope_read)
         self._libraries: list[zotero_client.ZoteroLibrary] = []
         self._collections_by_key: dict[str, str] = {}
         self._pending_collection_key = ""
@@ -622,6 +681,11 @@ class ZoteroPanel(QWidget):
     def _scope_for(self, project_id: str) -> zotero_scope.ProjectScope | None:
         return self._scope_read.scopes.get(project_id) if project_id else None
 
+    def _learn_bindings(self, read: zotero_scope.ScopeRead) -> None:
+        """Remember every project the file binds or holds an unusable entry for. Only a clear forgets one."""
+        self._bound_projects.update(read.scopes)
+        self._bound_projects.update(read.skipped)
+
     def _current_library(self) -> zotero_client.ZoteroLibrary | None:
         key = self._scope_library.currentData()
         if not isinstance(key, str):
@@ -790,6 +854,7 @@ class ZoteroPanel(QWidget):
             self._scope_message(NOT_SAVED_TEXT.format(exc.__class__.__name__))
             return
         self._scope_read = read
+        self._learn_bindings(read)
         message = SCOPE_SAVED_TEXT.format(self._scope_project.currentText(), name, library.name)
         self._scope_message(f"{message} {read.warning}" if read.warning else message)
         self._update_current_label()
@@ -808,6 +873,8 @@ class ZoteroPanel(QWidget):
             self._scope_message(NOT_SAVED_TEXT.format(exc.__class__.__name__))
             return
         self._scope_read = read
+        self._learn_bindings(read)
+        self._bound_projects.discard(project_id)
         message = SCOPE_CLEARED_TEXT.format(self._scope_project.currentText())
         self._scope_message(f"{message} {read.warning}" if read.warning else message)
         self._update_current_label()
@@ -1109,13 +1176,26 @@ class ZoteroPanel(QWidget):
             return
         # parse_lines makes one item per non-blank line, in order, so these lines line up with the items.
         lines = [line.strip() for line in text.splitlines() if line.strip()]
+        # The file decides where a save goes. This window's copy and its label follow the file, and the projects the file
+        # binds are remembered, so a later save still notices a folder that has gone.
+        current = zotero_scope.read_scopes(self._scopes_path)
+        self._scope_read = current
+        self._learn_bindings(current)
+        self._update_current_label()
+        collection_key, refusal = _save_placement(current, self._bound_projects, self._selected_project())
+        if refusal:
+            self._save_result.setText(refusal)
+            return
         self._pending_lines = lines
         self._saving = True
         self._save_input.setReadOnly(True)
         self._update_save_enabled()
         self._save_result.setText(SAVING_TEXT)
         # The guard, the bridge and every journal write run on the worker, so the window never waits on the journal lock.
-        self._start_read(SAVE, functools.partial(_run_save, self._journal, self._bridge, items, lines))
+        self._start_read(
+            SAVE,
+            functools.partial(_run_save, self._journal, self._bridge, items, lines, collection_key),
+        )
 
     def _on_save_ready(self, payload: tuple) -> None:
         done, failure = payload

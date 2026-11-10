@@ -25,6 +25,7 @@ import pytest
 from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton
 
 from meridian_desktop.ui.zotero_panel import (
+    FOLDER_GONE_TEXT,
     HELD_RELEASED_TEXT,
     SAVE_HELD_TEXT,
     SAVE_NO_RESULT_TEXT,
@@ -79,7 +80,7 @@ from meridian_desktop.zotero_client import (
     ZoteroError,
     ZoteroStatus,
 )
-from meridian_desktop import local_client, zotero_bridge, zotero_journal
+from meridian_desktop import local_client, zotero_bridge, zotero_journal, zotero_scope
 
 TOKEN = "zb-test-token-7f3c"
 WRITE_KEY = "zb-write-key-9a1d"
@@ -1414,6 +1415,92 @@ def _save_panel(qtbot, bridge, journal_path=None):
     qtbot.waitUntil(lambda: panel.findChild(QPushButton, "zotero-refresh").isEnabled(), timeout=5000)
     qtbot.waitUntil(lambda: panel._journal_loaded, timeout=5000)  # the journal is read on a worker thread
     return panel
+
+
+def test_a_retry_after_a_folder_is_removed_is_refused_again_and_never_saves_unfiled(qtbot, tmp_path, monkeypatch):
+    scopes_path = tmp_path / "zotero_project_scopes.json"
+    zotero_scope.save_scope(
+        zotero_scope.ProjectScope(
+            project_id="P1",
+            library_type=zotero_scope.LIBRARY_USER,
+            library_id="0",
+            library_name="My Library",
+            collection_key="ABCD2345",
+            collection_name="Notes",
+        ),
+        scopes_path,
+    )
+    bridge = PanelBridge()
+    panel = ZoteroPanel(
+        client=StubZotero(), bridge=bridge, journal_path=tmp_path / "journal.json", scopes_path=scopes_path
+    )
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitExposed(panel)
+    qtbot.waitUntil(lambda: panel.findChild(QPushButton, "zotero-refresh").isEnabled(), timeout=5000)
+    qtbot.waitUntil(lambda: panel._journal_loaded, timeout=5000)  # the journal is read on a worker thread
+    # Another window clears the folder. This window still knows that it had one.
+    zotero_scope.clear_scope("P1", scopes_path)
+    monkeypatch.setattr(panel, "_selected_project", lambda: "P1")
+    panel._save_input.setPlainText("First paper | https://example.org/one")
+    panel._on_save_clicked()
+    assert panel._save_result.text() == FOLDER_GONE_TEXT
+    panel._on_save_clicked()  # a plain retry, without choosing the folder again
+    assert panel._save_result.text() == FOLDER_GONE_TEXT
+    assert bridge.batches == []
+
+
+class KeyRecordingBridge(PanelBridge):
+    """The panel's bridge double. It records the placement each save was given, and reports every save as refused."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.placed: list[dict] = []
+
+    def save_items(self, items, progress=None, **kwargs):
+        self.placed.append(kwargs)
+        return SaveResult(ERROR, 0, "Nothing was saved.")
+
+
+def test_a_save_after_another_window_moves_the_folder_files_into_the_new_collection(qtbot, tmp_path, monkeypatch):
+    scopes_path = tmp_path / "zotero_project_scopes.json"
+    zotero_scope.save_scope(
+        zotero_scope.ProjectScope(
+            project_id="P1",
+            library_type=zotero_scope.LIBRARY_USER,
+            library_id="0",
+            library_name="My Library",
+            collection_key="ABCD2345",
+            collection_name="Notes",
+        ),
+        scopes_path,
+    )
+    bridge = KeyRecordingBridge()
+    panel = ZoteroPanel(
+        client=StubZotero(), bridge=bridge, journal_path=tmp_path / "journal.json", scopes_path=scopes_path
+    )
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitExposed(panel)
+    qtbot.waitUntil(lambda: panel.findChild(QPushButton, "zotero-refresh").isEnabled(), timeout=5000)
+    qtbot.waitUntil(lambda: panel._journal_loaded, timeout=5000)  # the journal is read on a worker thread
+    # Another window moves this project to a different collection in the same library.
+    zotero_scope.save_scope(
+        zotero_scope.ProjectScope(
+            project_id="P1",
+            library_type=zotero_scope.LIBRARY_USER,
+            library_id="0",
+            library_name="My Library",
+            collection_key="EFGH6789",
+            collection_name="Drafts",
+        ),
+        scopes_path,
+    )
+    monkeypatch.setattr(panel, "_selected_project", lambda: "P1")
+    panel._save_input.setPlainText("First paper | https://example.org/one")
+    panel._on_save_clicked()
+    qtbot.waitUntil(lambda: len(bridge.placed) > 0, timeout=5000)
+    assert bridge.placed == [{"collection_key": "EFGH6789"}]
 
 
 def _named(panel, cls, name):

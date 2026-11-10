@@ -13,7 +13,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +29,10 @@ LIBRARY_GROUP = "group"
 UNREADABLE_TEXT = "The Zotero scope file could not be read, so nothing was saved. A copy of it was kept beside it."
 UNREADABLE_NO_COPY_TEXT = "The Zotero scope file could not be read, and no copy could be kept. Nothing was saved."
 INVALID_TEXT = "That project, library or collection is not valid. Nothing was saved."
-SKIPPED_TEXT = "{} saved scope(s) in the Zotero scope file were not valid and were left out."
-KEPT_TEXT = "A copy of the file from before this change was kept beside it."
+SKIPPED_TEXT = (
+    "{} saved scope(s) in the Zotero scope file are not valid, so they are not used. They stay in the file as they were, "
+    "so fix them by hand."
+)
 _LIBRARY_ID = re.compile(r"[0-9]{1,12}")
 _COLLECTION_KEY = re.compile(r"[A-Z0-9]{8}")
 
@@ -86,11 +88,18 @@ def default_path() -> Path:
 
 @dataclass(frozen=True)
 class ScopeRead:
-    """What the file held. ``warning`` is the owner's text when entries were left out or the file could not be read."""
+    """What the file held. ``warning`` is the owner's text when entries are not valid or the file could not be read.
+
+    ``skipped`` names the projects whose entries are not valid. The file still says those projects have a folder, so a
+    save for one of them is refused rather than sent to the bridge's default collection. ``raw_skipped`` holds those
+    entries exactly as the file has them, so a write can put them back.
+    """
 
     scopes: dict[str, ProjectScope]
     warning: str
     unreadable: bool
+    skipped: frozenset[str] = frozenset()
+    raw_skipped: dict[str, Any] = field(default_factory=dict)
 
 
 def _from_entry(project_id: str, entry: Any) -> ProjectScope | None:
@@ -109,8 +118,11 @@ def _from_entry(project_id: str, entry: Any) -> ProjectScope | None:
         return None
 
 
-def _parse(raw: bytes) -> tuple[dict[str, ProjectScope], int] | None:
-    """The valid scopes and how many entries were left out. None when the file is not a scope file at all."""
+def _parse(raw: bytes) -> tuple[dict[str, ProjectScope], frozenset[str], dict[str, Any]] | None:
+    """The valid scopes, the project ids of the entries that are not valid, and those entries as the file has them.
+
+    None when the file is not a scope file at all.
+    """
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
@@ -118,14 +130,14 @@ def _parse(raw: bytes) -> tuple[dict[str, ProjectScope], int] | None:
     if not isinstance(value, dict) or not isinstance(value.get("scopes"), dict):
         return None
     scopes: dict[str, ProjectScope] = {}
-    left_out = 0
+    skipped: dict[str, Any] = {}
     for project_id, entry in value["scopes"].items():
         scope = _from_entry(project_id, entry)
         if scope is None:
-            left_out += 1
+            skipped[project_id] = entry
         else:
             scopes[project_id] = scope
-    return scopes, left_out
+    return scopes, frozenset(skipped), skipped
 
 
 def read_scopes(path: Path | None = None) -> ScopeRead:
@@ -140,24 +152,25 @@ def read_scopes(path: Path | None = None) -> ScopeRead:
     parsed = _parse(raw)
     if parsed is None:
         return ScopeRead({}, UNREADABLE_TEXT, True)
-    scopes, left_out = parsed
-    return ScopeRead(scopes, SKIPPED_TEXT.format(left_out) if left_out else "", False)
+    scopes, skipped, raw = parsed
+    return ScopeRead(scopes, SKIPPED_TEXT.format(len(skipped)) if skipped else "", False, skipped, raw)
 
 
-def _serialize(scopes: dict[str, ProjectScope]) -> bytes:
-    body = {
-        "version": FILE_VERSION,
-        "scopes": {
-            project_id: {
-                "library_type": scope.library_type,
-                "library_id": scope.library_id,
-                "library_name": scope.library_name,
-                "collection_key": scope.collection_key,
-                "collection_name": scope.collection_name,
-            }
-            for project_id, scope in sorted(scopes.items())
-        },
+def _serialize(scopes: dict[str, ProjectScope], kept: dict[str, Any]) -> bytes:
+    """The file's text. ``kept`` holds entries that were not valid, written back exactly as they were."""
+    entries: dict[str, Any] = {
+        project_id: {
+            "library_type": scope.library_type,
+            "library_id": scope.library_id,
+            "library_name": scope.library_name,
+            "collection_key": scope.collection_key,
+            "collection_name": scope.collection_name,
+        }
+        for project_id, scope in scopes.items()
     }
+    for project_id, raw in kept.items():
+        entries.setdefault(project_id, raw)
+    body = {"version": FILE_VERSION, "scopes": entries}
     return (json.dumps(body, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -188,18 +201,27 @@ def _keep_copy(target: Path) -> bool:
     return True
 
 
-def _change(path: Path | None, change: Callable[[dict[str, ProjectScope]], None]) -> ScopeRead:
+def _change(
+    path: Path | None,
+    change: Callable[[dict[str, ProjectScope]], None],
+    forget: str | None = None,
+) -> ScopeRead:
     target = default_path() if path is None else path
     current = read_scopes(target)
     if current.unreadable:
         raise ScopeError(UNREADABLE_TEXT if _keep_copy(target) else UNREADABLE_NO_COPY_TEXT)
-    if current.warning and not _keep_copy(target):
-        # Entries that are not valid would be dropped by this write, so the file is kept first or nothing is written.
-        raise ScopeError(UNREADABLE_NO_COPY_TEXT)
     scopes = dict(current.scopes)
     change(scopes)
-    _atomic_write(target, _serialize(scopes))
-    return ScopeRead(scopes, KEPT_TEXT if current.warning else "", False)
+    # Entries that are not valid are written back as they were, so the file still says their projects have a folder. A
+    # change that binds one of those projects replaces its entry, as the person asked. A clear of one of those projects
+    # removes its entry too (``forget``), since the person asked for that project to have no folder.
+    kept = {
+        project_id: raw
+        for project_id, raw in current.raw_skipped.items()
+        if project_id not in scopes and project_id != forget
+    }
+    _atomic_write(target, _serialize(scopes, kept))
+    return ScopeRead(scopes, SKIPPED_TEXT.format(len(kept)) if kept else "", False, frozenset(kept), kept)
 
 
 def save_scope(scope: ProjectScope, path: Path | None = None) -> ScopeRead:
@@ -217,4 +239,4 @@ def clear_scope(project_id: str, path: Path | None = None) -> ScopeRead:
     def drop(scopes: dict[str, ProjectScope]) -> None:
         scopes.pop(project_id, None)
 
-    return _change(path, drop)
+    return _change(path, drop, forget=project_id)

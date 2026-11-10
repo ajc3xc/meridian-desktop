@@ -185,15 +185,17 @@ def test_an_invalid_entry_is_left_out_with_a_warning_and_the_valid_ones_are_kept
     assert read.unreadable is False
 
 
-def test_a_save_over_a_file_with_invalid_entries_keeps_a_copy_first(tmp_path):
+def test_a_save_over_a_file_with_invalid_entries_keeps_them_as_they_were(tmp_path):
     path = tmp_path / "scopes.json"
-    raw = {"version": 1, "scopes": {"good": _valid_entry(), "bad": {"library_type": "nope"}}}
+    bad = {"library_type": "nope"}
+    raw = {"version": 1, "scopes": {"good": _valid_entry(), "bad": bad}}
     _write(path, json.dumps(raw))
-    original = path.read_bytes()
     read = zs.save_scope(_scope("new"), path)
-    assert _backup(path).read_bytes() == original
-    assert read.warning == zs.KEPT_TEXT
     assert set(zs.read_scopes(path).scopes) == {"good", "new"}
+    assert json.loads(path.read_text(encoding="utf-8"))["scopes"]["bad"] == bad
+    assert read.skipped == frozenset({"bad"})
+    assert read.warning == zs.SKIPPED_TEXT.format(1)
+    assert not _backup(path).exists()
 
 
 def test_a_save_over_a_clean_file_keeps_no_copy_and_says_nothing(tmp_path):
@@ -202,3 +204,41 @@ def test_a_save_over_a_clean_file_keeps_no_copy_and_says_nothing(tmp_path):
     read = zs.save_scope(_scope("p2"), path)
     assert not _backup(path).exists()
     assert read.warning == ""
+
+
+def test_clearing_a_project_whose_entry_is_not_valid_removes_that_entry(tmp_path):
+    path = tmp_path / "scopes.json"
+    bad = {
+        "library_type": "user",
+        "library_id": "0",
+        "library_name": "My Library",
+        "collection_key": "abcd2345",
+        "collection_name": "Notes",
+    }
+    _write(path, json.dumps({"version": 1, "scopes": {"good": _valid_entry(), "P1": bad}}))
+    read = zs.clear_scope("P1", path)
+    assert "P1" not in json.loads(path.read_text(encoding="utf-8"))["scopes"]
+    fresh = zs.read_scopes(path)
+    assert set(fresh.scopes) == {"good"}
+    assert fresh.skipped == frozenset()
+    assert read.skipped == frozenset()
+    assert read.warning == ""
+
+
+def test_binding_a_project_whose_entry_is_not_valid_replaces_that_entry(tmp_path):
+    path = tmp_path / "scopes.json"
+    bad = {
+        "library_type": "user",
+        "library_id": "0",
+        "library_name": "My Library",
+        "collection_key": "abcd2345",
+        "collection_name": "Notes",
+    }
+    _write(path, json.dumps({"version": 1, "scopes": {"P1": bad, "P2": bad}}))
+    written = zs.save_scope(_scope("P1"), path)
+    fresh = zs.read_scopes(path)
+    assert set(fresh.scopes) == {"P1"}
+    assert fresh.scopes["P1"].collection_key == _scope("P1").collection_key
+    assert fresh.skipped == frozenset({"P2"})
+    assert written.skipped == frozenset({"P2"})
+    assert written.warning == zs.SKIPPED_TEXT.format(1)
