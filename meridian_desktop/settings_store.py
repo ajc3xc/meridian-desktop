@@ -59,6 +59,45 @@ CONTROL_FLAG_KEYS = ("tunnel_control_enabled", "zotero_autostart", "local_server
 CONFIRMED_KEYS = ("confirmed_core_python", "confirmed_core_checkout", "confirmed_zotero_exe")
 
 
+# The owner limits on the Settings tab (the Limits group). Each is a whole number with a default and a range. A saved value
+# outside its range is clamped to the nearer end, and a value that is not a whole number reads as the default. The
+# server enforces them, and that enforcement is not active yet, so these values are stored and shown but stop nothing yet.
+@dataclass(frozen=True)
+class LimitSpec:
+    key: str
+    default: int
+    minimum: int
+    maximum: int
+
+
+LIMIT_SPECS = (
+    LimitSpec("limit_approval_total_mb", default=100, minimum=10, maximum=1000),
+    LimitSpec("limit_chat_total_mb", default=500, minimum=10, maximum=5000),
+    LimitSpec("limit_file_mb", default=50, minimum=1, maximum=500),
+    LimitSpec("limit_zip_download_mb", default=1000, minimum=10, maximum=10000),
+    LimitSpec("limit_writes", default=500, minimum=10, maximum=10000),
+    LimitSpec("limit_claims", default=20, minimum=1, maximum=200),
+)
+LIMIT_KEYS = tuple(spec.key for spec in LIMIT_SPECS)
+_LIMIT_BY_KEY = {spec.key: spec for spec in LIMIT_SPECS}
+
+
+def _limit_default(key: str) -> int:
+    """The default of one owner limit, read from LIMIT_SPECS so a field and its range can never drift apart."""
+    return _LIMIT_BY_KEY[key].default
+
+
+def clamp_limit(key: str, value: int) -> int:
+    """The value moved into the range of one owner limit: below the minimum gives the minimum, above the maximum the maximum.
+
+    Raises ValueError when the key is not an owner limit.
+    """
+    spec = _LIMIT_BY_KEY.get(key)
+    if spec is None:
+        raise ValueError(f"unknown limit: {key}")
+    return min(max(value, spec.minimum), spec.maximum)
+
+
 @dataclass(frozen=True)
 class Settings:
     mode: str = DEFAULT_MODE
@@ -125,6 +164,15 @@ class Settings:
     # The SSH host names the GPUs tab reads over ssh (meridian_desktop/gpu_jobs.py). Only names from the owner's own ssh
     # config, never a key or a password. save() writes the key only when there is a name.
     gpu_hosts: tuple[str, ...] = ()
+    # The owner limits on the Settings tab's Limits group (LIMIT_SPECS). Each default is its LIMIT_SPECS entry. save()
+    # writes a limit only when it differs from its default. These are stored only: enforcement happens on the server
+    # and is not active yet.
+    limit_approval_total_mb: int = _limit_default("limit_approval_total_mb")
+    limit_chat_total_mb: int = _limit_default("limit_chat_total_mb")
+    limit_file_mb: int = _limit_default("limit_file_mb")
+    limit_zip_download_mb: int = _limit_default("limit_zip_download_mb")
+    limit_writes: int = _limit_default("limit_writes")
+    limit_claims: int = _limit_default("limit_claims")
 
 
 # The default of each switch, read from Settings so the two can never drift apart.
@@ -345,6 +393,21 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
             values[key] = False
             problems.append(f"{key} must be true or false; using false")
 
+    # The owner limits: an absent key means the default, with no warning. Only a whole number is accepted, and any other
+    # value is ignored with a warning, so the default holds. A whole number outside its range is clamped to the nearer
+    # end, and the owner is told the value that is used.
+    for spec in LIMIT_SPECS:
+        if spec.key not in data:
+            continue
+        value = data[spec.key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            problems.append(f"{spec.key} must be a whole number; using its default")
+            continue
+        clamped = clamp_limit(spec.key, value)
+        if clamped != value:
+            problems.append(f"{spec.key} must be between {spec.minimum} and {spec.maximum}; using {clamped}")
+        values[spec.key] = clamped
+
     return replace(Settings(), **values), problems
 
 
@@ -485,6 +548,12 @@ class SettingsStore:
             if data[key] == CONTROL_FLAG_DEFAULTS[key]:
                 # The default is never written, so a file that keeps the defaults has no such key.
                 del data[key]
+        for spec in LIMIT_SPECS:
+            # A limit is always written inside its range, so the file never holds a value that load would have to correct.
+            data[spec.key] = clamp_limit(spec.key, data[spec.key])
+            if data[spec.key] == spec.default:
+                # The default limit is never written, so a file that keeps the default limits has no such key.
+                del data[spec.key]
         payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=directory)
         try:
@@ -586,5 +655,28 @@ class SettingsStore:
             local_server_autostart=False,
             tunnel_autostart=False,
         )
+        self.save(updated)
+        return updated
+
+    def set_limit(self, key: str, value: int) -> Settings:
+        """Clamp one owner limit to its range and save it. Every other field in the saved file is kept.
+
+        Raises ValueError with plain words when the key is not an owner limit or the value is not a whole number. A refused
+        call writes nothing. A value outside the range is saved as the nearer end of the range, and the saved settings are
+        returned.
+
+        A settings file that is not a JSON object is never rebuilt from defaults. It is copied aside when that works, nothing
+        is written, and SettingsUnreadable is raised, as set_gpu_hosts does.
+        """
+        if key not in _LIMIT_BY_KEY:
+            raise ValueError(f"unknown limit: {key}")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be a whole number.")
+        if self.is_unreadable():
+            copied = self._keep_copy()
+            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT if copied else SETTINGS_UNREADABLE_NO_COPY_TEXT)
+        # A readable file with one bad value is copied aside before the write, as the other writers do.
+        self.keep_unreadable_copy()
+        updated = replace(self.load().settings, **{key: clamp_limit(key, value)})
         self.save(updated)
         return updated

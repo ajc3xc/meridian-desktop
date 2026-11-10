@@ -10,7 +10,10 @@
    Every tool is on by default. The choice is saved in the settings file and applied at the next start.
 6. Connections: the owner's own MCP connectors, each with an on switch, a tunnel switch and Remove, and a form that adds one
    (ui/connections_section.py). Written to Claude Desktop and Codex at the next start. Nothing reaches claude.ai from here.
-7. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
+7. Limits: one slider for each owner limit, with its saved value beside it (ui/limits_section.py). Each value is kept in
+   the settings file and clamped to its range there. Enforcement happens on the server and is not active yet.
+   It starts folded.
+8. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
    It starts folded. The Logs view reads nothing until its Refresh is pressed.
 
 The hosted URL is checked with hosted_client.validate_base_url before anything is written. Sign in with browser runs the
@@ -70,6 +73,7 @@ from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.keys_section import KeysSection
 from meridian_desktop.ui.latex_panel import LatexPanel
+from meridian_desktop.ui.limits_section import LIMITS_TITLE, LimitsSection
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
@@ -435,6 +439,7 @@ class SettingsTab(QWidget):
         column.addWidget(self._build_tools(content))
         column.addWidget(self._build_connections(content))
         column.addWidget(self._build_gpu_hosts(content))
+        column.addWidget(self._build_limits(content))
         column.addWidget(self._build_diagnostics(content))
         column.addStretch(1)
 
@@ -604,6 +609,14 @@ class SettingsTab(QWidget):
         group.add_widget(self._gpu_hosts_message)
         return group
 
+    def _build_limits(self, parent: QWidget) -> CollapsibleGroup:
+        """The owner limits: one slider each, saved through the store. Enforcement is not active yet."""
+        group = CollapsibleGroup("limits", LIMITS_TITLE, parent, expanded=False)
+        # The block reads the saved values on refresh and saves each slider the owner moves.
+        self._limits = LimitsSection(self._store, group.body())
+        group.add_widget(self._limits)
+        return group
+
     def _build_diagnostics(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("diagnostics", DIAGNOSTICS_TITLE, parent, expanded=False)
         group.add_widget(_label(group.body(), "diagnostics-intro", DIAGNOSTICS_INTRO))
@@ -655,6 +668,7 @@ class SettingsTab(QWidget):
         self._keys.refresh()
         self._tools.refresh()
         self._connections.refresh()
+        self._limits.refresh()
         self._settings_file.setText(SETTINGS_FILE_TEXT.format(path=self._store.path))
         _set_message(self._load_warning, LOAD_WARNING_TEXT.format(warning=result.warning) if result.warning else "")
 
