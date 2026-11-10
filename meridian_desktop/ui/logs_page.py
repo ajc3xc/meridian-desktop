@@ -1,11 +1,14 @@
 """Logs view under Settings, Diagnostics: a read-only look at the desktop, control, tunnel and runner logs.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The page reads nothing when it
-is built or shown, starts no timer and polls nothing. It reads only when Refresh is pressed, and
-the reads run on the thread pool, so the UI thread never blocks. The reads are:
+is built. It reads once, on its first show (the Diagnostics group shows it), and after that it reads
+only when Refresh is pressed. It starts no timer and polls nothing. The reads run on the thread pool,
+so the UI thread never blocks. The reads are:
 
 - the desktop log: the bounded, redacted tail that desktop_log.read_desktop_log_tail returns;
-- the control log: the bounded, redacted tail that runner_controls.read_control_log_tail returns, one line per Start or Stop;
+- the control log: the bounded, redacted tail that runner_controls.read_control_log_tail returns, one line per Start or Stop.
+  Its lines are grouped by launch of the local server (log_launches.py). A launch picker and a search over the shown
+  lines only redraw the text already read, so they read nothing;
 - the tunnel log: the bounded, redacted tail that log_tail.read_tunnel_log_tail returns;
 - the runner log: the tail-log reply of the runner client. runner_client passes only the read
   verbs, so no mutating verb is ever run from this page.
@@ -29,9 +32,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from PySide6.QtCore import QRunnable, Qt, QThreadPool, Slot
-from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QShowEvent
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop.desktop_log import read_desktop_log_tail, redact_text
+from meridian_desktop.log_launches import GroupedLog, group_by_launch, launch_view
 from meridian_desktop.log_tail import (
     STATUS_NO_LOG_YET,
     STATUS_OK,
@@ -44,7 +49,7 @@ from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
 from meridian_desktop.ui.text import make_selectable
 
 REFRESH_BUTTON_TEXT = "Refresh"
-INTRO_UNREAD_TEXT = "Press Refresh to read the end of each log. Nothing is read until then."
+INTRO_UNREAD_TEXT = "Nothing is read until this view is first shown. Then each log is read once. Press Refresh to read them again."
 INTRO_READING_TEXT = "Reading the logs..."
 INTRO_SHOWN_TEXT = "Each log is shown read-only, with secret-shaped values redacted. Press Refresh to read them again."
 DESKTOP_HEADING = "Desktop log:"
@@ -59,6 +64,9 @@ NO_RESULT = "NoResult"
 NOTHING_HERE_TEXT = "Nothing here yet."
 # The owner starts the tunnel from the Tunnel panel in Settings (Start asks first). No terminal command is typed here.
 START_TUNNEL_TEXT = "Start the tunnel from the Tunnel panel in Settings, then press Refresh here."
+# The launch picker's first entry, which shows every launch of the local server at once.
+ALL_LAUNCHES_TEXT = "All launches"
+CONTROL_SEARCH_PLACEHOLDER = "Search the shown lines"
 # The control log gets one line for each Start or Stop of the local server or the tunnel.
 START_CONTROL_TEXT = (
     "Press Start or Stop in Local server and startup, or in the Tunnel panel in Settings, then press Refresh here."
@@ -271,6 +279,10 @@ class LogsPage(QWidget):
         self.setObjectName("logs-page")
         self._reads = _Reads(desktop_log, tunnel_log, runner, control_log)
         self._busy = False
+        # The first show starts one pass. Later shows start none, so only Refresh reads again.
+        self._read_on_first_show = True
+        # The control log as last read, grouped by launch. None when the control pane shows no grouped lines.
+        self._control_grouped: GroupedLog | None = None
         # Identifies this page's passes. A plain object, so a job can hold it without holding the page.
         self._owner = object()
         self._generation = 0
@@ -280,6 +292,13 @@ class LogsPage(QWidget):
     @property
     def busy(self) -> bool:
         return self._busy
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's name for the override
+        """Read once, on the first show. A later show reads nothing, and only Refresh reads again."""
+        super().showEvent(event)
+        if self._read_on_first_show:
+            self._read_on_first_show = False
+            self._start_pass()
 
     # ----------------------------------------------------------- layout
 
@@ -296,6 +315,25 @@ class LogsPage(QWidget):
 
         self._control_heading = _heading(self, "logs-control-heading", f"{CONTROL_HEADING} not read yet.")
         layout.addWidget(self._control_heading)
+        # Says which rule grouped the lines below, once the control log has been read.
+        self._control_rule = _heading(self, "logs-control-rule", "")
+        layout.addWidget(self._control_rule)
+        launch_row = QHBoxLayout()
+        self._control_pick = QComboBox(self)
+        self._control_pick.setObjectName("logs-control-launch")
+        self._control_pick.setAccessibleName("Launch")
+        self._control_pick.setEnabled(False)
+        self._control_search = QLineEdit(self)
+        self._control_search.setObjectName("logs-control-search")
+        self._control_search.setPlaceholderText(CONTROL_SEARCH_PLACEHOLDER)
+        self._control_search.setAccessibleName(CONTROL_SEARCH_PLACEHOLDER)
+        self._control_search.setEnabled(False)
+        launch_row.addWidget(self._control_pick, 1)
+        launch_row.addWidget(self._control_search, 2)
+        layout.addLayout(launch_row)
+        # Both controls only redraw the control log already read. Neither one starts a read.
+        self._control_pick.currentIndexChanged.connect(self._render_control)
+        self._control_search.textChanged.connect(self._render_control)
         self._control_text = _pane(self, "logs-control-text")
         layout.addWidget(self._control_text, 1)
 
@@ -319,6 +357,10 @@ class LogsPage(QWidget):
 
     @Slot()
     def _on_refresh_clicked(self) -> None:
+        self._start_pass()
+
+    def _start_pass(self) -> None:
+        """Start one pass of the reads on the thread pool. A pass already running is not started again."""
         if self._busy:
             return
         self._busy = True
@@ -353,7 +395,7 @@ class LogsPage(QWidget):
         self._tunnel_heading.setText(f"{TUNNEL_HEADING} {READING_TEXT}")
         self._runner_heading.setText(f"{RUNNER_HEADING} {READING_TEXT}")
         self._desktop_text.setPlainText("")
-        self._control_text.setPlainText("")
+        self._clear_control_view()
         self._tunnel_text.setPlainText("")
         self._runner_text.setPlainText("")
 
@@ -365,6 +407,7 @@ class LogsPage(QWidget):
         self._tunnel_heading.setText(TUNNEL_HEADING)
         self._runner_heading.setText(RUNNER_HEADING)
         self._desktop_text.setPlainText(text)
+        self._clear_control_view()
         self._control_text.setPlainText(text)
         self._tunnel_text.setPlainText(text)
         self._runner_text.setPlainText(text)
@@ -380,15 +423,7 @@ class LogsPage(QWidget):
             failure=outcome.failures.get("desktop", NO_RESULT),
             texts=DESKTOP_TEXT,
         )
-        self._show_file_pane(
-            self._control_heading,
-            self._control_text,
-            title=CONTROL_HEADING,
-            label="control log",
-            tail=outcome.control,
-            failure=outcome.failures.get("control", NO_RESULT),
-            texts=CONTROL_TEXT,
-        )
+        self._show_control(outcome.control, outcome.failures.get("control", NO_RESULT))
         self._show_file_pane(
             self._tunnel_heading,
             self._tunnel_text,
@@ -399,6 +434,58 @@ class LogsPage(QWidget):
             texts=TUNNEL_TEXT,
         )
         self._show_runner(outcome)
+
+    def _show_control(self, tail: object, failure: str) -> None:
+        """The control pane. Its lines are grouped by launch when it has any. Otherwise it shows the same fixed text as before."""
+        if not isinstance(tail, LogTail):
+            self._clear_control_view()
+            self._control_heading.setText(CONTROL_HEADING)
+            self._control_text.setPlainText(FAILED_TEXT.format("control log", failure))
+            return
+        self._control_heading.setText(f"{CONTROL_HEADING} {tail.path}")
+        if tail.status != STATUS_OK or not tail.lines:
+            self._clear_control_view()
+            self._control_text.setPlainText(log_pane_text(tail, CONTROL_TEXT))
+            return
+        grouped = group_by_launch([redact_text(line) for line in tail.lines])
+        self._control_grouped = grouped
+        self._control_rule.setText(grouped.rule_text)
+        self._fill_control_picker(grouped)
+        self._render_control()
+
+    def _clear_control_view(self) -> None:
+        """Forget the grouped control log, clear its pane, and turn the launch picker and search off."""
+        self._control_grouped = None
+        self._control_rule.setText("")
+        self._control_pick.blockSignals(True)
+        self._control_pick.clear()
+        self._control_pick.blockSignals(False)
+        self._control_pick.setEnabled(False)
+        self._control_search.setEnabled(False)
+        self._control_text.setPlainText("")
+
+    def _fill_control_picker(self, grouped: GroupedLog) -> None:
+        """Offer the launch picker only when there is more than one group. Its first entry shows every launch."""
+        picker = self._control_pick
+        picker.blockSignals(True)
+        picker.clear()
+        many = len(grouped.groups) > 1
+        if many:
+            picker.addItem(ALL_LAUNCHES_TEXT, None)
+            for group in grouped.groups:
+                picker.addItem(group.label, group.key)
+        picker.setCurrentIndex(0)
+        picker.blockSignals(False)
+        picker.setEnabled(many)
+        self._control_search.setEnabled(True)
+
+    def _render_control(self, *_args: object) -> None:
+        """Draw the grouped control log for the chosen launch and the search text. It redraws what was read and reads nothing."""
+        grouped = self._control_grouped
+        if grouped is None:
+            return
+        selected = self._control_pick.currentData()
+        self._control_text.setPlainText(launch_view(grouped, selected=selected, query=self._control_search.text()))
 
     def _show_file_pane(
         self,

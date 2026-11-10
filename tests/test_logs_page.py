@@ -54,6 +54,7 @@ from meridian_desktop.ui.logs_page import (
     DESKTOP_MISSING_TEXT,
     DESKTOP_UNREADABLE_TEXT,
     EMPTY_TUNNEL_TEXT,
+    INTRO_SHOWN_TEXT,
     INTRO_UNREAD_TEXT,
     NO_LOG_TAIL_TEXT,
     REFRESH_BUTTON_TEXT,
@@ -78,13 +79,13 @@ FAKE_RUNNER = "sk_meridian_fake-runner-0004"
 FAKE_PASSWORD = "fake-password-0005"
 FAKE_API_KEY = "fake-api-key-0006"
 SECRETS = (FAKE_QUERY_TOKEN, FAKE_BEARER, FAKE_BARE, FAKE_RUNNER, FAKE_PASSWORD, FAKE_API_KEY)
-# Every input control except the one Refresh button, which the button test checks by name.
+# Every input control except the one Refresh button, which the button test checks by name. The line edit and the combo box
+# are not listed here: the page has one of each, the control pane's search and launch picker, and the read-only test
+# checks that they are only those two. Neither one writes a log. They only redraw the control log already read.
 WRITE_CONTROLS = (
     QToolButton,
     QCheckBox,
     QRadioButton,
-    QLineEdit,
-    QComboBox,
     QAbstractSpinBox,
 )
 # Words a clear, delete, rotate or truncate control would carry, and the runner's mutating verbs.
@@ -194,6 +195,8 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
         assert word not in buttons[0].text().lower()
     for widget_type in WRITE_CONTROLS:
         assert page.findChildren(widget_type) == [], widget_type.__name__
+    assert [edit.objectName() for edit in page.findChildren(QLineEdit)] == ["logs-control-search"]
+    assert [box.objectName() for box in page.findChildren(QComboBox)] == ["logs-control-launch"]
     for pane in page.findChildren(QPlainTextEdit):
         assert pane.isReadOnly(), pane.objectName()
 
@@ -211,19 +214,17 @@ def test_logs_page_is_read_only_and_plain_text(qtbot):
         assert label.textFormat() == Qt.TextFormat.PlainText, label.objectName()
 
 
-def test_nothing_is_read_until_refresh_is_pressed(qtbot):
+def test_nothing_is_read_before_the_first_show(qtbot):
     desktop = Recorder(_tail_ok(["line"], "desktop.log"))
     tunnel = Recorder(_tail_ok(["line"]))
     runner = Recorder(_runner_ok("line"))
-    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop)
+    control = Recorder(_tail_ok(["line"], "control.log"))
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop, control=control)
 
-    page.show()
-    qtbot.waitExposed(page)
     qtbot.wait(200)
 
-    assert desktop.calls == 0
-    assert tunnel.calls == 0
-    assert runner.calls == 0
+    assert [read.calls for read in (desktop, tunnel, runner, control)] == [0, 0, 0, 0]
+    assert not page.busy
     assert _label(page, "logs-desktop-heading") == "Desktop log: not read yet."
     assert _label(page, "logs-tunnel-heading") == "Tunnel log: not read yet."
     assert _label(page, "logs-runner-heading") == "Runner log (tail-log): not read yet."
@@ -231,6 +232,35 @@ def test_nothing_is_read_until_refresh_is_pressed(qtbot):
     assert _text(page, "logs-tunnel-text") == ""
     assert _text(page, "logs-runner-text") == ""
     assert _label(page, "logs-intro") == INTRO_UNREAD_TEXT
+
+
+def test_the_first_show_reads_each_log_once_and_later_shows_read_nothing(qtbot):
+    desktop = Recorder(_tail_ok(["desk line"], "desktop.log"))
+    tunnel = Recorder(_tail_ok(["tunnel line"]))
+    runner = Recorder(_runner_ok("runner line"))
+    control = Recorder(_tail_ok(["control line"], "control.log"))
+    page = _page(qtbot, tunnel=tunnel, runner=runner, desktop=desktop, control=control)
+    reads = (desktop, tunnel, runner, control)
+
+    page.show()
+    qtbot.waitUntil(lambda: not page.busy and page.findChild(QPushButton, "logs-refresh").isEnabled(), timeout=5000)
+
+    assert [read.calls for read in reads] == [1, 1, 1, 1]
+    assert _text(page, "logs-desktop-text") == "desk line"
+    assert _text(page, "logs-tunnel-text") == "tunnel line"
+    assert _text(page, "logs-runner-text") == "runner line"
+    assert _text(page, "logs-control-text") == "control line"
+    assert _label(page, "logs-intro") == INTRO_SHOWN_TEXT
+
+    page.hide()
+    page.show()
+    qtbot.wait(100)
+
+    assert [read.calls for read in reads] == [1, 1, 1, 1]
+
+    _press(qtbot, page)
+
+    assert [read.calls for read in reads] == [2, 2, 2, 2]
 
 
 def test_all_three_panes_show_their_bounded_tails_and_the_runner_tail(qtbot, tmp_path):
@@ -588,6 +618,20 @@ def test_refresh_button_is_disabled_while_reading(qtbot):
     assert not button.isEnabled()
     gate.set()
     qtbot.waitUntil(lambda: not page.busy and button.isEnabled(), timeout=5000)
+    assert tunnel.calls == 1
+
+
+def test_a_pass_is_not_started_while_another_is_still_running(qtbot):
+    gate = threading.Event()
+    tunnel = Recorder(_tail_ok(["tunnel line"]), gate=gate)
+    page = _page(qtbot, tunnel=tunnel)
+
+    page._start_pass()
+    assert page.busy
+    page._start_pass()  # refused while the first pass runs, so no second read starts
+
+    gate.set()
+    qtbot.waitUntil(lambda: not page.busy, timeout=5000)
     assert tunnel.calls == 1
 
 

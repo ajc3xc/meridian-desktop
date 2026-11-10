@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton
+from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton
 
 from _fakes import MemoryKeyring
+from meridian_desktop.log_launches import GAP_RULE_TEXT, MARKER_RULE_TEXT, NO_MATCH_TEXT, NONE_RULE_TEXT
 from meridian_desktop.log_tail import (
     DEFAULT_MAX_BYTES,
     NO_LOG_YET_TEXT,
@@ -25,6 +26,7 @@ from meridian_desktop.runner_controls import LOG_NAME, default_log_path, read_co
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.logs_page import (
+    ALL_LAUNCHES_TEXT,
     CONTROL_EMPTY_TEXT,
     CONTROL_MISSING_TEXT,
     CONTROL_UNREADABLE_TEXT,
@@ -167,3 +169,153 @@ def test_default_reader_reads_the_control_log_beside_the_settings_file(monkeypat
     assert tail.status == STATUS_OK
     assert tail.path == path
     assert tail.lines == ("start scope=local outcome=confirmed pid=7",)
+
+
+# A control log with one tunnel stop before any local launch, two local launches (the second one failed), and a tunnel
+# start inside the first launch.
+LAUNCH_LINES = [
+    "2026-11-10T09:00:00+00:00 stop scope=tunnel outcome=confirmed pid=9",
+    "2026-11-10T10:00:00+00:00 start scope=local outcome=confirmed pid=101",
+    "2026-11-10T10:05:00+00:00 start scope=tunnel outcome=confirmed pid=55",
+    "2026-11-10T11:00:00+00:00 stop scope=local outcome=confirmed pid=101",
+    "2026-11-10T12:00:00+00:00 start scope=local outcome=failed pid=not reported",
+]
+BEFORE_TEXT = "Lines before the first local start line"
+FIRST_LABEL = "Launch 1 of 2: started 2026-11-10T10:00:00+00:00, outcome confirmed, pid 101"
+SECOND_LABEL = "Launch 2 of 2: started 2026-11-10T12:00:00+00:00, outcome failed, pid not reported"
+
+
+class _CountingControl:
+    """A fake control-log read. It returns the same lines each time, and counts how many times it was called."""
+
+    def __init__(self, lines):
+        self.lines = list(lines)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return LogTail(STATUS_OK, Path("control.log"), tuple(self.lines), "")
+
+
+def _picker(page):
+    return page.findChild(QComboBox, "logs-control-launch")
+
+
+def _search(page):
+    return page.findChild(QLineEdit, "logs-control-search")
+
+
+def test_control_pane_groups_the_lines_by_local_launch_and_names_the_rule(qtbot):
+    control = _CountingControl(LAUNCH_LINES)
+    page = _page(qtbot, control=control)
+
+    _press(qtbot, page)
+
+    assert control.calls == 1
+    assert _label(page, "logs-control-rule") == MARKER_RULE_TEXT
+    assert _text(page, "logs-control-text") == "\n\n".join(
+        [
+            f"{BEFORE_TEXT}\n{LAUNCH_LINES[0]}",
+            f"{FIRST_LABEL}\n{LAUNCH_LINES[1]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[3]}",
+            f"{SECOND_LABEL}\n{LAUNCH_LINES[4]}",
+        ]
+    )
+    assert _picker(page).isEnabled()
+    assert [_picker(page).itemText(index) for index in range(_picker(page).count())] == [
+        ALL_LAUNCHES_TEXT,
+        BEFORE_TEXT,
+        FIRST_LABEL,
+        SECOND_LABEL,
+    ]
+
+
+def test_picking_one_launch_redraws_the_text_and_reads_nothing(qtbot):
+    control = _CountingControl(LAUNCH_LINES)
+    page = _page(qtbot, control=control)
+    _press(qtbot, page)
+
+    _picker(page).setCurrentIndex(3)  # All, the lines before, launch 1, launch 2
+
+    assert _text(page, "logs-control-text") == f"{SECOND_LABEL}\n{LAUNCH_LINES[4]}"
+    assert control.calls == 1
+
+
+def test_search_narrows_the_shown_lines_within_the_chosen_launch_and_reads_nothing(qtbot):
+    control = _CountingControl(LAUNCH_LINES)
+    page = _page(qtbot, control=control)
+    _press(qtbot, page)
+    assert _search(page).isEnabled()
+
+    _search(page).setText("outcome=FAILED")
+    assert _text(page, "logs-control-text") == f"{SECOND_LABEL}\n{LAUNCH_LINES[4]}"
+
+    _picker(page).setCurrentIndex(2)  # launch 1, where the tunnel start line is
+    _search(page).setText("tunnel")
+    assert _text(page, "logs-control-text") == f"{FIRST_LABEL}\n{LAUNCH_LINES[2]}"
+
+    _search(page).setText("nothing of this kind")
+    assert _text(page, "logs-control-text") == NO_MATCH_TEXT
+
+    _search(page).setText("")
+    assert _text(page, "logs-control-text") == f"{FIRST_LABEL}\n{LAUNCH_LINES[1]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[3]}"
+    assert control.calls == 1
+
+
+def test_a_log_with_no_launch_line_and_no_time_has_no_picker_and_no_heading(qtbot):
+    page = _page(qtbot, control=_CountingControl(["plain one", "plain two"]))
+
+    _press(qtbot, page)
+
+    assert _label(page, "logs-control-rule") == NONE_RULE_TEXT
+    assert _text(page, "logs-control-text") == "plain one\nplain two"
+    assert not _picker(page).isEnabled()
+    assert _picker(page).count() == 0
+    assert _search(page).isEnabled()
+
+
+def test_a_tail_with_no_local_start_line_is_grouped_by_the_timestamp_gap(qtbot):
+    lines = [
+        "2026-11-10T08:00:00+00:00 stop scope=tunnel outcome=confirmed pid=9",
+        "2026-11-10T11:00:00+00:00 stop scope=tunnel outcome=confirmed pid=9",
+    ]
+    page = _page(qtbot, control=_CountingControl(lines))
+
+    _press(qtbot, page)
+
+    assert _label(page, "logs-control-rule") == GAP_RULE_TEXT.format(minutes=30)
+    assert [_picker(page).itemText(index) for index in range(_picker(page).count())] == [
+        ALL_LAUNCHES_TEXT,
+        "Run 1 of 2: first entry 2026-11-10T08:00:00+00:00",
+        "Run 2 of 2: first entry 2026-11-10T11:00:00+00:00",
+    ]
+
+
+def test_the_launch_picker_and_search_are_off_until_a_control_log_is_read(qtbot, tmp_path):
+    page = _page(qtbot, control=lambda: read_control_log_tail(tmp_path / "absent" / LOG_NAME))
+    assert not _picker(page).isEnabled()
+    assert not _search(page).isEnabled()
+    # Text typed into the search before any read draws nothing, and breaks nothing.
+    _search(page).setText("typed before any read")
+    assert _text(page, "logs-control-text") == ""
+
+    _press(qtbot, page)
+
+    assert _text(page, "logs-control-text") == CONTROL_MISSING_TEXT
+    assert _label(page, "logs-control-rule") == ""
+    assert not _picker(page).isEnabled()
+    assert not _search(page).isEnabled()
+
+
+def test_grouped_control_lines_are_redacted_before_they_are_shown(qtbot):
+    lines = [
+        "2026-11-10T10:00:00+00:00 start scope=local outcome=confirmed pid=101",
+        f"Authorization: Bearer {FAKE_BEARER}",
+    ]
+    page = _page(qtbot, control=_CountingControl(lines))
+
+    _press(qtbot, page)
+
+    shown = _text(page, "logs-control-text")
+    assert FAKE_BEARER not in shown
+    assert "Bearer [redacted]" in shown
+    assert "Launch 1 of 1" in shown
