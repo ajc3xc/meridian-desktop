@@ -11,16 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QLabel, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QGridLayout, QLabel, QSlider, QVBoxLayout, QWidget
 
 from meridian_desktop.settings_store import LIMIT_SPECS, SettingsStore, SettingsUnreadable
 from meridian_desktop.ui.text import make_selectable
 
 LIMITS_TITLE = "Limits"
 LIMITS_INTRO = (
-    "These limits are saved in the settings file. Enforcement happens on the server, and enforcement is not active yet. "
-    "Until it is, these values do not stop an upload, a write, a claim or a download."
+    "Downloads of any size are never asked about or blocked, and virus scanning always applies. The total-size note only "
+    "shows a message. The other limits are saved in the settings file. Enforcement happens on the server, and it is not "
+    "active yet, so these values do not stop an upload, a write, a claim or a download."
 )
+APPROVAL_ENABLED_TEXT = "Show the total-file-size note"
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written ({name})."
 
 
@@ -34,7 +36,7 @@ class LimitRow:
 
 
 LIMIT_ROWS = (
-    LimitRow("limit_approval_total_mb", "Total file size before approval", "MB"),
+    LimitRow("limit_approval_total_mb", "Total file size note at", "MB"),
     LimitRow("limit_chat_total_mb", "Per-chat cap (MB in one chat)", "MB"),
     LimitRow("limit_file_mb", "Per-file size cap", "MB"),
     LimitRow("limit_zip_download_mb", "Estimated zip download cap", "MB"),
@@ -67,6 +69,11 @@ class LimitsSection(QWidget):
         intro.setObjectName("limits-intro")
         intro.setWordWrap(True)
         column.addWidget(intro)
+
+        self._approval_enabled = QCheckBox(APPROVAL_ENABLED_TEXT, self)
+        self._approval_enabled.setObjectName("limits-approval-enabled")
+        self._approval_enabled.toggled.connect(self._on_approval_enabled_toggled)
+        column.addWidget(self._approval_enabled)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -121,6 +128,9 @@ class LimitsSection(QWidget):
     def refresh(self) -> None:
         """Show the saved values. Showing them never saves anything."""
         settings = self._store.load().settings
+        self._approval_enabled.blockSignals(True)  # showing the saved switch must not save it again
+        self._approval_enabled.setChecked(settings.limit_approval_enabled)
+        self._approval_enabled.blockSignals(False)
         for row in LIMIT_ROWS:
             value = getattr(settings, row.key)
             slider = self._sliders[row.key]
@@ -141,6 +151,18 @@ class LimitsSection(QWidget):
             self._store.set_limit(key, value)
         except SettingsUnreadable as exc:
             # The text is the owner's message: a copy of the unreadable file is kept, and nothing is written.
+            self._show_status(str(exc))
+        except OSError as exc:
+            self._show_status(NOT_SAVED_TEXT.format(name=exc.__class__.__name__))
+        else:
+            self._show_status("")
+        self.refresh()
+
+    def _on_approval_enabled_toggled(self, checked: bool) -> None:
+        """Save the total-size note switch through the store. A download is never blocked or asked about, in either state."""
+        try:
+            self._store.set_limit_approval_enabled(bool(checked))
+        except SettingsUnreadable as exc:
             self._show_status(str(exc))
         except OSError as exc:
             self._show_status(NOT_SAVED_TEXT.format(name=exc.__class__.__name__))

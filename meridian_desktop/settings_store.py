@@ -71,7 +71,7 @@ class LimitSpec:
 
 
 LIMIT_SPECS = (
-    LimitSpec("limit_approval_total_mb", default=100, minimum=10, maximum=1000),
+    LimitSpec("limit_approval_total_mb", default=20480, minimum=1024, maximum=1048576),
     LimitSpec("limit_chat_total_mb", default=500, minimum=10, maximum=5000),
     LimitSpec("limit_file_mb", default=50, minimum=1, maximum=500),
     LimitSpec("limit_zip_download_mb", default=1000, minimum=10, maximum=10000),
@@ -167,6 +167,9 @@ class Settings:
     # The Sessions tab's "Only projects with active sessions" switch (meridian_desktop/ui/sessions_panel.py). Off by
     # default. save() writes the key only when it is on, so a file that never turned it on keeps the keys it had.
     sessions_only_active_projects: bool = False
+    # The file-size note switch on the Limits group. On is the default. Off means the total-size note never shows. A
+    # download is never asked about or blocked in either state, and virus scanning always applies.
+    limit_approval_enabled: bool = True
     # The owner limits on the Settings tab's Limits group (LIMIT_SPECS). Each default is its LIMIT_SPECS entry. save()
     # writes a limit only when it differs from its default. These are stored only: enforcement happens on the server
     # and is not active yet.
@@ -375,6 +378,14 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
         else:
             problems.append("sessions_only_active_projects must be true or false; using false")
 
+    # limit_approval_enabled: an absent key means on, with no warning. Only a real true or false is accepted.
+    if "limit_approval_enabled" in data:
+        value = data["limit_approval_enabled"]
+        if isinstance(value, bool):
+            values["limit_approval_enabled"] = value
+        else:
+            problems.append("limit_approval_enabled must be true or false; using true")
+
     # check_updates: an absent key means on, with no warning. Only a real true or false is accepted.
     if "check_updates" in data:
         value = data["check_updates"]
@@ -552,6 +563,9 @@ class SettingsStore:
         if not settings.sessions_only_active_projects:
             # Off is the default, so the Sessions tab's switch is written only once the owner turns it on.
             del data["sessions_only_active_projects"]
+        if settings.limit_approval_enabled:
+            # On is the default, so the file-size note switch is written only once the owner turns it off.
+            del data["limit_approval_enabled"]
         if settings.check_updates:
             # On is the default, so a file that never turned the update check off has no such key.
             del data["check_updates"]
@@ -707,5 +721,21 @@ class SettingsStore:
         # A readable file with one bad value is copied aside before the write, as the other writers do.
         self.keep_unreadable_copy()
         updated = replace(self.load().settings, **{key: clamp_limit(key, value)})
+        self.save(updated)
+        return updated
+
+    def set_limit_approval_enabled(self, value: bool) -> Settings:
+        """Save the file-size note switch on the Limits group. Every other field in the file is kept.
+
+        A download is never asked about or blocked by this switch, in either state. It only decides whether the total-size
+        note shows. Raises ValueError for a value that is not true or false, and SettingsUnreadable like set_limit.
+        """
+        if not isinstance(value, bool):
+            raise ValueError("limit_approval_enabled must be true or false.")
+        if self.is_unreadable():
+            copied = self._keep_copy()
+            raise SettingsUnreadable(SETTINGS_UNREADABLE_TEXT if copied else SETTINGS_UNREADABLE_NO_COPY_TEXT)
+        self.keep_unreadable_copy()
+        updated = replace(self.load().settings, limit_approval_enabled=value)
         self.save(updated)
         return updated

@@ -55,7 +55,7 @@ def test_the_six_limits_are_the_owner_facing_keys():
 
 def test_the_defaults_are_the_values_the_owner_sees_first():
     assert {key: SPEC[key].default for key in LIMIT_KEYS} == {
-        "limit_approval_total_mb": 100,
+        "limit_approval_total_mb": 20480,
         "limit_chat_total_mb": 500,
         "limit_file_mb": 50,
         "limit_zip_download_mb": 1000,
@@ -172,7 +172,8 @@ def test_a_file_value_that_is_not_a_whole_number_reads_as_the_default_with_a_war
 def test_all_six_limits_round_trip_through_the_file(settings_path):
     saved = replace(
         Settings(),
-        limit_approval_total_mb=250,
+        limit_approval_total_mb=4096,
+        limit_approval_enabled=False,
         limit_chat_total_mb=1200,
         limit_file_mb=75,
         limit_zip_download_mb=4000,
@@ -247,3 +248,28 @@ def test_set_limit_keeps_a_copy_of_a_readable_file_that_had_a_bad_value(settings
     SettingsStore(settings_path).set_limit("limit_writes", 300)
     assert _backup(settings_path).read_text(encoding="utf-8") == text
     assert _saved(settings_path)["limit_writes"] == 300
+
+
+def test_the_total_size_note_is_on_by_default_at_twenty_gigabytes(settings_path):
+    assert SPEC["limit_approval_total_mb"].default == 20480
+    assert SettingsStore(settings_path).load().settings.limit_approval_enabled is True
+
+
+def test_the_total_size_note_switch_is_written_only_when_turned_off(settings_path):
+    store = SettingsStore(settings_path)
+    assert store.set_limit_approval_enabled(False).limit_approval_enabled is False
+    assert _saved(settings_path)["limit_approval_enabled"] is False
+    store.set_limit_approval_enabled(True)
+    assert "limit_approval_enabled" not in _saved(settings_path)
+
+
+def test_the_total_size_note_switch_refuses_a_value_that_is_not_true_or_false(settings_path):
+    with pytest.raises(ValueError):
+        SettingsStore(settings_path).set_limit_approval_enabled("no")
+
+
+def test_a_file_with_a_non_boolean_switch_keeps_the_note_on_with_a_warning(settings_path):
+    _write(settings_path, json.dumps({"limit_approval_enabled": "no"}))
+    result = SettingsStore(settings_path).load()
+    assert result.settings.limit_approval_enabled is True
+    assert result.warning is not None and "limit_approval_enabled" in result.warning
