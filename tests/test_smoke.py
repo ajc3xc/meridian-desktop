@@ -44,6 +44,7 @@ from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.token_store import HOSTED_TOKEN_ACCOUNT, TOKEN_SERVICE
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 from meridian_desktop.ui.home_tab import HomeTab
+from meridian_desktop.ui.keys_section import KeysSection
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.main_window import LATEX_SECTION, STATUS_MESSAGE, TAB_NAMES, MainWindow
@@ -60,7 +61,7 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
@@ -228,13 +229,15 @@ def test_home_search_and_settings_are_built_pages(qtbot, settings_path):
     assert _page(window, "Projects").objectName() == "projects-tab"
 
 
-def test_settings_page_holds_runpod_zotero_and_diagnostics(qtbot, settings_path):
+def test_settings_page_holds_zotero_and_diagnostics_and_no_keys(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     page = _page(window, "Settings")
     assert page.objectName() == "settings-scroll"
     body = page.findChild(QWidget, "settings-page")
     assert body is not None
-    assert body.findChild(RunPodPanel, "runpod-panel") is not None
+    # The keys are a tab of their own, so neither the RunPod panel nor the Keys section is on the Settings page.
+    assert body.findChild(RunPodPanel) is None
+    assert body.findChild(KeysSection, "keys-section") is None
     assert body.findChild(ZoteroPanel, "zotero-panel") is not None
     # Diagnostics: the full tools table, the LaTeX engine probe, and the logs (Logs moved here from its own tab).
     assert body.findChild(ToolsPanel, "tools-panel") is not None
@@ -243,7 +246,7 @@ def test_settings_page_holds_runpod_zotero_and_diagnostics(qtbot, settings_path)
     assert LATEX_SECTION in _label_texts(body)
 
 
-def test_settings_page_is_scrollable_and_keeps_the_runpod_page(qtbot, settings_path):
+def test_settings_page_is_scrollable(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     page = _page(window, "Settings")
     assert page.widgetResizable()

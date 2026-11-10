@@ -1,4 +1,4 @@
-"""Main window: a connection bar on top, then a mode selector, then seven tabs: Home, Projects, Sessions, GPUs, Search, Tunnel and Settings.
+"""Main window: a connection bar, a mode selector, then eight tabs: Home, Projects, Sessions, GPUs, Search, Tunnel, Keys, Settings.
 
 The connection bar (ui/connection_bar.py) is the strip at the very top. It states who is signed in and until when, what
 the desktop is connected to (the hosted URL, with connected, reconnecting or not connected), and the local server when
@@ -13,9 +13,10 @@ part on its own when the window first shows, again every five minutes while Home
 pressed. The tunnel's Start, Stop and Restart are in the Tunnel panel in Settings, and each asks first. The Zotero launch
 asks first too. Search (ui/search_tab.py) lists the local server's code, outputs and research, grouped by source. It has no
 search box. Code and outputs have no list route yet, so they send nothing, and research runs are read from the Local URL.
-Settings opens with the Tunnel panel (ui/tunnel_panel.py), the one place for the tunnel: its status, Start, Stop and
-Restart, the lanes, the tool groups and the custom connectors. Settings then holds the connection settings, the RunPod
-panel, the Zotero library panel, the Writing area (DOCX and Slides, each Not connected), and
+The Tunnel tab (ui/tunnel_panel.py) is the one place for the tunnel: its status, Start, Stop and
+Restart, the lanes, the tool groups and the custom connectors. The Keys tab (ui/keys_tab.py) holds the RunPod card and
+one card per named key. Settings then holds the connection settings, the Zotero library panel, the Writing area (DOCX
+and Slides, each Not connected), and
 Diagnostics: the full tools table, the LaTeX engine probe, and the desktop, tunnel and runner logs. The Projects and
 Sessions tabs are read-only.
 
@@ -79,10 +80,10 @@ from meridian_desktop.ui.connection_bar import ConnectionBar
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.gpu_jobs_panel import GpuJobsPanel
 from meridian_desktop.ui.home_tab import HomeDeps, HomeTab
+from meridian_desktop.ui.keys_tab import KeysTab
 from meridian_desktop.ui.projects_tab import ProjectsTab, default_sources
 from meridian_desktop.ui.restart_banner import RestartBanner
 from meridian_desktop.ui.runner_actions import RunnerActions
-from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
@@ -103,6 +104,7 @@ TAB_SPECS = (
     ("GPUs", 3),
     ("Search", 6),
     ("Tunnel", 8),
+    ("Keys", 8),
     ("Settings", 2),
 )
 TAB_NAMES = tuple(name for name, _wave in TAB_SPECS)
@@ -119,7 +121,7 @@ MODE_DESCRIPTIONS = {
     TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
-# The window opens at this size (width, height). The five tab labels fit at 1280 px, and Home scrolls its cards
+# The window opens at this size (width, height). The tab labels fit at 1280 px, and Home scrolls its cards
 # below that height, so no card is cut off on a short window.
 DEFAULT_WINDOW_SIZE = (1280, 780)
 
@@ -264,7 +266,7 @@ class _ConfiguredRunner:
 
 
 class MainWindow(QMainWindow):
-    """Mode selector above five tabs: Home, Projects, Sessions, Search and Settings."""
+    """Mode selector above the tabs: Home, Projects, Sessions, GPUs, Search, Tunnel, Keys and Settings."""
 
     def __init__(
         self,
@@ -383,6 +385,9 @@ class MainWindow(QMainWindow):
             elif name == "Search":
                 # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
                 page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
+            elif name == "Keys":
+                # The RunPod card and one card per named key. Its RunPod probe runs when the tab is first shown.
+                page = KeysTab(self._store, self._secrets, parent=self.tabs)
             else:
                 page = self._build_settings_page()
                 self._settings_page = page
@@ -428,28 +433,23 @@ class MainWindow(QMainWindow):
         )
 
     def _build_settings_page(self) -> QWidget:
-        """Settings: the connection settings and RunPod panel, the Zotero panel, then Diagnostics.
+        """Settings: the connection settings, the Zotero panel, the Writing area, then Diagnostics.
 
-        The page scrolls, so the longest section never hides the others. The RunPod panel stays the page's
-        RunPod widget (object name runpod-panel), with the connection settings above its rows.
+        The page scrolls, so the longest section never hides the others. The keys are a tab of their own (Keys).
         """
-        runpod = RunPodPanel(self._store, self._secrets, parent=self.tabs)
-        # The connection settings go above the RunPod rows, in the panel's own layout.
+        container = QWidget(self.tabs)
+        container.setObjectName("settings-page")
+        column = QVBoxLayout(container)
         self._settings_tab = SettingsTab(
             self._store,
             secrets=self._secrets,
-            parent=runpod,
+            parent=container,
             actions=self._runner_actions,
             tools_status=self._tools_status_read,
         )
         # A sign-in or sign-out in Settings checks the top bar again at once.
         self._settings_tab.signedInChanged.connect(self._connection_bar.refresh)
-        runpod.layout().insertWidget(0, self._settings_tab)
-
-        container = QWidget(self.tabs)
-        container.setObjectName("settings-page")
-        column = QVBoxLayout(container)
-        column.addWidget(runpod)
+        column.addWidget(self._settings_tab)
         column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
         column.addWidget(ZoteroPanel(client=self._zotero, parent=container))
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.

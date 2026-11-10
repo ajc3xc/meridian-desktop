@@ -1,6 +1,6 @@
 """End to end: the real MainWindow, a loopback stub for the Meridian server, and an in-memory
-keyring. QTest presses the Settings-tab buttons, the test waits for each worker, and the
-visible results are asserted. Screenshots of the Settings tab go to DESKTOP_SCREENSHOT_DIR
+keyring. QTest presses the Keys-tab buttons, the test waits for each worker, and the
+visible results are asserted. Screenshots of the Keys tab go to DESKTOP_SCREENSHOT_DIR
 (default: a pytest temp directory).
 
 The stub answers the three local routes. Its check and pod answers depend on the keyring
@@ -17,7 +17,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTableWidget, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTableWidget, QWidget
 
 from _fakes import MemoryKeyring, QuietServer
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, KeyringSecretStore
@@ -33,7 +33,6 @@ from meridian_desktop.ui.runpod_panel import (
     RunPodPanel,
 )
 from meridian_desktop import local_client
-from meridian_desktop.ui.settings_group import CollapsibleGroup
 
 # The conftest guard replaces the local RunPod calls for every test. This test talks to its own loopback server on purpose,
 # so it takes the real functions, captured here at import, before that guard runs.
@@ -140,33 +139,28 @@ class MeridianStub:
         }
 
 
-def _button(panel, name):
-    return panel.findChild(QPushButton, name)
+def _button(page, name):
+    return page.findChild(QPushButton, name)
 
 
-def _press(qtbot, panel, name):
-    QTest.mouseClick(_button(panel, name), Qt.MouseButton.LeftButton)
+def _press(qtbot, page, name):
+    """Press a button on the Keys tab as a person does, then wait until the RunPod panel's job has finished."""
+    QTest.mouseClick(_button(page, name), Qt.MouseButton.LeftButton)
+    panel = page.findChild(RunPodPanel, "runpod-panel")
     qtbot.waitUntil(lambda: not panel.busy, timeout=10000)
 
 
-def _open_keys_group(qtbot, panel):
-    """Open the Keys group the way a person does: press its header, then wait until the RunPod buttons are on screen.
+def _wait_for_keys_card(qtbot, page):
+    """Wait until the RunPod card's buttons are on screen. The card sits on the Keys tab, which is current when this runs.
 
-    The RunPod card lives in the Keys group, and the group starts folded, so its buttons are hidden until then. A press
-    on a hidden button is not a press a person can make, so the test does not make one.
+    A press on a hidden button is not a press a person can make, so the test waits for the buttons before it presses one.
     """
-    group = panel.findChild(CollapsibleGroup, "settings-group-keys")
-    assert group is not None, "the Keys group is on the Settings page"
-    if not group.is_expanded():
-        toggle = panel.findChild(QToolButton, "settings-group-keys-toggle")
-        QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: group.is_expanded(), timeout=5000)
-    save = _button(panel, "runpod-save-key")
+    save = _button(page, "runpod-save-key")
     qtbot.waitUntil(lambda: save.isVisible() and save.geometry().height() > 0, timeout=5000)
 
 
-def _text(panel, name):
-    return panel.findChild(QLabel, name).text()
+def _text(page, name):
+    return page.findChild(QLabel, name).text()
 
 
 def _every_text(root: QWidget) -> str:
@@ -251,42 +245,41 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp, monkey
         qtbot.waitExposed(window)
 
         names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        page = window.tabs.widget(names.index("Settings"))
-        # The Settings tab scrolls its sections, and the RunPod panel is one of them.
+        page = window.tabs.widget(names.index("Keys"))
+        # The Keys tab holds the RunPod card. Its panel keeps the jobs and is hidden.
         panel = page.findChild(RunPodPanel, "runpod-panel")
         assert panel is not None
         window.tabs.setCurrentWidget(page)
 
         # Showing the tab probes the server. Wait for the probe and the start-up key read.
         qtbot.waitUntil(lambda: not panel.busy, timeout=10000)
-        assert _text(panel, "runpod-server-status") == f"Local Meridian server: running at {stub.url}"
-        assert _text(panel, "runpod-key-status") == KEY_MISSING_TEXT
-        # The RunPod card is in the Keys group, which starts folded. A person opens it before using the card.
-        _open_keys_group(qtbot, panel)
-        window.grab().save(str(shots / "settings-no-key.png"))
+        assert _text(page, "runpod-server-status") == f"Local Meridian server: running at {stub.url}"
+        assert _text(page, "runpod-key-status") == KEY_MISSING_TEXT
+        _wait_for_keys_card(qtbot, page)
+        window.grab().save(str(shots / "keys-no-key.png"))
 
         # Save a key by typing it, the way a user does.
-        field = panel.findChild(QLineEdit, "runpod-key-input")
+        field = page.findChild(QLineEdit, "runpod-key-input")
         QTest.keyClicks(field, FAKE_KEY)
         assert field.text() == FAKE_KEY
-        _press(qtbot, panel, "runpod-save-key")
+        _press(qtbot, page, "runpod-save-key")
 
         assert backend.get_password(RUNPOD_SERVICE, RUNPOD_ACCOUNT) == FAKE_KEY
         assert field.text() == ""
-        assert _text(panel, "runpod-key-status") == KEY_STORED_TEXT
-        assert _text(panel, "runpod-result") == "Key saved in the keychain."
+        assert _text(page, "runpod-key-status") == KEY_STORED_TEXT
+        assert _text(page, "runpod-result") == "Key saved in the keychain."
         assert FAKE_KEY not in _every_text(window)
-        window.grab().save(str(shots / "settings-key-saved.png"))
+        window.grab().save(str(shots / "keys-key-saved.png"))
 
         # Test key: Meridian finds the keychain entry and reports the source.
-        _press(qtbot, panel, "runpod-test-key")
-        assert _text(panel, "runpod-result") == (
+        _press(qtbot, page, "runpod-test-key")
+        assert _text(page, "runpod-result") == (
             "RunPod key works. Key source: keyring. Billing: available. Pods on the first page: 2."
         )
 
         # Refresh pods: the table shows the two pods, with the column headers in order.
-        _press(qtbot, panel, "runpod-refresh-pods")
-        table = panel.findChild(QTableWidget, "runpod-pods")
+        _press(qtbot, page, "runpod-refresh-pods")
+        table = page.findChild(QTableWidget, "runpod-pods")
         headers = tuple(table.horizontalHeaderItem(column).text() for column in range(table.columnCount()))
         assert headers == POD_COLUMNS
         rows = [tuple(table.item(row, column).text() for column in range(table.columnCount())) for row in range(table.rowCount())]
@@ -294,32 +287,32 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp, monkey
             ("pod-a1", "trainer", "RUNNING", "NVIDIA RTX A4000 x1", "0.34", "7200"),
             ("pod-b2", "idle-box", "EXITED", "", "0.0", ""),
         ]
-        assert _text(panel, "runpod-result") == "Listed 2 pod(s)."
-        window.grab().save(str(shots / "settings-pods-listed.png"))
+        assert _text(page, "runpod-result") == "Listed 2 pod(s)."
+        window.grab().save(str(shots / "keys-pods-listed.png"))
 
         # Remove the key: the status flips, and Meridian then reports that no key is found.
-        _press(qtbot, panel, "runpod-remove-key")
+        _press(qtbot, page, "runpod-remove-key")
         assert owner.calls == [(REMOVE_KEY_TITLE, REMOVE_KEY_BODY)], "the owner is asked once, before the key is deleted"
         assert backend.get_password(RUNPOD_SERVICE, RUNPOD_ACCOUNT) is None
-        assert _text(panel, "runpod-key-status") == KEY_MISSING_TEXT
-        assert _text(panel, "runpod-result") == "Key removed from the keychain."
+        assert _text(page, "runpod-key-status") == KEY_MISSING_TEXT
+        assert _text(page, "runpod-result") == "Key removed from the keychain."
 
-        _press(qtbot, panel, "runpod-test-key")
-        assert _text(panel, "runpod-result") == f"RunPod key check failed: {NO_KEY_MESSAGE}"
-        _press(qtbot, panel, "runpod-refresh-pods")
+        _press(qtbot, page, "runpod-test-key")
+        assert _text(page, "runpod-result") == f"RunPod key check failed: {NO_KEY_MESSAGE}"
+        _press(qtbot, page, "runpod-refresh-pods")
         assert table.rowCount() == 0
-        window.grab().save(str(shots / "settings-key-removed.png"))
+        window.grab().save(str(shots / "keys-key-removed.png"))
 
         # Stop the server. The panel reports that it is not running, and sends no RunPod call.
         stub.stop()
         paths_before = len(stub.requests)
-        _press(qtbot, panel, "runpod-test-key")
-        assert _text(panel, "runpod-result") == "Request not sent: the local Meridian server is not running."
-        assert _text(panel, "runpod-server-status") == (
+        _press(qtbot, page, "runpod-test-key")
+        assert _text(page, "runpod-result") == "Request not sent: the local Meridian server is not running."
+        assert _text(page, "runpod-server-status") == (
             f"Local Meridian server: not running at {stub.url}. Start Meridian on this computer."
         )
         assert len(stub.requests) == paths_before
-        window.grab().save(str(shots / "settings-server-stopped.png"))
+        window.grab().save(str(shots / "keys-server-stopped.png"))
 
         # Across every request the desktop sent: only GETs to the three routes, and no key.
         requests = stub.requests
@@ -335,6 +328,6 @@ def test_runpod_panel_end_to_end(qtbot, tmp_path, tmp_path_factory, qapp, monkey
         stub.stop()
         restore_font()
 
-    for name in ("settings-no-key.png", "settings-key-saved.png", "settings-pods-listed.png",
-                 "settings-key-removed.png", "settings-server-stopped.png"):
+    for name in ("keys-no-key.png", "keys-key-saved.png", "keys-pods-listed.png",
+                 "keys-key-removed.png", "keys-server-stopped.png"):
         assert (shots / name).stat().st_size > 0, name

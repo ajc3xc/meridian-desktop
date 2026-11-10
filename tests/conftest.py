@@ -135,9 +135,14 @@ def no_real_gpu_or_runpod_reads(monkeypatch):
         hits.append("runpod_check")
         raise local_client.LocalClientError("not_running", local_client.NOT_RUNNING_MESSAGE)
 
+    def guarded_offers(base_url, query=None, timeout=local_client.DEFAULT_TIMEOUT):
+        hits.append("runpod_offers")
+        raise local_client.LocalClientError("not_running", local_client.NOT_RUNNING_MESSAGE)
+
     monkeypatch.setattr(gpu_jobs, "run_command", guarded_run)
     monkeypatch.setattr(local_client, "runpod_list_pods", guarded_pods)
     monkeypatch.setattr(local_client, "runpod_check", guarded_check)
+    monkeypatch.setattr(local_client, "runpod_offers", guarded_offers)
     yield hits
     assert not hits, f"a test reached a real GPU or RunPod read: {hits}"
 

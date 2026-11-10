@@ -1,4 +1,4 @@
-"""RunPod panel for the Settings tab: key storage, a key check, the pod list and the server state.
+"""RunPod panel for the Keys tab: key storage, a key check, the pod list and the server state.
 
 This is Qt code, and the only new Qt module. It sits in ui/, so the boundary check allows it.
 
@@ -381,7 +381,7 @@ def _label(parent: QWidget, name: str, text: str) -> QLabel:
 
 
 class RunPodPanel(QWidget):
-    """Settings tab content: key storage, a key check, the pod list and the server state."""
+    """Keys tab content: key storage, a key check, the pod list and the server state. Its entry card is placed by the Keys tab."""
 
     #: Emitted when no background job is running.
     idle = Signal()
@@ -422,7 +422,7 @@ class RunPodPanel(QWidget):
     def _build(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        # Every row of the panel sits in one entry card. The Settings tab's Keys section takes the card with take_card().
+        # Every row of the panel sits in one entry card. The Keys tab's section takes the card with take_card().
         self._card = QWidget(self)
         self._card.setObjectName("runpod-entry-card")
         layout = QVBoxLayout(self._card)

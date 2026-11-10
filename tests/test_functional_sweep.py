@@ -5,9 +5,10 @@ the real home folder. The sweep is across tabs: each tab is shown in turn. It fa
 visible button with no label, on a Refresh button that never finishes, and on any exception raised while the sweep runs
 (pytest-qt reports exceptions raised in slots and workers).
 
-The GPUs tab reads this computer's GPUs and the RunPod pods when it is shown, by design. The conftest guard answers
-each of those reads with a stub and records it. A sweep that shows the GPUs tab must allow exactly those stubbed reads,
-so each tab's recorded reads are checked against the set below, and anything outside the set still fails the test.
+The GPUs tab reads this computer's GPUs and the RunPod pods when it is shown, by design. The Keys tab's RunPod card reads
+the RunPod pods and offers when its own Refresh buttons are pressed. The conftest guard answers each of those reads with
+a stub and records it. A sweep that shows those tabs must allow exactly those stubbed reads, so each tab's recorded reads
+are checked against the set below, and anything outside the set still fails the test.
 """
 
 import pytest
@@ -20,19 +21,21 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import TAB_NAMES, MainWindow
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Settings")
-# The tabs that show a Refresh button outside any collapsed group: Sessions, GPUs and Search have one at the top, and
-# Settings shows the Zotero panel's Refresh directly.
-TABS_WITH_REFRESH = ("Sessions", "GPUs", "Search", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
+# The tabs that show a Refresh button outside any collapsed group: Sessions, GPUs and Search have one at the top, Keys has
+# the RunPod card's Refresh buttons, and Settings shows the Zotero panel's Refresh directly.
+TABS_WITH_REFRESH = ("Sessions", "GPUs", "Search", "Keys", "Settings")
 
 # The stubbed reads the GPUs tab makes on show or on Refresh: this computer's GPUs, the Slurm and LSF queues, and the
-# RunPod pods. No SSH host is saved in these tests, so no ssh read is expected.
+# RunPod pods. The Keys tab's RunPod card makes the RunPod reads on its own Refresh buttons. No SSH host is saved in these
+# tests, so no ssh read is expected.
 ALLOWED_GPU_READS = {
     "run_command nvidia-smi",
     "run_command squeue",
     "run_command bjobs",
     "runpod_list_pods",
     "runpod_check",
+    "runpod_offers",
 }
 
 

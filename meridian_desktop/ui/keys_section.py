@@ -1,4 +1,4 @@
-"""The Keys block on the Settings tab: RunPod, a search box, one card per saved name, and an add form. Qt code.
+"""The Keys block on the Keys tab (ui/keys_tab.py): RunPod, a search box, one card per saved name, and an add form. Qt code.
 
 The RunPod entry is the RunPod panel's own card (ui/runpod_panel.py), so its checks, its pod list and its key row work as
 they did before. Every other name is a card of its own: its status, a password box for a new value, Save value and Remove.

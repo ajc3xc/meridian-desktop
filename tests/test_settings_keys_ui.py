@@ -1,8 +1,9 @@
-"""Tests for the Settings tab's groups and Keys block, with pytest-qt. Offscreen Qt, from conftest.
+"""Tests for the Keys tab and the Settings tab's groups, with pytest-qt. Offscreen Qt, from conftest.
 
-The keychain is a MemoryKeyring, the RunPod client never answers, and every removal confirmation is an injected fake, so
-nothing touches the real credential store, the network or a dialog. FAKE_VALUE is an obviously fake value, so the leak
-checks can search for it.
+The keys are a tab of their own (ui/keys_tab.py), so the Keys tests build that tab. The Settings tests build the Settings
+tab and check that it holds no keys. The keychain is a MemoryKeyring, the RunPod client never answers, and every removal
+confirmation is an injected fake, so nothing touches the real credential store, the network or a dialog. FAKE_VALUE is an
+obviously fake value, so the leak checks can search for it.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from meridian_desktop.api_keys import KEY_SERVICE, STATUS_NOT_SET, STATUS_SET, A
 from meridian_desktop.secret_store import RUNPOD_ACCOUNT, RUNPOD_SERVICE, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui import keys_section as keys_module
+from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.keys_section import (
     ADDED_TEXT,
     NOT_REMOVED_OS_TEXT,
@@ -25,6 +27,7 @@ from meridian_desktop.ui.keys_section import (
     STATUS_TEXT,
     KeysSection,
 )
+from meridian_desktop.ui.keys_tab import KeysTab
 from meridian_desktop.ui.runpod_panel import (
     KEY_MISSING_TEXT,
     KEY_STORED_TEXT,
@@ -37,10 +40,10 @@ from meridian_desktop.ui.settings_tab import SettingsTab
 
 FAKE_VALUE = "sk-fake-keys-ui-0001"
 FAKE_VALUE_TWO = "sk-fake-keys-ui-0002"
+# The Settings groups in order. The keys are not among them: they are a tab of their own.
 GROUP_ORDER = (
     "settings-group-connection",
     "settings-group-local-server",
-    "settings-group-keys",
     "settings-group-client-setup",
     "settings-group-tools",
     "settings-group-connections",
@@ -50,7 +53,6 @@ GROUP_ORDER = (
 GROUP_TITLES = (
     "Connection",
     "Local server and startup",
-    "Keys",
     "Client setup",
     "MCP tools",
     "Connections",
@@ -92,18 +94,23 @@ def _say_yes(parent, title, text):
     return True
 
 
-def _page_and_tab(qtbot, settings_path, secrets, confirm=None):
-    """The main window's arrangement: the RunPod panel is the Settings page, and the tab sits in it.
+def _keys_tab(qtbot, settings_path, secrets, confirm=None):
+    """The Keys tab as the main window builds it, with the RunPod client faked so no request is sent.
 
-    The RunPod Remove question is answered Yes unless a test passes its own, so no dialog can open.
+    The RunPod Remove question is answered Yes unless a test passes its own, so no dialog can open. The named keys keep
+    their own questions, which a test patches where it needs them.
     """
-    container = QWidget()
-    qtbot.addWidget(container)
     answer = _say_yes if confirm is None else confirm
-    page = RunPodPanel(SettingsStore(settings_path), secrets, client=FakeClient(), parent=container, confirm=answer)
-    tab = SettingsTab(SettingsStore(settings_path), parent=page, secrets=secrets, list_hosted=_unexpected_list)
-    page.layout().insertWidget(0, tab)
-    return container, page, tab
+    tab = KeysTab(SettingsStore(settings_path), secrets, client=FakeClient(), confirm=answer)
+    qtbot.addWidget(tab)
+    return tab
+
+
+def _panel(tab) -> RunPodPanel:
+    """The RunPod panel that owns the card's jobs. It is hidden and has no rows of its own."""
+    panel = tab.findChild(RunPodPanel, "runpod-panel")
+    assert panel is not None
+    return panel
 
 
 def _wait_names_loaded(qtbot, section) -> None:
@@ -158,10 +165,10 @@ def _seed(settings_path, backend, *, names=("OpenAI", "Anthropic"), value_for=No
         backend.set_password(KEY_SERVICE, "key-" + value_for.lower(), FAKE_VALUE)
 
 
-# ----------------------------------------------------------- groups
+# ----------------------------------------------------------- Settings groups
 
 
-def test_the_eight_groups_are_in_the_requested_order(qtbot, settings_path):
+def test_the_seven_settings_groups_are_in_the_requested_order(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
 
     assert _group_names(tab) == list(GROUP_ORDER)
@@ -169,7 +176,15 @@ def test_the_eight_groups_are_in_the_requested_order(qtbot, settings_path):
     assert tuple(titles) == GROUP_TITLES
 
 
-def test_keys_client_setup_and_diagnostics_start_folded_and_the_others_start_open(qtbot, settings_path):
+def test_settings_holds_no_keys_group_and_no_key_card(qtbot, settings_path):
+    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
+
+    assert tab.findChild(CollapsibleGroup, "settings-group-keys") is None, "the keys are a tab of their own"
+    assert tab.findChild(KeysSection, "keys-section") is None
+    assert tab.findChild(QWidget, "runpod-entry-card") is None
+
+
+def test_the_first_two_groups_start_open_and_the_rest_start_folded(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
 
     for name in GROUP_ORDER[:2]:
@@ -180,17 +195,17 @@ def test_keys_client_setup_and_diagnostics_start_folded_and_the_others_start_ope
 
 def test_a_group_folds_and_unfolds_and_keeps_its_widgets(qtbot, settings_path):
     tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
-    group = tab.findChild(CollapsibleGroup, "settings-group-keys")
-    toggle = tab.findChild(QAbstractButton, "settings-group-keys-toggle")
+    group = tab.findChild(CollapsibleGroup, "settings-group-client-setup")
+    toggle = tab.findChild(QAbstractButton, "settings-group-client-setup-toggle")
 
-    # The Keys group starts folded, so the first press opens it.
+    # The Client setup group starts folded, so the first press opens it.
     toggle.click()
     assert group.is_expanded() is True
-    keys = tab.findChild(KeysSection, "keys-section")
+    section = tab.findChild(ClientSetupSection)
 
     toggle.click()
     assert group.is_expanded() is False
-    assert tab.findChild(KeysSection, "keys-section") is keys, "folding keeps the widgets"
+    assert tab.findChild(ClientSetupSection) is section, "folding keeps the widgets"
 
     toggle.click()
     assert group.is_expanded() is True
@@ -202,18 +217,18 @@ def test_the_content_column_never_narrows_below_its_minimum_width(qtbot, setting
     assert tab.findChild(QWidget, "settings-content").minimumWidth() >= 600
 
 
-# ----------------------------------------------------------- RunPod entry
+# ----------------------------------------------------------- Keys tab: RunPod card
 
 
-def test_the_runpod_card_moves_into_the_keys_group_and_the_page_stays_the_runpod_panel(qtbot, settings_path):
+def test_the_runpod_card_sits_on_the_keys_tab_and_its_panel_keeps_no_rows(qtbot, settings_path):
     secrets = KeyringSecretStore(backend=MemoryKeyring())
-    container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    tab = _keys_tab(qtbot, settings_path, secrets)
 
-    assert page.objectName() == "runpod-panel", "the Settings page is still the RunPod panel"
-    card = page.findChild(QWidget, "runpod-entry-card")
+    card = tab.findChild(QWidget, "runpod-entry-card")
     assert card is not None
-    assert tab.findChild(CollapsibleGroup, "settings-group-keys").isAncestorOf(card)
-    assert len(container.findChildren(RunPodPanel)) == 1, "the window holds one RunPod panel"
+    assert tab.findChild(KeysSection, "keys-section").isAncestorOf(card), "the Keys section places the card"
+    assert _panel(tab).findChild(QWidget, "runpod-entry-card") is None, "the panel gave its card away"
+    assert _panel(tab).isHidden(), "the panel is never shown, its card is"
 
 
 def test_the_runpod_entry_still_saves_and_removes_its_key(qtbot, settings_path):
@@ -225,11 +240,12 @@ def test_the_runpod_entry_still_saves_and_removes_its_key(qtbot, settings_path):
         asked.append(title)
         return True
 
-    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets, confirm=ask)
+    tab = _keys_tab(qtbot, settings_path, secrets, confirm=ask)
+    panel = _panel(tab)
     key_input = tab.findChild(QLineEdit, "runpod-key-input")
     status = tab.findChild(QLabel, "runpod-key-status")
     # The panel's first keychain read holds its buttons until it answers, so wait for it before the first click.
-    qtbot.waitUntil(lambda: not page.busy, timeout=5000)
+    qtbot.waitUntil(lambda: not panel.busy, timeout=5000)
 
     key_input.setText(FAKE_VALUE)
     tab.findChild(QPushButton, "runpod-save-key").click()
@@ -239,7 +255,7 @@ def test_the_runpod_entry_still_saves_and_removes_its_key(qtbot, settings_path):
     assert key_input.text() == ""
     assert FAKE_VALUE not in _all_text(tab)
 
-    qtbot.waitUntil(lambda: not page.busy, timeout=5000)
+    qtbot.waitUntil(lambda: not panel.busy, timeout=5000)
     tab.findChild(QPushButton, "runpod-remove-key").click()
     qtbot.waitUntil(lambda: status.text() == KEY_MISSING_TEXT, timeout=5000)
     assert asked == [REMOVE_KEY_TITLE], "the RunPod Remove asks first"
@@ -250,7 +266,7 @@ def test_declining_the_runpod_remove_keeps_the_key_in_the_keychain(qtbot, settin
     backend = MemoryKeyring()
     backend.set_password(RUNPOD_SERVICE, RUNPOD_ACCOUNT, FAKE_VALUE)
     secrets = KeyringSecretStore(backend=backend)
-    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets, confirm=lambda parent, title, text: False)
+    tab = _keys_tab(qtbot, settings_path, secrets, confirm=lambda parent, title, text: False)
     status = tab.findChild(QLabel, "runpod-key-status")
     qtbot.waitUntil(lambda: status.text() == KEY_STORED_TEXT, timeout=5000)
 
@@ -263,19 +279,19 @@ def test_declining_the_runpod_remove_keeps_the_key_in_the_keychain(qtbot, settin
 
 def test_the_keys_block_lists_runpod_once_as_a_named_card(qtbot, settings_path):
     secrets = KeyringSecretStore(backend=MemoryKeyring())
-    _container, _page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    tab = _keys_tab(qtbot, settings_path, secrets)
 
     heading = tab.findChild(QLabel, "keys-runpod-name")
     assert heading is not None and heading.text() == "RunPod"
     assert tab.findChild(QWidget, "keys-entry-runpod") is not None
 
 
-# ----------------------------------------------------------- named keys
+# ----------------------------------------------------------- Keys tab: named keys
 
 
 def test_a_named_key_is_added_and_shows_set_without_its_value(qtbot, settings_path):
     backend = MemoryKeyring()
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
 
     tab.findChild(QLineEdit, "keys-new-name").setText("OpenAI")
     tab.findChild(QLineEdit, "keys-new-value").setText(FAKE_VALUE)
@@ -292,7 +308,7 @@ def test_a_named_key_is_added_and_shows_set_without_its_value(qtbot, settings_pa
 
 def test_a_refused_name_is_shown_inline_and_nothing_is_written(qtbot, settings_path):
     backend = MemoryKeyring()
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
 
     tab.findChild(QLineEdit, "keys-new-name").setText("bad/name")
     tab.findChild(QLineEdit, "keys-new-value").setText(FAKE_VALUE)
@@ -310,7 +326,7 @@ def test_saved_names_show_their_status_from_the_keychain(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
 
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
 
     assert tab.findChild(QLabel, "keys-entry-openai-status").text() == STATUS_TEXT[STATUS_SET]
@@ -320,7 +336,7 @@ def test_saved_names_show_their_status_from_the_keychain(qtbot, settings_path):
 
 def test_replace_changes_only_the_value_and_remove_asks_first(qtbot, settings_path, monkeypatch):
     backend = MemoryKeyring()
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     tab.findChild(QLineEdit, "keys-new-name").setText("OpenAI")
     tab.findChild(QLineEdit, "keys-new-value").setText(FAKE_VALUE)
     tab.findChild(QPushButton, "keys-add").click()
@@ -351,7 +367,7 @@ def test_replace_changes_only_the_value_and_remove_asks_first(qtbot, settings_pa
 
 def test_a_settings_write_that_fails_after_the_keychain_delete_shows_the_keychain_state(qtbot, settings_path, monkeypatch):
     backend = MemoryKeyring()
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     tab.findChild(QLineEdit, "keys-new-name").setText("OpenAI")
     tab.findChild(QLineEdit, "keys-new-value").setText(FAKE_VALUE)
     tab.findChild(QPushButton, "keys-add").click()
@@ -374,10 +390,10 @@ def test_a_settings_write_that_fails_after_the_keychain_delete_shows_the_keychai
 def test_no_value_is_ever_shown_on_the_tab_after_a_save_or_a_refresh(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI",), value_for="OpenAI")
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
 
     assert FAKE_VALUE not in _all_text(tab)
-    tab.refresh()
+    tab.findChild(KeysSection, "keys-section").refresh()
     assert FAKE_VALUE not in _all_text(tab)
     if settings_path.exists():
         assert FAKE_VALUE.encode() not in settings_path.read_bytes(), "the settings file holds names, never values"
@@ -457,9 +473,8 @@ def _shown(tab, key: str) -> bool:
 def test_the_search_box_sits_above_the_key_cards_and_says_what_it_is_for(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI",), value_for="OpenAI")
-    container, page, tab = _page_and_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
-    _expand_all(tab)
-    _show_at_1280(qtbot, container, page, tab)
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _show_keys_at_1280(qtbot, tab)
 
     search = _search_box(tab)
     assert search.placeholderText() == "Search keys"
@@ -476,7 +491,7 @@ def test_the_search_box_sits_above_the_key_cards_and_says_what_it_is_for(qtbot, 
 def test_typing_filters_the_names_as_the_owner_types_and_ignores_case(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic", "Mistral"), value_for="OpenAI")
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     search = _search_box(tab)
     assert _shown(tab, "openai") and _shown(tab, "anthropic") and _shown(tab, "mistral")
@@ -498,7 +513,7 @@ def test_typing_filters_the_names_as_the_owner_types_and_ignores_case(qtbot, set
 def test_the_search_matches_names_only_never_a_value_or_a_status(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     search = _search_box(tab)
 
@@ -517,7 +532,7 @@ def test_the_search_matches_names_only_never_a_value_or_a_status(qtbot, settings
 def test_the_empty_state_shows_when_nothing_matches_and_goes_when_the_search_clears(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"))
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     search = _search_box(tab)
 
@@ -534,7 +549,7 @@ def test_the_empty_state_shows_when_nothing_matches_and_goes_when_the_search_cle
 
 
 def test_the_empty_state_shows_for_an_empty_list_and_a_search_text(qtbot, settings_path):
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=MemoryKeyring()))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
 
     assert _search_empty(tab).isHidden(), "no search text means no empty state"
@@ -546,7 +561,7 @@ def test_the_runpod_card_is_filtered_by_its_name_like_the_others(qtbot, settings
     backend = MemoryKeyring()
     secrets = KeyringSecretStore(backend=backend)
     _seed(settings_path, backend, names=("OpenAI",))
-    _container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    tab = _keys_tab(qtbot, settings_path, secrets)
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     search = _search_box(tab)
 
@@ -562,7 +577,7 @@ def test_the_runpod_card_is_filtered_by_its_name_like_the_others(qtbot, settings
 def test_the_filter_holds_across_a_refresh(qtbot, settings_path):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"))
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
 
     qtbot.keyClicks(_search_box(tab), "open")
@@ -574,7 +589,7 @@ def test_the_filter_holds_across_a_refresh(qtbot, settings_path):
 def test_save_and_remove_still_work_under_a_search_and_no_value_shows(qtbot, settings_path, monkeypatch):
     backend = MemoryKeyring()
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
-    tab = _tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
     qtbot.keyClicks(_search_box(tab), "open")
     assert FAKE_VALUE not in _all_text(tab)
@@ -611,26 +626,29 @@ def _fully_inside(widget, tab) -> bool:
     return origin.x() >= 0 and origin.x() + widget.width() <= tab.width()
 
 
-def _show_at_1280(qtbot, container, page, tab) -> None:
-    """Show the page as the main window does, sized 1280 wide and tall enough that no group scrolls out of sight."""
+def _show_at_1280(qtbot, page) -> None:
+    """Show the page sized 1280 wide and tall enough that no section scrolls out of sight, then let the layout settle."""
     page.resize(TAB_WIDTH, TAB_HEIGHT)
-    container.show()
-    qtbot.waitExposed(container)
-    qtbot.waitUntil(lambda: tab.findChild(QWidget, "settings-content").width() >= 600, timeout=5000)
-    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
+    page.show()
+    qtbot.waitExposed(page)
     qtbot.wait(30)
 
 
-def test_no_label_or_button_is_clipped_at_1280_px(qtbot, settings_path):
-    backend = MemoryKeyring()
-    _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
-    secrets = KeyringSecretStore(backend=backend)
-    container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
-    _expand_all(tab)
-    _show_at_1280(qtbot, container, page, tab)
+def _show_keys_at_1280(qtbot, tab) -> None:
+    """Show the Keys tab at 1280 px, and wait until the names are read from the keychain."""
+    _show_at_1280(qtbot, tab)
+    _wait_names_loaded(qtbot, tab.findChild(KeysSection, "keys-section"))
 
+
+def _show_settings_at_1280(qtbot, tab) -> None:
+    """Show the Settings tab at 1280 px, and wait until its content column has its full width."""
+    _show_at_1280(qtbot, tab)
+    qtbot.waitUntil(lambda: tab.findChild(QWidget, "settings-content").width() >= 600, timeout=5000)
+
+
+def _assert_labels_and_buttons_fully_inside(tab, *, min_labels: int, min_buttons: int) -> list[QPushButton]:
     labels = [label for label in tab.findChildren(QLabel) if label.isVisibleTo(tab) and label.text()]
-    assert len(labels) >= 20, "the walk reaches the real labels on every group"
+    assert len(labels) >= min_labels, f"the walk reaches the real labels: found {len(labels)}"
     for label in labels:
         if label.wordWrap():
             assert label.height() >= label.heightForWidth(label.width()) - 1, label.objectName() or label.text()
@@ -639,16 +657,38 @@ def test_no_label_or_button_is_clipped_at_1280_px(qtbot, settings_path):
         assert _fully_inside(label, tab), label.objectName() or label.text()
 
     buttons = [button for button in tab.findChildren(QPushButton) if button.isVisibleTo(tab)]
-    assert len(buttons) >= 15
+    assert len(buttons) >= min_buttons, f"the walk reaches the real buttons: found {len(buttons)}"
     for button in buttons:
         assert button.width() >= button.minimumSizeHint().width() - 1, button.objectName()
         assert button.height() >= button.minimumSizeHint().height() - 1, button.objectName()
         assert _fully_inside(button, tab), button.objectName()
+    return buttons
+
+
+def test_no_label_or_button_on_the_settings_tab_is_clipped_at_1280_px(qtbot, settings_path):
+    secrets = KeyringSecretStore(backend=MemoryKeyring())
+    tab = _tab(qtbot, settings_path, secrets)
+    _expand_all(tab)
+    _show_settings_at_1280(qtbot, tab)
+
+    _assert_labels_and_buttons_fully_inside(tab, min_labels=20, min_buttons=15)
+
+
+def test_no_label_or_button_on_the_keys_tab_is_clipped_at_1280_px(qtbot, settings_path):
+    backend = MemoryKeyring()
+    _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
+    tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
+    _show_keys_at_1280(qtbot, tab)
+
+    buttons = _assert_labels_and_buttons_fully_inside(tab, min_labels=8, min_buttons=10)
+    # The walk reaches the RunPod card and the two named cards, not only the add form.
+    for name in ("runpod-save-key", "runpod-remove-key", "keys-add", "keys-entry-openai-save", "keys-entry-anthropic-user-env"):
+        assert tab.findChild(QPushButton, name) in buttons, name
 
 
 def test_client_setup_apply_remove_and_the_check_result_are_fully_visible_at_1280_px(qtbot, settings_path):
     secrets = KeyringSecretStore(backend=MemoryKeyring())
-    container, page, tab = _page_and_tab(qtbot, settings_path, secrets)
+    tab = _tab(qtbot, settings_path, secrets)
     _expand_all(tab)
     result = tab.findChild(QLabel, "client-setup-result")
     result.setText(
@@ -656,7 +696,7 @@ def test_client_setup_apply_remove_and_the_check_result_are_fully_visible_at_128
         "C:\\Users\\example\\.claude\\settings.json.bak. Restart Claude Code to load the change."
     )
     result.setVisible(True)
-    _show_at_1280(qtbot, container, page, tab)
+    _show_settings_at_1280(qtbot, tab)
 
     actions = [
         button

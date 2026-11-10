@@ -56,13 +56,13 @@ def test_writing_labels_are_plain_text_and_selectable(qtbot):
         assert label.textInteractionFlags() & SELECTABLE_TEXT == SELECTABLE_TEXT, label.objectName()
 
 
-def test_settings_page_holds_the_writing_area_and_still_five_tabs(qtbot, settings_path):
+def test_settings_page_holds_the_writing_area_and_no_tab_of_its_own(qtbot, settings_path):
     window = MainWindow(SettingsStore(settings_path), secret_store=KeyringSecretStore(backend=MemoryKeyring()),
                         data_sources=_sources())
     qtbot.addWidget(window)
     # The Writing area is a section of Settings, never a main tab of its own.
-    assert TAB_NAMES == ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Settings")
-    assert window.tabs.count() == 7
+    assert TAB_NAMES == ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
+    assert window.tabs.count() == 8
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
     page = window.tabs.widget(names.index("Settings"))
     body = page.findChild(QWidget, "settings-page")

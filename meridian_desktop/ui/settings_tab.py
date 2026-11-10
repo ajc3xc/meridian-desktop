@@ -4,14 +4,16 @@
    and Sign out), the Test connection and Try again buttons, the local URL and the database file.
 2. Local server and startup: the runner block (ui/runner_section.py), its state and Start, Stop and Restart, the two
    launch-time switches, and the automatic update checkbox. Each control asks the owner first, except the update checkbox.
-3. Keys: the RunPod entry card (ui/runpod_panel.py) and one card per named key (ui/keys_section.py).
-4. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
-5. MCP tools: one folding group per tool group, with a switch for each tool and for each group (ui/tools_section.py).
+3. Client setup: the Meridian core checkout and its Python, then one row per client (ui/client_setup_section.py).
+4. MCP tools: one folding group per tool group, with a switch for each tool and for each group (ui/tools_section.py).
    Every tool is on by default. The choice is saved in the settings file and applied at the next start.
-6. Connections: the owner's own MCP connectors, each with an on switch, a tunnel switch and Remove, and a form that adds one
+5. Connections: the owner's own MCP connectors, each with an on switch, a tunnel switch and Remove, and a form that adds one
    (ui/connections_section.py). Written to Claude Desktop and Codex at the next start. Nothing reaches claude.ai from here.
+6. GPU hosts over SSH: the SSH host names the GPUs tab reads. Only names are saved.
 7. Diagnostics (logs): the settings file path, any note from loading it, and the Logs view (ui/logs_page.py).
    It starts folded. The Logs view reads nothing until its Refresh is pressed.
+
+The keys are not here. The Keys tab (ui/keys_tab.py) is a tab of its own: the RunPod entry card and one card per named key.
 
 The hosted URL is checked with hosted_client.validate_base_url before anything is written. Sign in with browser runs the
 server's device flow (hosted_session.sign_in) on a worker thread: it shows the sign-in code, opens the browser, and saves
@@ -27,9 +29,6 @@ only its path is saved.
 The mode is shown, not edited. The top-bar selector is the one control that changes it, and the main window calls
 refresh() after each save, so both always show the same saved mode.
 
-The main window builds this tab with the RunPod panel as its parent, so the Settings page is still the RunPod panel. The
-tab then takes the panel's entry card into the Keys group, so the RunPod panel is shown once. Built with any other
-parent, the tab has no RunPod card, and the Keys group lists only the names the owner adds.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QResizeEvent, QShowEvent
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -59,7 +58,6 @@ from PySide6.QtWidgets import (
 )
 
 from meridian_desktop import hosted_client, hosted_session, projects_backup, token_store
-from meridian_desktop.api_keys import ApiKeys
 from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
@@ -68,12 +66,10 @@ from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
-from meridian_desktop.ui.keys_section import KeysSection
 from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.runner_section import RunnerSection
-from meridian_desktop.ui.runpod_panel import RunPodPanel
 from meridian_desktop.ui.connections_section import CONNECTIONS_TITLE, ConnectionsSection
 from meridian_desktop.ui.settings_group import CollapsibleGroup
 from meridian_desktop.ui.tools_panel import ToolsPanel
@@ -88,7 +84,6 @@ MODE_LABELS = dict(MODE_ITEMS)
 CONTENT_MIN_WIDTH = 640
 CONNECTION_TITLE = "Connection"
 LOCAL_SERVER_TITLE = "Local server and startup"
-KEYS_TITLE = "Keys"
 CLIENT_SETUP_TITLE = "Client setup"
 DIAGNOSTICS_TITLE = "Diagnostics (logs)"
 # The one place for diagnostics. The LaTeX section label is the one main_window shows and tests look for.
@@ -359,7 +354,10 @@ class _SignInJob(QRunnable):
 
 
 class SettingsTab(QWidget):
-    """The five Settings groups: connection, local server and startup, keys, client setup, and diagnostics."""
+    """The Settings groups: connection, local server and startup, client setup, MCP tools, connections, GPU hosts and diagnostics.
+
+    The keys are a tab of their own (ui/keys_tab.py), so this tab holds none of them.
+    """
 
     # Emitted on the GUI thread after a sign-in is saved or a sign-out removes the token. The main window's top bar
     # listens, so it checks again at once.
@@ -395,10 +393,6 @@ class SettingsTab(QWidget):
         # The one tools read the full tools table shows. None leaves the table out (a tab built without the window).
         self._tools_status = tools_status
         self._check = _ConnectionCheck(settings_store, self._secrets, self._list_hosted)
-        self._keys_store = ApiKeys(settings_store, self._secrets)
-        # The RunPod panel is the parent when the main window builds this tab, so its Settings page stays the RunPod panel
-        # and the card moves into the Keys group. A tab built with any other parent has no RunPod card.
-        self._runpod: RunPodPanel | None = parent if isinstance(parent, RunPodPanel) else None
         # Identifies this tab's connection tests. A plain object, so a job can hold it without holding the tab.
         self._owner = object()
         self._generation = 0
@@ -425,12 +419,8 @@ class SettingsTab(QWidget):
         column.setSpacing(6)
         scroll.setWidget(content)
 
-        # The RunPod entry card moves into the Keys group. The page panel stays as the page, empty of rows.
-        runpod_card = self._runpod.take_card() if self._runpod is not None else None
-
         column.addWidget(self._build_connection(content))
         column.addWidget(self._build_local_server(content))
-        column.addWidget(self._build_keys(content, runpod_card))
         column.addWidget(self._build_client_setup(content))
         column.addWidget(self._build_tools(content))
         column.addWidget(self._build_connections(content))
@@ -552,12 +542,6 @@ class SettingsTab(QWidget):
         group.add_widget(self._auto_update)
         return group
 
-    def _build_keys(self, parent: QWidget, runpod_card: QWidget | None) -> CollapsibleGroup:
-        group = CollapsibleGroup("keys", KEYS_TITLE, parent, expanded=False)
-        self._keys = KeysSection(self._keys_store, runpod_card, group.body())
-        group.add_widget(self._keys)
-        return group
-
     def _build_client_setup(self, parent: QWidget) -> CollapsibleGroup:
         group = CollapsibleGroup("client-setup", CLIENT_SETUP_TITLE, parent, expanded=False)
         self._client_setup_group = group
@@ -639,7 +623,7 @@ class SettingsTab(QWidget):
         self._actions.coreChanged.connect(self._on_core_changed)
 
     def refresh(self) -> None:
-        """Show the saved mode, the database file, whether a hosted token is set, and the keys.
+        """Show the saved mode, the database file and whether a hosted token is set.
 
         The main window calls this after a mode change, so the top bar and this tab always show the same saved mode.
         """
@@ -652,7 +636,6 @@ class SettingsTab(QWidget):
         self._db_path.setText(settings.db_path or NOT_CHOSEN_TEXT)
         self._refresh_token_status()
         self._runner.refresh_flags()
-        self._keys.refresh()
         self._tools.refresh()
         self._connections.refresh()
         self._settings_file.setText(SETTINGS_FILE_TEXT.format(path=self._store.path))
@@ -665,12 +648,6 @@ class SettingsTab(QWidget):
         """
         stored = bool(token_store.get_token(store=self._secrets))
         self._token_status.setText(TOKEN_SET_TEXT if stored else TOKEN_NOT_SET_TEXT)
-
-    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt naming
-        super().showEvent(event)
-        # The RunPod probe runs once, on the first show of this tab, whichever panel holds the card.
-        if self._runpod is not None:
-            self._runpod.ensure_probed()
 
     # ----------------------------------------------------------- saving
 
