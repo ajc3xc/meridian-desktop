@@ -34,8 +34,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from meridian_desktop import local_client
-from meridian_desktop.local_client import LocalClientError
+from meridian_desktop import __version__
 from meridian_desktop.zotero_client import Reply, ZoteroError, _NoRedirects, _read_bounded
 
 BRIDGE_HOST = "127.0.0.1"
@@ -46,6 +45,8 @@ GRANTS_PATH = "/v1/grants"
 ITEMS_PATH = "/v1/items"
 GRANT_HEADER = "Meridian-Write-Grant"
 APP_NAME = "Meridian desktop"
+# The same User-Agent the desktop sends to the local server. It is kept here, so the bridge does not import that client.
+USER_AGENT = f"MeridianDesktop/{__version__} (local client)"
 ITEM_TYPE = "webpage"
 TOKEN_SUBDIR = "zotero_bridge"
 TOKEN_FILENAME = "api_token"
@@ -95,6 +96,7 @@ NO_TOKEN_TEXT = (
 )
 NOT_ANSWERING_TEXT = "Nothing answered on 127.0.0.1:23125 within the connect window."
 UNREACHABLE_TEXT = "The Meridian Zotero bridge could not be reached on 127.0.0.1:23125."
+BAD_ADDRESS_TEXT = "The Meridian Zotero bridge address must be http on 127.0.0.1. Nothing was sent."
 TIMEOUT_TEXT = (
     "The Meridian Zotero bridge did not answer in time. If it was answering a grant request, a prompt may be open "
     "in Zotero. Press Deny there."
@@ -156,10 +158,22 @@ ITEM_UNCONFIRMED = "the bridge's reply did not confirm the item"
 ITEM_JOURNAL_FAILED = "the save journal could not be written, so the item was not sent"
 ITEM_GRANT_ENDED = "the write grant is no longer live"
 ANSWERING_STATUS = "Bridge: answering on 127.0.0.1:23125."
-NO_TOKEN_STATUS = "Bridge: off. Its token file is missing or empty."
-NOT_ANSWERING_STATUS = "Bridge: off. Nothing answered on 127.0.0.1:23125 within the connect window."
+# The bridge-off and could-not-be-checked lines say what to do, and name the bridge, never the Meridian server.
+CHECK_BRIDGE_TEXT = "Check that Zotero is open with the Meridian Zotero bridge installed, then press Refresh."
+NO_TOKEN_STATUS = (
+    "Bridge: off. Its token file is missing or empty, so nothing is sent to 127.0.0.1:23125. " + CHECK_BRIDGE_TEXT
+)
+NOT_ANSWERING_STATUS = (
+    "Bridge: off. Nothing answered on 127.0.0.1:23125 within the connect window. " + CHECK_BRIDGE_TEXT
+)
 UNAUTHORIZED_STATUS = "Bridge: running, but it refused the token."
-STATUS_ERROR_STATUS = "Bridge: could not be checked ({})."
+# The {} is one reason from STATUS_REASONS, or an HTTP status.
+STATUS_ERROR_STATUS = "Bridge: could not be checked on 127.0.0.1:23125. {}. " + CHECK_BRIDGE_TEXT
+STATUS_REASONS = {
+    "timeout": "The bridge did not answer in time",
+    "unreachable": "The bridge could not be reached",
+}
+STATUS_REASON_DEFAULT = "The bridge gave no usable answer"
 
 # transport(method, path, headers, body, timeout) -> Reply. It raises ZoteroError for a failed request.
 Transport = Callable[[str, str, Mapping[str, str], bytes | None, float], Reply]
@@ -314,23 +328,43 @@ def _read_error_body(exc: urllib.error.HTTPError) -> bytes:
         return b""
 
 
+def _assert_bridge_address(base_url: str) -> None:
+    """Raise ZoteroError("not_loopback") unless ``base_url`` is http on 127.0.0.1, with no user name, query or fragment.
+
+    The bridge has one loopback address, so the check lives here rather than in the Meridian server client.
+    """
+    try:
+        parts = urllib.parse.urlsplit(base_url)
+        port = parts.port
+    except ValueError:
+        raise ZoteroError("not_loopback", BAD_ADDRESS_TEXT) from None
+    if (
+        parts.scheme != "http"
+        or parts.hostname != BRIDGE_HOST
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ZoteroError("not_loopback", BAD_ADDRESS_TEXT)
+
+
 def bridge_transport(base_url: str = BRIDGE_BASE_URL) -> Transport:
     """A loopback transport for one base URL. http_request, the default, is this for the bridge on 127.0.0.1:23125.
 
     A non-2xx status comes back as a Reply. A redirect is not followed. No Origin header is sent, so a browser page
     cannot use this path. Each request goes through an empty proxy handler, so loopback traffic never leaves the machine.
+    A base URL that is not http on 127.0.0.1 is refused before any request is made.
     """
 
     def transport(method: str, path: str, headers: Mapping[str, str], body: bytes | None, timeout: float) -> Reply:
-        try:
-            local_client.assert_loopback(base_url)
-        except LocalClientError as exc:
-            raise ZoteroError(exc.code, str(exc)) from None
+        _assert_bridge_address(base_url)
         request = urllib.request.Request(
             base_url + path,
             data=body,
             method=method,
-            headers={"User-Agent": local_client.USER_AGENT, "Accept": "application/json", **headers},
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json", **headers},
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
         try:
@@ -496,7 +530,7 @@ def bridge_status(*, transport: Transport | None = None, token_path: Path | None
             return BridgeStatus(UNAUTHORIZED, UNAUTHORIZED_STATUS)
         if exc.code == "not_running":
             return BridgeStatus(BRIDGE_OFF, NOT_ANSWERING_STATUS)
-        return BridgeStatus(ERROR, STATUS_ERROR_STATUS.format(exc.code))
+        return BridgeStatus(ERROR, STATUS_ERROR_STATUS.format(STATUS_REASONS.get(exc.code, STATUS_REASON_DEFAULT)))
     if reply.status == 200:
         return BridgeStatus(ANSWERING, ANSWERING_STATUS)
     return BridgeStatus(ERROR, STATUS_ERROR_STATUS.format(f"HTTP {reply.status}"))
