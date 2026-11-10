@@ -1,7 +1,8 @@
 """Read-only Sessions tab: a project picker, a search box, a Refresh button, a legend, and a table of sessions.
 
 This is Qt code and sits in ui/, so the boundary check allows it. The panel has no start, stop, restart, send or
-edit control. Its inputs are the project picker, the search box and the Refresh button.
+edit control. Its inputs are the project picker, the search box, the "Only projects with active sessions" switch and
+the two Refresh buttons.
 
 The table is grouped by project. The picked project is the first group. Its subprojects (projects whose parent is the
 picked project, at any depth) follow as further groups, each under a header row. A header row collapses or expands its
@@ -21,6 +22,14 @@ and a result from an older read is dropped once a newer one has started. There a
 
 Outside local mode a change of project clears the table and says to press Refresh. It reads nothing. The status
 line names the source the rows came from.
+
+The switch "Only projects with active sessions" hides every project whose sessions are all idle. It reads nothing, and a
+project that could not be read stays, with its reason. Its value is saved through a callback the window passes in. When
+the save fails, the switch still works for this session and the status line says so.
+
+The agent section lists the claude and codex programs running on this computer, from agent_processes.py. It reads only
+when its Refresh button is pressed, on the thread pool, and it never stops, suspends or writes to a process. A
+process's working folder is shown when it can be read, and its project when a known project folder holds that folder.
 
 A session is active while it was last seen less than 10 minutes ago, the server's own window. Active rows are green and
 idle rows grey, and a legend says so. Last seen is shown in local time in one format. Its tooltip says what last seen
@@ -49,6 +58,7 @@ from PySide6.QtCore import QEvent, QRunnable, Qt, QThreadPool, QTimer, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QHeaderView,
@@ -61,7 +71,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import hosted_client
+from meridian_desktop import agent_processes, hosted_client
+from meridian_desktop.agent_processes import AgentListing, AgentProcess, list_agent_programs
 from meridian_desktop.sessions_client import (
     ACTIVE,
     ACTIVE_WINDOW_MINUTES,
@@ -72,6 +83,7 @@ from meridian_desktop.sessions_client import (
     SESSIONS,
     SOURCE_HOSTED,
     SOURCE_LOCAL,
+    UNKNOWN_TIME_TEXT,
     SessionRow,
     SessionsResult,
     format_local,
@@ -109,11 +121,18 @@ PRESS_REFRESH_TEXT = "Press Refresh to read this project's sessions."
 NO_PROJECTS_TEXT = "No projects are available to pick. Create a project in Meridian first."
 PROJECTS_FAILED_TEXT = "The projects could not be read. Check the local server or the database file in Settings."
 READ_FAILED_TEXT = "The sessions could not be read. Check the local server or the hosted token in Settings."
-# The desktop has no read-only process check for Claude Desktop or Claude Code yet, so this line says so and lists none.
-CLAUDE_PROCESSES_TEXT = (
-    "Running Claude Desktop and Claude Code processes on this computer: Not connected. "
-    "This desktop has no read-only check for them yet, so none are listed here."
+ONLY_ACTIVE_TEXT = "Only projects with active sessions"
+ONLY_ACTIVE_NOT_SAVED_TEXT = "The switch could not be saved, so it holds for this session only."
+AGENT_CAPTION = "Agent programs on this computer"
+AGENT_INTRO_TEXT = (
+    "The claude and codex programs running here, read-only. Their command lines are not read, and nothing is stopped."
 )
+AGENT_PRESS_TEXT = "Press Refresh to list the claude and codex programs running on this computer."
+AGENT_LOADING_TEXT = "Listing agent programs..."
+AGENT_NO_FOLDERS_TEXT = "No project folder is saved yet, so no program is matched to a project."
+AGENT_NONE_TEXT = "No claude or codex program is running on this computer."
+AGENT_COLUMNS = ("Program", "PID", "Started", "Working folder", "Project")
+AGENT_TABLE_MAX_HEIGHT = 160
 UNNAMED_TEXT = "(unnamed)"
 SOURCE_TEXT = {SOURCE_LOCAL: "this computer's Meridian server", SOURCE_HOSTED: "hosted Meridian"}
 STATE_TEXT = {ACTIVE: "Active", IDLE: "Idle"}
@@ -263,8 +282,11 @@ def summary_text(
     query: str,
     matches: int,
     checked_at: str,
+    *,
+    inactive_hidden: int = 0,
 ) -> str:
-    """The status line for a read of the picked project and its subprojects, after the search has been applied."""
+    """The status line for a read of the picked project and its subprojects, after the search and the active-only switch
+    have been applied. ``inactive_hidden`` counts the projects the switch hid."""
     if root.state != SESSIONS:
         return status_text(root, checked_at)
     where = SOURCE_TEXT.get(root.source, "Meridian")
@@ -274,6 +296,8 @@ def summary_text(
         parts.append(f"Grouped by project: {len(groups)} shown, including subprojects.")
     if total_projects > len(groups):
         parts.append(f"Only the first {len(groups)} of {total_projects} projects in this tree are read.")
+    if inactive_hidden:
+        parts.append(f"{inactive_hidden} project(s) hidden: no active sessions.")
     unread = sum(1 for group in groups if group.result.state != SESSIONS)
     if unread:
         parts.append(f"{unread} project(s) could not be read.")
@@ -308,6 +332,42 @@ def last_seen_tip(row: SessionRow, now: datetime) -> str:
     if parse_timestamp(row.last_seen) is None:
         return f"{LAST_SEEN_MEANING} {NO_LAST_SEEN_TEXT}"
     return f"{LAST_SEEN_MEANING} Local time {local_time_text(row.last_seen)}, {last_seen_age(row.last_seen, now)}."
+
+
+def row_is_active(row: SessionRow, now: datetime) -> bool:
+    """True when the session is Active by the last-seen rule the table shows."""
+    return session_state(row.last_seen, now) == ACTIVE
+
+
+def started_text(started_ns: int | None) -> str:
+    """A process start time in the one local format, or UNKNOWN_TIME_TEXT when it is not known."""
+    if started_ns is None:
+        return UNKNOWN_TIME_TEXT
+    try:
+        return format_local(datetime.fromtimestamp(started_ns / 1_000_000_000, tz=timezone.utc))
+    except (OverflowError, OSError, ValueError):
+        return UNKNOWN_TIME_TEXT
+
+
+def agent_cells(agent: AgentProcess) -> tuple[str, str, str, str, str]:
+    """The five cells of one agent row, in AGENT_COLUMNS order. An empty folder or project reads in plain words."""
+    return (
+        agent.program,
+        str(agent.pid),
+        started_text(agent.started_ns),
+        agent.folder or agent_processes.NOT_READ_TEXT,
+        agent.project or agent_processes.NO_MATCH_TEXT,
+    )
+
+
+def agents_summary(listing: AgentListing, checked_at: str, has_folders: bool) -> str:
+    """The status line for a listing that worked: how many programs, whether any project folder is known, the time."""
+    count = len(listing.agents)
+    parts = [AGENT_NONE_TEXT if count == 0 else f"{count} agent program(s) running on this computer."]
+    if not has_folders:
+        parts.append(AGENT_NO_FOLDERS_TEXT)
+    parts.append(f"Checked at {checked_at}.")
+    return " ".join(parts)
 
 
 def _plain(value: Any) -> str:
@@ -360,6 +420,43 @@ class _RefreshJob(QRunnable):
 
 
 # ----------------------------------------------------------------- reads
+
+
+@dataclass(frozen=True)
+class _AgentRead:
+    """One finished agent listing, with the generation of the press that started it."""
+
+    generation: int
+    listing: AgentListing
+
+
+class _AgentJob(QRunnable):
+    """Run one agent listing on the thread pool and deliver an _AgentRead.
+
+    A failure becomes an error listing with fixed text, so no raw exception reaches the UI thread.
+    """
+
+    def __init__(
+        self,
+        generation: int,
+        work: Callable[[], AgentListing],
+        deliver: Callable[[_AgentRead], None],
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._generation = generation
+        self._work = work
+        self._deliver = deliver
+
+    def run(self) -> None:
+        try:
+            listing = self._work()
+        except Exception:  # noqa: BLE001 - a worker must never raise into the pool
+            listing = AgentListing(agent_processes.STATE_ERROR, agent_processes.READ_FAILED_TEXT)
+        try:
+            self._deliver(_AgentRead(self._generation, listing))
+        except RuntimeError:
+            pass  # the panel was deleted while the listing ran
 
 
 class _Reads:
@@ -483,6 +580,10 @@ class SessionsPanel(QWidget):
         *,
         local_transport: Any = None,
         hosted_transport: hosted_client.Transport | None = None,
+        only_active: bool = False,
+        on_only_active_changed: Callable[[bool], bool] | None = None,
+        project_folders: Mapping[str, str] | None = None,
+        agent_lister: Callable[[Mapping[str, str]], AgentListing] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("sessions-panel")
@@ -507,6 +608,17 @@ class SessionsPanel(QWidget):
         self._total_projects = 0
         self._checked_at: datetime | None = None
         self._collapsed: set[str] = set()
+        # The only-active switch: its starting value, its save callback, and the note shown when a save fails.
+        self._only_active_initial = bool(only_active)
+        self._only_active_saver = on_only_active_changed
+        self._only_active_note = ""
+        # The agent section: the folders that name a project, the lister, and the last listing and its generation.
+        self._project_folders: dict[str, str] = dict(project_folders or {})
+        self._agent_lister = agent_lister if agent_lister is not None else list_agent_programs
+        self._agent_generation = 0
+        self._agent_in_flight: int | None = None
+        self._agent_listing: AgentListing | None = None
+        self._agent_checked_at: datetime | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -539,6 +651,13 @@ class SessionsPanel(QWidget):
         self._search.textChanged.connect(self._on_search_changed)
         layout.addWidget(self._search)
 
+        self._only_active = QCheckBox(ONLY_ACTIVE_TEXT, self)
+        self._only_active.setObjectName("sessions-only-active")
+        self._only_active.setChecked(self._only_active_initial)
+        # Connected after the starting value is set, so building the tab saves nothing.
+        self._only_active.toggled.connect(self._on_only_active_toggled)
+        layout.addWidget(self._only_active)
+
         self._status = _label(self, "sessions-status", LOADING_TEXT)
         layout.addWidget(self._status)
 
@@ -551,9 +670,6 @@ class SessionsPanel(QWidget):
         legend.addWidget(self._legend_idle)
         legend.addStretch(1)
         layout.addLayout(legend)
-
-        self._claude_processes = _label(self, "sessions-claude-processes", CLAUDE_PROCESSES_TEXT)
-        layout.addWidget(self._claude_processes)
 
         self._table = QTableWidget(0, len(COLUMNS), self)
         self._table.setObjectName("sessions-table")
@@ -569,6 +685,33 @@ class SessionsPanel(QWidget):
         self._table.installEventFilter(self)
         enable_table_copy(self._table)
         layout.addWidget(self._table, 1)
+        self._build_agents(layout)
+
+    def _build_agents(self, layout: QVBoxLayout) -> None:
+        """The agent section under the sessions table: a caption, a note, Refresh with its status line, and a table."""
+        layout.addWidget(_label(self, "sessions-agents-caption", AGENT_CAPTION))
+        layout.addWidget(_label(self, "sessions-agents-intro", AGENT_INTRO_TEXT))
+        row = QHBoxLayout()
+        self._agents_refresh = QPushButton(REFRESH_TEXT, self)
+        self._agents_refresh.setObjectName("sessions-agents-refresh")
+        self._agents_refresh.clicked.connect(lambda _checked=False: self.refresh_agents())
+        row.addWidget(self._agents_refresh)
+        self._agents_status = _label(self, "sessions-agents-status", AGENT_PRESS_TEXT)
+        row.addWidget(self._agents_status, 1)
+        layout.addLayout(row)
+
+        self._agents_table = QTableWidget(0, len(AGENT_COLUMNS), self)
+        self._agents_table.setObjectName("sessions-agents-table")
+        self._agents_table.setHorizontalHeaderLabels(list(AGENT_COLUMNS))
+        self._agents_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._agents_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._agents_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._agents_table.verticalHeader().setVisible(False)
+        self._agents_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._agents_table.horizontalHeader().setStretchLastSection(True)
+        self._agents_table.setMaximumHeight(AGENT_TABLE_MAX_HEIGHT)
+        enable_table_copy(self._agents_table)
+        layout.addWidget(self._agents_table)
 
     # ----------------------------------------------------------- reads
 
@@ -580,6 +723,61 @@ class SessionsPanel(QWidget):
         read ends.
         """
         self._start(full=True)
+
+    def refresh_agents(self) -> None:
+        """List the agent programs now, on the thread pool. Nothing else is read, and the list is never read on a timer.
+
+        A press while a listing is still running does nothing: the button is disabled until that listing ends.
+        """
+        if self._agent_in_flight is not None:
+            return
+        self._agent_generation += 1
+        generation = self._agent_generation
+        self._agent_in_flight = generation
+        self._agents_refresh.setEnabled(False)
+        self._agents_status.setText(AGENT_LOADING_TEXT)
+
+        # The job holds the lister, a copy of the folders and the shared delivery object. It never holds this tab.
+        lister = self._agent_lister
+        folders = dict(self._project_folders)
+        owner = self._owner
+        delivery = shared_delivery()
+
+        def work() -> AgentListing:
+            return lister(folders)
+
+        def deliver(read: _AgentRead) -> None:
+            delivery.delivered.emit(Delivered(owner, read))
+
+        QThreadPool.globalInstance().start(_AgentJob(generation, work, deliver))
+
+    def _on_agents_delivered(self, read: _AgentRead) -> None:
+        # Runs on the GUI thread. A listing that a newer press has superseded is dropped.
+        if read.generation != self._agent_generation:
+            return
+        self._agent_in_flight = None
+        self._agents_refresh.setEnabled(True)
+        self._agent_listing = read.listing
+        self._agent_checked_at = datetime.now(timezone.utc)
+        self._render_agents()
+
+    def _render_agents(self) -> None:
+        """Draw the last agent listing. It reads nothing."""
+        listing = self._agent_listing
+        if listing is None:
+            return
+        table = self._agents_table
+        table.setRowCount(0)
+        if listing.state != agent_processes.STATE_OK:
+            self._agents_status.setText(listing.message)
+            return
+        for agent in listing.agents:
+            index = table.rowCount()
+            table.insertRow(index)
+            for column, text in enumerate(agent_cells(agent)):
+                table.setItem(index, column, QTableWidgetItem(text))
+        checked = format_local(self._agent_checked_at) if self._agent_checked_at is not None else ""
+        self._agents_status.setText(agents_summary(listing, checked, bool(self._project_folders)))
 
     def _start(self, *, full: bool) -> None:
         """Start one read on the thread pool. It supersedes a read still running, whose result is then dropped."""
@@ -611,6 +809,9 @@ class SessionsPanel(QWidget):
     def _on_delivered(self, item: object) -> None:
         # Runs on the GUI thread. A result for another tab is dropped here, and so is one a newer read has superseded.
         if not isinstance(item, Delivered) or item.owner is not self._owner:
+            return
+        if isinstance(item.value, _AgentRead):
+            self._on_agents_delivered(item.value)
             return
         snapshot = item.value
         if snapshot.generation != self._generation:
@@ -651,12 +852,14 @@ class SessionsPanel(QWidget):
         now = datetime.now(timezone.utc)
         query = self._search.text()
         needle = query.strip()
+        only_active = self._only_active.isChecked()
         table = self._table
         # Keep the header the user had selected, and the scroll position, across the redraw.
         selected = _group_of(table.currentItem())
         scroll = table.verticalScrollBar().value()
         table.setRowCount(0)
         matches = 0
+        inactive_hidden = 0
         headers: dict[str, int] = {}
         hidden_depth: int | None = None  # the depth of a collapsed group whose subtree is hidden
         for group in self._groups:
@@ -669,6 +872,9 @@ class SessionsPanel(QWidget):
             hidden_depth = None
             if needle and answered and not visible:
                 continue  # a search hides a group with nothing in it
+            if only_active and answered and not any(row_is_active(row, now) for row in rows):
+                inactive_hidden += 1
+                continue  # the switch hides a project with no active session; a project that was not read stays
             headers[group.project_id] = self._add_header(group, len(rows), len(visible), bool(needle))
             if group.project_id in self._collapsed:
                 hidden_depth = group.depth
@@ -679,7 +885,16 @@ class SessionsPanel(QWidget):
         if selected in headers:
             table.setCurrentCell(headers[selected], 0)
         checked = format_local(self._checked_at) if self._checked_at is not None else ""
-        self._status.setText(summary_text(self._root, self._groups, self._total_projects, query, matches, checked))
+        status = summary_text(
+            self._root,
+            self._groups,
+            self._total_projects,
+            query,
+            matches,
+            checked,
+            inactive_hidden=inactive_hidden,
+        )
+        self._status.setText(f"{status} {self._only_active_note}" if self._only_active_note else status)
 
     def _add_header(self, group: ProjectGroup, total: int, visible: int, filtering: bool) -> int:
         """Add one project header row and return its index."""
@@ -743,6 +958,19 @@ class SessionsPanel(QWidget):
     def _on_search_changed(self, _text: str) -> None:
         self._render()
 
+    @Slot(bool)
+    def _on_only_active_toggled(self, checked: bool) -> None:
+        """Redraw with the switch as it now stands, and save it through the window's callback. Reads nothing."""
+        self._only_active_note = ""
+        if self._only_active_saver is not None:
+            try:
+                saved = bool(self._only_active_saver(checked))
+            except Exception:  # noqa: BLE001 - a failed save is named in plain words, never by class or value
+                saved = False
+            if not saved:
+                self._only_active_note = ONLY_ACTIVE_NOT_SAVED_TEXT
+        self._render()
+
     @Slot(int)
     def _on_project_changed(self, _index: int) -> None:
         self._root = None
@@ -769,20 +997,26 @@ class SessionsPanel(QWidget):
 
 
 __all__ = [
+    "AGENT_COLUMNS",
     "COLUMNS",
     "LOCAL_MODE",
     "MAX_GROUPS",
+    "ONLY_ACTIVE_TEXT",
     "REFRESH_MS",
     "Project",
     "ProjectGroup",
     "SessionsPanel",
+    "agent_cells",
+    "agents_summary",
     "choose_project",
     "last_seen_tip",
     "picker_choices",
     "project_label",
     "project_tree",
     "row_cells",
+    "row_is_active",
     "row_matches",
+    "started_text",
     "status_text",
     "status_tip",
     "summary_text",
