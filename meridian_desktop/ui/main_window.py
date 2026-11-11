@@ -92,6 +92,7 @@ from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.tunnel_panel import TunnelPanel
 from meridian_desktop.ui.update_notice import UpdateNoticeBar
 from meridian_desktop.ui.writing_area import WRITING_SECTION, WritingArea
+from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.zotero_panel import ZoteroPanel
 from meridian_desktop.version import APP_VERSION
 
@@ -104,6 +105,8 @@ TAB_SPECS = (
     ("GPUs", 3),
     ("Search", 6),
     ("Tunnel", 8),
+    ("Zotero", 8),
+    ("LaTeX", 8),
     ("Keys", 8),
     ("Settings", 2),
 )
@@ -218,6 +221,19 @@ def _saved_hosted(store: SettingsStore, secrets: SecretStore) -> Callable[[], tu
         return store.load().settings.hosted_url, token_store.get_token(store=secrets)
 
     return read
+
+
+def _page_with_label(label: str, widget: QWidget, parent: QWidget) -> QScrollArea:
+    """A tab page: a section label over one widget, in a scroll area so the lower part is never hidden."""
+    container = QWidget(parent)
+    column = QVBoxLayout(container)
+    column.addWidget(make_selectable(QLabel(label, container)))
+    column.addWidget(widget)
+    column.addStretch(1)
+    scroll = QScrollArea(parent)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(container)
+    return scroll
 
 
 def _zotero_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str, str]]]:
@@ -422,6 +438,16 @@ class MainWindow(QMainWindow):
             elif name == "Search":
                 # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
                 page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
+            elif name == "Zotero":
+                # Zotero is a tab of its own: the library search, the save bridge, and the project folder.
+                page = _page_with_label(
+                    ZOTERO_SECTION,
+                    ZoteroPanel(client=self._zotero, projects=_zotero_projects(self._store, self._sources), parent=self.tabs),
+                    self.tabs,
+                )
+            elif name == "LaTeX":
+                # The LaTeX engine probe is a tab of its own. It makes no request until the tab is first shown.
+                page = _page_with_label(LATEX_SECTION, LatexPanel(self._store, parent=self.tabs), self.tabs)
             elif name == "Keys":
                 # The RunPod card and one card per named key. Its RunPod probe runs when the tab is first shown.
                 page = KeysTab(self._store, self._secrets, parent=self.tabs)
@@ -470,7 +496,7 @@ class MainWindow(QMainWindow):
         )
 
     def _build_settings_page(self) -> QWidget:
-        """Settings: the connection settings, the Zotero panel, the Writing area, then Diagnostics.
+        """Settings: the connection settings, the Writing area, then Diagnostics. Zotero and LaTeX have their own tabs.
 
         The page scrolls, so the longest section never hides the others. The keys are a tab of their own (Keys).
         """
@@ -487,10 +513,6 @@ class MainWindow(QMainWindow):
         # A sign-in or sign-out in Settings checks the top bar again at once.
         self._settings_tab.signedInChanged.connect(self._connection_bar.refresh)
         column.addWidget(self._settings_tab)
-        column.addWidget(make_selectable(QLabel(ZOTERO_SECTION, container)))
-        column.addWidget(
-            ZoteroPanel(client=self._zotero, projects=_zotero_projects(self._store, self._sources), parent=container)
-        )
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
         column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
         column.addWidget(WritingArea(container))

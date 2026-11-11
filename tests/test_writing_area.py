@@ -61,8 +61,8 @@ def test_settings_page_holds_the_writing_area_and_no_tab_of_its_own(qtbot, setti
                         data_sources=_sources())
     qtbot.addWidget(window)
     # The Writing area is a section of Settings, never a main tab of its own.
-    assert TAB_NAMES == ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
-    assert window.tabs.count() == 8
+    assert TAB_NAMES == ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Zotero", "LaTeX", "Keys", "Settings")
+    assert window.tabs.count() == 10
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
     page = window.tabs.widget(names.index("Settings"))
     body = page.findChild(QWidget, "settings-page")

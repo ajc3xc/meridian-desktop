@@ -69,7 +69,6 @@ from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
 from meridian_desktop.ui.delivery import Delivered, Delivery, shared_delivery
-from meridian_desktop.ui.latex_panel import LatexPanel
 from meridian_desktop.ui.limits_section import LIMITS_TITLE, LimitsSection
 from meridian_desktop.ui.logs_page import LogsPage
 from meridian_desktop.ui.runner_actions import RunnerActions
@@ -613,9 +612,7 @@ class SettingsTab(QWidget):
         if self._tools_status is not None:
             group.add_widget(make_selectable(QLabel(TOOLS_SECTION, group.body())))
             group.add_widget(ToolsPanel(self._tools_status, parent=group.body()))
-        # The LaTeX probe sits under its section label. It makes no request until shown.
-        group.add_widget(make_selectable(QLabel(LATEX_SECTION, group.body())))
-        group.add_widget(LatexPanel(self._store, parent=group.body()))
+        # The LaTeX probe is a tab of its own (LaTeX), so Diagnostics holds the logs only.
         # The Logs view reads nothing until its own Refresh is pressed, so folding this group costs nothing.
         self._logs = LogsPage(parent=group.body())
         group.add_widget(self._logs)

@@ -61,7 +61,7 @@ from meridian_desktop.ui.settings_tab import (
     SettingsTab,
     mode_text,
 )
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Zotero", "LaTeX", "Keys", "Settings")
 STATUS = STATUS_MESSAGE
 
 FAKE_TOKEN = "sk_meridian_fake-projects-tab"
@@ -229,21 +229,25 @@ def test_home_search_and_settings_are_built_pages(qtbot, settings_path):
     assert _page(window, "Projects").objectName() == "projects-tab"
 
 
-def test_settings_page_holds_zotero_and_diagnostics_and_no_keys(qtbot, settings_path):
+def test_settings_page_holds_diagnostics_and_no_zotero_latex_or_keys(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     page = _page(window, "Settings")
     assert page.objectName() == "settings-scroll"
     body = page.findChild(QWidget, "settings-page")
     assert body is not None
-    # The keys are a tab of their own, so neither the RunPod panel nor the Keys section is on the Settings page.
+    # The keys, Zotero and LaTeX are tabs of their own, so none of them is on the Settings page.
     assert body.findChild(RunPodPanel) is None
     assert body.findChild(KeysSection, "keys-section") is None
-    assert body.findChild(ZoteroPanel, "zotero-panel") is not None
-    # Diagnostics: the full tools table, the LaTeX engine probe, and the logs (Logs moved here from its own tab).
+    assert body.findChild(ZoteroPanel, "zotero-panel") is None
+    assert body.findChild(LatexPanel) is None
+    assert LATEX_SECTION not in _label_texts(body)
+    # Diagnostics: the full tools table and the logs (Logs moved here from its own tab).
     assert body.findChild(ToolsPanel, "tools-panel") is not None
-    assert body.findChild(LatexPanel) is not None
     assert body.findChild(LogsPage, "logs-page") is not None
-    assert LATEX_SECTION in _label_texts(body)
+    # Zotero and LaTeX each have their own tab, holding their panel.
+    assert _page(window, "Zotero").findChild(ZoteroPanel, "zotero-panel") is not None
+    assert _page(window, "LaTeX").findChild(LatexPanel) is not None
+    assert LATEX_SECTION in _label_texts(_page(window, "LaTeX"))
 
 
 def test_settings_page_is_scrollable(qtbot, settings_path):

@@ -21,10 +21,10 @@ from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.main_window import TAB_NAMES, MainWindow
 from meridian_desktop.zotero_client import API_NOT_RUNNING, ApiCheck, ZoteroStatus
 
-EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Keys", "Settings")
+EXPECTED_TABS = ("Home", "Projects", "Sessions", "GPUs", "Search", "Tunnel", "Zotero", "LaTeX", "Keys", "Settings")
 # The tabs that show a Refresh button outside any collapsed group: Sessions, GPUs and Search have one at the top, Keys has
 # the RunPod card's Refresh buttons, and Settings shows the Zotero panel's Refresh directly.
-TABS_WITH_REFRESH = ("Sessions", "GPUs", "Search", "Keys", "Settings")
+TABS_WITH_REFRESH = ("Sessions", "GPUs", "Search", "Keys", "Zotero")
 
 # The stubbed reads the GPUs tab makes on show or on Refresh: this computer's GPUs, the Slurm and LSF queues, and the
 # RunPod pods. The Keys tab's RunPod card makes the RunPod reads on its own Refresh buttons. No SSH host is saved in these
@@ -124,9 +124,17 @@ def test_refresh_buttons_in_a_tab_finish_without_error(qtbot, settings_path, nam
     window = _window(qtbot, settings_path)
     index = EXPECTED_TABS.index(name)
     page = _show(qtbot, window, index)
-    refresh = [
-        button for button in _visible_buttons(page) if "refresh" in button.text().lower() and button.isEnabled()
-    ]
+
+    def _enabled_refresh():
+        return [
+            button for button in _visible_buttons(page) if "refresh" in button.text().lower() and button.isEnabled()
+        ]
+
+    # A worker's result reaches the UI thread after the pool is idle, and a panel keeps its Refresh buttons disabled until
+    # then (the RunPod card does). Wait for an enabled Refresh button before checking, so the check is not a race.
+    if name in TABS_WITH_REFRESH:
+        qtbot.waitUntil(lambda: bool(_enabled_refresh()), timeout=5000)
+    refresh = _enabled_refresh()
     # A tab with a Refresh button must show one here, so the test cannot pass by pressing nothing.
     if name in TABS_WITH_REFRESH:
         assert refresh, f"{name} shows no enabled Refresh button to press"
