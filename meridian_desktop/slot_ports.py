@@ -13,7 +13,7 @@ connection, so a result says "listening" and never "healthy". Health needs a req
 server, which this module never sends.
 
 The ports are checked one after another, so the worst case is len(SLOT_PORTS) times
-PER_PORT_TIMEOUT: 3.5 seconds for the 14 ports. See worst_case_seconds.
+PER_PORT_TIMEOUT: 3.75 seconds for the 15 ports. See worst_case_seconds.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ PER_PORT_TIMEOUT = 0.25
 LISTENING_LABEL = "listening"
 NOT_LISTENING_LABEL = "not listening"
 
-# (slot, port): ten built-in slots, then the four pre-allocated custom slots p0 to p3.
+# (slot, port): eleven built-in slots (the retired word slot included) and the four pre-allocated custom slots p0 to p3.
 SLOT_PORTS: tuple[tuple[str, int], ...] = (
     ("fs", 8808),
     ("code", 8809),
@@ -45,6 +45,7 @@ SLOT_PORTS: tuple[tuple[str, int], ...] = (
     ("zotero", 8819),
     ("outputs", 8820),
     ("debug", 8821),
+    ("latex", 8822),
 )
 
 # check(host, port, timeout) -> True when something accepts a connection on host:port.

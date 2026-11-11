@@ -2,7 +2,7 @@
 
 The probe is run against real loopback sockets. A stub listener on an ephemeral port records
 every byte a client sends, so "sends zero bytes" is checked on the wire and not only in the
-code. No test uses the real slot ports (8808 to 8821), which may be in use on this computer.
+code. No test uses the real slot ports (8808 to 8822), which may be in use on this computer.
 """
 
 import ast
@@ -45,6 +45,7 @@ EXPECTED_SLOT_PORTS = (
     ("zotero", 8819),
     ("outputs", 8820),
     ("debug", 8821),
+    ("latex", 8822),
 )
 
 # Attribute names a socket would need for sending or reading. The probe module uses none.
@@ -127,9 +128,9 @@ class _RecordingListener:
 
 
 def test_slot_port_probe_sends_no_bytes_and_covers_all_ports():
-    # The table holds the core's literal ports: ten built-ins (word included) and p0 to p3.
+    # The table holds the core's literal ports: eleven built-ins (word included, LaTeX last) and p0 to p3.
     assert SLOT_PORTS == EXPECTED_SLOT_PORTS
-    assert len(SLOT_PORTS) == 14
+    assert len(SLOT_PORTS) == 15
 
     # One check per port, in table order, each on 127.0.0.1 with the 0.25 second timeout.
     seen: list[tuple[str, int, float]] = []
@@ -174,8 +175,8 @@ def test_probe_results_are_labelled_listening_never_healthy():
 
 def test_slot_port_timeout_is_per_port_and_total_is_bounded():
     assert PER_PORT_TIMEOUT == 0.25
-    assert worst_case_seconds() == pytest.approx(3.5)
-    assert worst_case_seconds() <= 3.5
+    assert worst_case_seconds() == pytest.approx(3.75)
+    assert worst_case_seconds() <= 3.75
     assert worst_case_seconds(EXPECTED_SLOT_PORTS[:2]) == pytest.approx(0.5)
 
 

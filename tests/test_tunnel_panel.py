@@ -405,7 +405,7 @@ def _cells(table: QTableWidget, row: int) -> list[str]:
 def test_the_slot_table_has_one_row_per_slot_port_and_never_claims_a_state():
     rows = model.slot_rows()
     assert [(row.slot, row.port) for row in rows] == list(slot_ports.SLOT_PORTS)
-    assert len(rows) == 14
+    assert len(rows) == 15
     assert all(row.state == model.SLOT_STATE_NOT_REPORTED for row in rows)
     assert not any(word in row.state.lower() for row in rows for word in ("listening", "running", "connected"))
 
@@ -490,7 +490,7 @@ def test_the_slot_table_lists_each_slot_port_and_keeps_every_state_not_reported_
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"))
     table = panel.findChild(QTableWidget, "tunnelpanel-slots")
     expected = [[slot, str(port), model.SLOT_STATE_NOT_REPORTED] for slot, port in slot_ports.SLOT_PORTS]
-    assert table.rowCount() == len(slot_ports.SLOT_PORTS) == 14
+    assert table.rowCount() == len(slot_ports.SLOT_PORTS) == 15
     assert [_cells(table, row) for row in range(table.rowCount())] == expected
 
     # The status says running, and the table still reports no slot state, because the status carries no slot data.

@@ -340,7 +340,7 @@ def test_services_tab_shows_one_row_per_service(qtbot, settings_path):
     assert _text(page, "services-runner-seen") == "The runner reports its child process as running."
 
     table = page.findChild(QTableWidget, "services-ports-table")
-    assert table.rowCount() == 14
+    assert table.rowCount() == 15
     rows = [[table.item(row, column).text() for column in range(3)] for row in range(table.rowCount())]
     assert rows[0] == ["fs", "8808", "listening"]
     assert rows[1] == ["code", "8809", "listening"]
@@ -559,7 +559,7 @@ def test_one_failed_check_does_not_hide_the_others(qtbot, settings_path):
     assert _text(page, "services-runner") == "Runner: could not check"
     assert _text(page, "services-runner-seen") == "The runner check failed unexpectedly (RuntimeError)."
     assert _text(page, "services-health") == "Local server health: running"
-    assert page.findChild(QTableWidget, "services-ports-table").rowCount() == 14
+    assert page.findChild(QTableWidget, "services-ports-table").rowCount() == 15
     assert secret not in _all_label_text(page)
 
 
@@ -721,7 +721,7 @@ def test_each_failed_check_shows_its_own_failure_and_the_others_still_show(
     if failing != "runner":
         assert _text(page, "services-runner") == "Runner: running"
     if failing != "ports":
-        assert page.findChild(QTableWidget, "services-ports-table").rowCount() == 14
+        assert page.findChild(QTableWidget, "services-ports-table").rowCount() == 15
 
 
 def test_an_unexpected_failure_of_the_whole_pass_is_reported_without_its_text(qtbot, settings_path):
