@@ -38,7 +38,7 @@ from _shared_delivery import emit, recording_deliveries, visible_state
 
 LOCAL_URL = "http://127.0.0.1:8471"
 CONNECTED_STATUS = EngineStatus(
-    ENGINE_CONNECTED, latex_client.CONNECTED_MESSAGE, engine_version="1.4.0", extension_version="0.9.2"
+    ENGINE_CONNECTED, latex_client.CONNECTED_MESSAGE, engine_version=None, extension_version="0123456789ab"
 )
 NOT_RUNNING_STATUS = EngineStatus(ENGINE_NOT_RUNNING, latex_client.NOT_RUNNING_MESSAGE)
 NOT_ANSWERING_STATUS = EngineStatus(ENGINE_NOT_ANSWERING, latex_client.NOT_ANSWERING_MESSAGE)
@@ -132,8 +132,8 @@ def test_running_engine_shows_running_with_both_versions(qtbot, settings_path):
     _show_and_wait(qtbot, panel)
 
     assert _label(panel, "latex-status").text() == CONNECTED_TEXT == "LaTeX engine: running."
-    assert _label(panel, "latex-engine-version").text() == "Engine version: 1.4.0"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: 0.9.2"
+    assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
+    assert _label(panel, "latex-extension-version").text() == "Extension build: 0123456789ab"
     assert _label(panel, "latex-start").text() == "How to start: it is already running, so there is nothing to start."
 
 
@@ -148,7 +148,7 @@ def test_engine_not_listening_shows_not_running_from_a_refused_socket(qtbot, set
     assert _label(panel, "latex-status").text() == NOT_CONNECTED_TEXT == "LaTeX engine: not running."
     assert _label(panel, "latex-detail").text() == latex_client.NOT_RUNNING_MESSAGE
     assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: not available"
+    assert _label(panel, "latex-extension-version").text() == "Extension build: not available"
     assert _label(panel, "latex-start").text() == (
         "How to start: start the LaTeX engine you installed on this computer so it listens on port 8471, "
         "then press Check again."

@@ -43,8 +43,6 @@ UNREACHABLE_MESSAGE = "The LaTeX engine could not be reached."
 TOO_LARGE_MESSAGE = "The LaTeX engine sent a response that is too large to read."
 UNCHECKED_ERROR_MESSAGE = "The LaTeX engine could not be checked."
 
-# A reported version is a short token such as 1.4.0 or 0.9.2-beta. Anything else is not shown.
-_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
 
 _ERROR_MESSAGES = {
     "not_running": (ENGINE_NOT_RUNNING, NOT_RUNNING_MESSAGE),
@@ -90,10 +88,16 @@ def _json_answer(reply: Any) -> dict[str, Any]:
     return _json_object(reply.body)
 
 
-def _version(payload: dict[str, Any]) -> str:
-    value = payload.get("version")
-    if isinstance(value, str) and _VERSION.fullmatch(value):
-        return value
+# The engine has no version field. /health answers {"ok": true}, and /extension-version answers {"hash": ...}. The hash
+# identifies the installed extension build, so it is shown shortened. Anything else is not shown.
+_HASH = re.compile(r"[0-9a-f]{8,64}")
+_SHOWN_HASH_CHARS = 12
+
+
+def _extension_build(payload: dict[str, Any]) -> str:
+    value = payload.get("hash")
+    if isinstance(value, str) and _HASH.fullmatch(value):
+        return value[:_SHOWN_HASH_CHARS]
     return NOT_REPORTED
 
 
@@ -141,8 +145,8 @@ def probe_engine(base_url: str, timeout: float = PROBE_TIMEOUT, get: Callable[..
     return EngineStatus(
         ENGINE_CONNECTED,
         CONNECTED_MESSAGE,
-        engine_version=_version(health),
-        extension_version=_version(extension),
+        engine_version=None,
+        extension_version=_extension_build(extension),
     )
 
 

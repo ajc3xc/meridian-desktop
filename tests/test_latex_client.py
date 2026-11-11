@@ -40,8 +40,9 @@ from meridian_desktop.ui.main_window import LATEX_SECTION, MainWindow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_URL = "http://127.0.0.1:8471"
-HEALTH_OK = (200, b'{"version": "1.4.0"}')
-EXTENSION_OK = (200, b'{"version": "0.9.2"}')
+HEALTH_OK = (200, b'{"ok": true}')
+EXTENSION_OK = (200, b'{"hash": "0123456789abcdef0123456789abcdef01234567"}')
+SHOWN_BUILD = "0123456789ab"
 CONNECTED_MESSAGE = latex_client.CONNECTED_MESSAGE
 NOT_RUNNING_MESSAGE = latex_client.NOT_RUNNING_MESSAGE
 
@@ -170,8 +171,8 @@ def test_probe_reads_both_versions_from_a_loopback_engine(make_engine):
 
     assert status.connected
     assert status.message == CONNECTED_MESSAGE
-    assert status.engine_version == "1.4.0"
-    assert status.extension_version == "0.9.2"
+    assert status.engine_version is None
+    assert status.extension_version == SHOWN_BUILD
     assert engine.paths == [HEALTH_PATH, EXTENSION_VERSION_PATH]
 
 
@@ -206,24 +207,35 @@ def test_probe_refuses_a_non_loopback_address_without_sending(url):
 @pytest.mark.parametrize(
     "value, shown",
     [
-        ("1.4.0", "1.4.0"),
-        ("0.9.2-beta+build.7", "0.9.2-beta+build.7"),
+        ("0123456789abcdef", "0123456789ab"),
+        ("0123456789abcdef0123456789abcdef01234567", "0123456789ab"),
         ("<b>bold</b>", NOT_REPORTED),
+        ("0123", NOT_REPORTED),
+        ("ABCDEF0123456789", NOT_REPORTED),
         ("", NOT_REPORTED),
-        ("v" * 80, NOT_REPORTED),
         (3, NOT_REPORTED),
         (None, NOT_REPORTED),
     ],
 )
-def test_only_plain_version_strings_are_shown(value, shown):
-    body = json.dumps({"version": value}).encode("utf-8")
-    get = _FakeGet({HEALTH_PATH: (200, body), EXTENSION_VERSION_PATH: (200, body)})
+def test_only_a_plain_extension_hash_is_shown_shortened(value, shown):
+    extension = json.dumps({"hash": value}).encode("utf-8")
+    get = _FakeGet({HEALTH_PATH: (200, b'{"ok": true}'), EXTENSION_VERSION_PATH: (200, extension)})
 
     status = latex_client.probe_engine(LOCAL_URL, get=get)
 
     assert status.connected
-    assert status.engine_version == shown
+    assert status.engine_version is None
     assert status.extension_version == shown
+
+
+def test_a_version_field_is_never_read_because_the_engine_does_not_send_one():
+    get = _FakeGet({HEALTH_PATH: (200, b'{"version": "9.9.9"}'), EXTENSION_VERSION_PATH: (200, b'{"version": "9.9.9"}')})
+
+    status = latex_client.probe_engine(LOCAL_URL, get=get)
+
+    assert status.connected
+    assert status.engine_version is None
+    assert status.extension_version == NOT_REPORTED
 
 
 @pytest.mark.parametrize(
@@ -281,7 +293,7 @@ class _FakeEngineClient:
         return self.status
 
 
-CONNECTED_STATUS = EngineStatus(ENGINE_CONNECTED, CONNECTED_MESSAGE, engine_version="1.4.0", extension_version="0.9.2")
+CONNECTED_STATUS = EngineStatus(ENGINE_CONNECTED, CONNECTED_MESSAGE, engine_version=None, extension_version="0123456789ab")
 NOT_RUNNING_STATUS = EngineStatus(ENGINE_NOT_RUNNING, NOT_RUNNING_MESSAGE)
 
 
@@ -312,8 +324,8 @@ def test_panel_probes_once_on_first_show_and_shows_both_versions_side_by_side(qt
     assert client.calls == [(LOCAL_URL, PROBE_TIMEOUT, True)]
     engine = _label(panel, "latex-engine-version")
     extension = _label(panel, "latex-extension-version")
-    assert engine.text() == "Engine version: 1.4.0"
-    assert extension.text() == "Extension version: 0.9.2"
+    assert engine.text() == "Engine version: not available"
+    assert extension.text() == "Extension build: 0123456789ab"
     assert _label(panel, "latex-detail").text() == CONNECTED_MESSAGE
     # Both versions sit in one row, the engine version on the left.
     assert engine.geometry().top() == extension.geometry().top()
@@ -336,7 +348,7 @@ def test_check_again_probes_once_more_and_shows_not_connected_without_versions(q
     assert len(client.calls) == 2
     assert _label(panel, "latex-detail").text() == NOT_RUNNING_MESSAGE
     assert _label(panel, "latex-engine-version").text() == "Engine version: not available"
-    assert _label(panel, "latex-extension-version").text() == "Extension version: not available"
+    assert _label(panel, "latex-extension-version").text() == "Extension build: not available"
 
 
 def test_a_failed_check_shows_the_class_name_only(qtbot, settings_path):

@@ -67,14 +67,17 @@ def engine_version_text(status: EngineStatus | None) -> str:
     """The engine version line. Versions are shown only for a connected engine."""
     if status is None or not status.connected:
         return f"Engine version: {VERSION_UNAVAILABLE}"
+    if status.engine_version is None:
+        # The engine has no version field, so the probe reports None and the panel says so.
+        return f"Engine version: {VERSION_UNAVAILABLE}"
     return f"Engine version: {status.engine_version}"
 
 
 def extension_version_text(status: EngineStatus | None) -> str:
     """The extension version line. Versions are shown only for a connected engine."""
     if status is None or not status.connected:
-        return f"Extension version: {VERSION_UNAVAILABLE}"
-    return f"Extension version: {status.extension_version}"
+        return f"Extension build: {VERSION_UNAVAILABLE}"
+    return f"Extension build: {status.extension_version}"
 
 
 def engine_start_text(status: EngineStatus | None, port: str) -> str:
