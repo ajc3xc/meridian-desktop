@@ -177,8 +177,8 @@ def scope_notes(subcommand: str, scope: str) -> str:
         )
     if subcommand == START and scope == SCOPE_TUNNEL:
         return (
-            "The tunnel first stops any program using ports 8808 to 8813. It gives claude.ai access to the "
-            "working folder shown here."
+            "The tunnel first stops any program using ports 8808 to 8813, the first six of its slot ports. "
+            "The other slot ports are not cleared. It gives claude.ai access to the working folder shown here."
         )
     if subcommand == STOP:
         return "This stops only the process the runner started for this scope, if it is still running."

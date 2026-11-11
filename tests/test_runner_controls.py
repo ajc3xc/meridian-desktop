@@ -148,6 +148,16 @@ def test_the_tunnel_confirmation_names_the_ports_and_the_folder_it_exposes():
     assert "claude.ai" in text
 
 
+def test_the_tunnel_start_says_only_six_slot_ports_are_cleared_and_stop_names_no_port():
+    # The core's tunnel start clears 8808 to 8813 only (the first six slot ports), and its stop clears no port by number.
+    start = confirmation_text(PY, "start", "tunnel", CWD)
+    assert "the first six of its slot ports" in start
+    assert "The other slot ports are not cleared" in start
+
+    stop = confirmation_text(PY, "stop", "tunnel", CWD)
+    assert not any(str(port) in stop for port in range(8808, 8823))
+
+
 # ------------------------------------------------------------------ refusals start nothing
 
 
