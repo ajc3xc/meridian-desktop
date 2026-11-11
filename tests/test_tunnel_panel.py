@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QLabel, QPlainTextEdit, QPushButton, QTableWidget, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QWidget
 
 from meridian_desktop import log_tail, slot_ports, tool_catalog
 from meridian_desktop import tunnel_panel_model as model
@@ -354,7 +354,7 @@ def test_a_settings_file_with_a_problem_is_not_written_over(qtbot, settings_path
     assert _label(panel, "tunnelpanel-message").text() == PROBLEM_TEXT
 
 
-def test_the_tunnel_panel_is_its_own_tab_and_settings_has_no_copy(qtbot, settings_path, tmp_path):
+def _tunnel_window(qtbot, settings_path, tmp_path):
     from meridian_desktop.ui.main_window import MainWindow
 
     spawn, confirm = Spawn(), Confirm()
@@ -364,14 +364,31 @@ def test_the_tunnel_panel_is_its_own_tab_and_settings_has_no_copy(qtbot, setting
         runner_actions=_actions(settings_path, spawn, confirm, tmp_path),
     )
     qtbot.addWidget(window)
+    return window
+
+
+def test_the_tunnel_panel_is_its_own_tab_and_settings_has_no_copy(qtbot, settings_path, tmp_path):
+    window = _tunnel_window(qtbot, settings_path, tmp_path)
     index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Tunnel")
-    page = window.tabs.widget(index)
+    page = window.tabs.widget(index).widget()
     assert isinstance(page, TunnelPanel)
     assert page.objectName() == "tunnel-panel"
     assert window._tunnel_panel is page
     settings_index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Settings")
     settings_page = window.tabs.widget(settings_index)
     assert settings_page.findChild(TunnelPanel) is None
+
+
+def test_the_tunnel_tab_page_is_a_scroll_area_like_the_zotero_and_latex_tabs(qtbot, settings_path, tmp_path):
+    window = _tunnel_window(qtbot, settings_path, tmp_path)
+    tabs = {window.tabs.tabText(i): window.tabs.widget(i) for i in range(window.tabs.count())}
+    tunnel_page = tabs["Tunnel"]
+    assert isinstance(tunnel_page, QScrollArea)
+    assert tunnel_page.widgetResizable() is True
+    assert isinstance(tunnel_page.widget(), TunnelPanel)
+    # The Zotero and LaTeX tabs are scroll areas too, so the lower part of the panel is reachable by scrolling.
+    assert isinstance(tabs["Zotero"], QScrollArea)
+    assert isinstance(tabs["LaTeX"], QScrollArea)
 
 
 # ------------------------------------------------------------------ the slot table and the recent log (no Qt)

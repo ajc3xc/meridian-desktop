@@ -252,6 +252,14 @@ def _page_with_label(label: str, widget: QWidget, parent: QWidget) -> QScrollAre
     return scroll
 
 
+def _scroll_page(widget: QWidget, parent: QWidget) -> QScrollArea:
+    """A tab page that is one widget with its own heading, in a scroll area so the lower part is never hidden."""
+    scroll = QScrollArea(parent)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(widget)
+    return scroll
+
+
 def _zotero_projects(store: SettingsStore, sources: DataSources) -> Callable[[], list[tuple[str, str, str]]]:
     """The project list the Zotero tab's scope reads. When no list can be read, the reason reaches the tab as text."""
     read = _saved_projects(store, sources)
@@ -450,7 +458,8 @@ class MainWindow(QMainWindow):
                 # The one place for the tunnel: status, Start, Stop and Restart, the lanes, the tool groups and the custom
                 # connectors. Its status is read when the tab is first shown. Settings no longer holds a copy.
                 self._tunnel_panel = TunnelPanel(self._store, self._runner_actions, self._tunnel_runner.status, parent=self.tabs)
-                page = self._tunnel_panel
+                # The panel has its own heading. The scroll area keeps its lower part reachable, as Zotero and LaTeX are.
+                page = _scroll_page(self._tunnel_panel, self.tabs)
             elif name == "Search":
                 # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
                 page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
