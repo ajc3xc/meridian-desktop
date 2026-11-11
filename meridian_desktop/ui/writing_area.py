@@ -2,7 +2,7 @@
 
 The area makes no request and reads nothing. The local Meridian server has no DOCX route and no Slides route yet,
 so each line says so in plain words, and no document or deck is made up. The LaTeX engine check stays its own panel
-(in Diagnostics under Settings), and the note in the area says where to find it.
+(on the LaTeX tab), and the note in the area says where to find it.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from meridian_desktop.ui.text import make_selectable
 
 WRITING_SECTION = "Writing (DOCX and Slides on this computer)"
-WRITING_INTRO = "The LaTeX engine check is in Diagnostics, under Settings."
+WRITING_INTRO = "The LaTeX engine check is on the LaTeX tab."
 DOCX_LINE = (
     "DOCX: Not connected. The local Meridian server has no DOCX route yet, "
     "so this desktop cannot read or write DOCX files."
