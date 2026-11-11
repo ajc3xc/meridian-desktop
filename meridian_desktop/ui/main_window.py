@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QThreadPool, Qt, Slot
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -129,6 +130,21 @@ MODE_DESCRIPTIONS = {
 # The window opens at this size (width, height). The tab labels fit at 1280 px, and Home scrolls its cards
 # below that height, so no card is cut off on a short window.
 DEFAULT_WINDOW_SIZE = (1280, 780)
+
+
+def _fit_and_center(window: QWidget, size: tuple[int, int]) -> None:
+    """Open the window no larger than the usable screen area, and centred on it. Without this the window
+    keeps the requested size at the system default position, so on a small or scaled screen its bottom
+    and right edges fall off the screen."""
+    screen = window.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        window.resize(*size)
+        return
+    area = screen.availableGeometry()
+    width = min(size[0], int(area.width() * 0.95))
+    height = min(size[1], int(area.height() * 0.9))
+    window.resize(width, height)
+    window.move(area.x() + (area.width() - width) // 2, area.y() + (area.height() - height) // 2)
 
 
 def _updates_allowed_reader(store: SettingsStore) -> Callable[[], bool]:
@@ -460,7 +476,7 @@ class MainWindow(QMainWindow):
         # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
         # may not shrink below the full bar, so every tab label stays visible.
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
-        self.resize(*DEFAULT_WINDOW_SIZE)
+        _fit_and_center(self, DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
         self.tabs.currentChanged.connect(self._on_tab_changed)
