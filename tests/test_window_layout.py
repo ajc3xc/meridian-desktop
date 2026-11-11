@@ -7,6 +7,7 @@ Settings panel. These tests pin the fix.
 
 import dataclasses
 
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QLabel
 
 from _fakes import MemoryKeyring
@@ -76,10 +77,16 @@ def _clipped_tabs(bar):
     return clipped
 
 
-def test_default_window_is_large_enough(qtbot, settings_path):
+def test_default_window_is_as_large_as_the_screen_allows_and_centred_when_it_fits(qtbot, settings_path):
+    # The window asks for up to 95% of the usable width and 90% of the usable height, and it can never be smaller
+    # than its content (the tab bar and the Settings panel set minimums). When it fits the screen, it is centred.
     window = _shown_window(qtbot, settings_path)
-    assert window.width() >= MIN_DEFAULT_WIDTH
-    assert window.height() >= MIN_DEFAULT_HEIGHT
+    usable = QGuiApplication.primaryScreen().availableGeometry()
+    assert window.width() >= min(MIN_DEFAULT_WIDTH, int(usable.width() * 0.95)) - 1
+    assert window.height() >= min(MIN_DEFAULT_HEIGHT, int(usable.height() * 0.9)) - 1
+    if window.width() <= usable.width() and window.height() <= usable.height():
+        assert abs(window.geometry().center().x() - usable.center().x()) <= 2
+        assert abs(window.geometry().center().y() - usable.center().y()) <= 2
 
 
 def test_every_tab_label_is_visible_at_the_default_size(qtbot, settings_path):
