@@ -54,7 +54,7 @@ from meridian_desktop.tunnel_status import TunnelStatus, read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
-from meridian_desktop.ui.text import make_selectable
+from meridian_desktop.ui.text import enable_table_copy, make_selectable
 from meridian_desktop.ui.tunnel_check import TunnelReadJob
 
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
@@ -91,6 +91,7 @@ def _slot_table(parent: QWidget) -> QTableWidget:
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     table.horizontalHeader().setStretchLastSection(True)
     table.setMaximumHeight(SLOT_TABLE_MAX_HEIGHT)
+    enable_table_copy(table)  # read-only: Ctrl+C and the right-click Copy action copy the selected cells
     rows = model.slot_rows()
     table.setRowCount(len(rows))
     for row_index, row in enumerate(rows):
