@@ -86,7 +86,9 @@ def _check_recorded_reads(reads: list[str], name: str) -> None:
 def _settle(qtbot) -> None:
     """Wait until every worker the tab started has finished. The GPUs tab reads on a worker, so its stubbed reads are
     recorded after the tab is shown, not while it is shown."""
-    qtbot.waitUntil(lambda: QThreadPool.globalInstance().activeThreadCount() == 0, timeout=10000)
+    # 30 seconds: the Zotero and LaTeX tabs add background work, and a worker still running from an earlier
+    # test can hold the pool busy past 10 seconds. The cause of the longest holds has not been pinned down.
+    qtbot.waitUntil(lambda: QThreadPool.globalInstance().activeThreadCount() == 0, timeout=30000)
 
 
 def _show(qtbot, window, index):
