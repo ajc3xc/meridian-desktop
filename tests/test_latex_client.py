@@ -372,13 +372,15 @@ def test_settings_diagnostics_keeps_the_latex_label_and_places_the_panel_under_i
     )
     qtbot.addWidget(window)
     names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-    page = window.tabs.widget(names.index("Settings"))
-    body = page.findChild(QWidget, "settings-page")
+    # LaTeX is a tab of its own now, so the label and its probe sit together on that tab, not under Settings.
+    page = window.tabs.widget(names.index("LaTeX"))
 
-    panel = body.findChild(LatexPanel, "latex-panel")
-    labels = [label for label in body.findChildren(QLabel) if label.text() == LATEX_SECTION]
+    panel = page.findChild(LatexPanel, "latex-panel")
+    labels = [label for label in page.findChildren(QLabel) if label.text() == LATEX_SECTION]
     assert panel is not None
     assert len(labels) == 1
-    # The label and its probe sit together, one under the other, in the one Diagnostics group.
+    settings = window.tabs.widget(names.index("Settings")).findChild(QWidget, "settings-page")
+    assert settings.findChild(LatexPanel) is None
+    # The label and its probe sit together, one under the other, on the LaTeX tab.
     layout = panel.parentWidget().layout()
     assert layout.indexOf(panel) == layout.indexOf(labels[0]) + 1
