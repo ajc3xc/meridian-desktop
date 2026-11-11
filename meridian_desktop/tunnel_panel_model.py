@@ -3,7 +3,7 @@
 The Tunnel panel is the one place in the desktop for the tunnel. It shows six things, and this module makes the
 text and the rows for each one:
 
-- the status: connected or not, and when the tunnel was last checked (from tunnel_status.TunnelStatus);
+- the status: running or not, and when the tunnel was last checked (from tunnel_status.TunnelStatus);
 - the two lanes: the direct lane (claude.ai reaches Meridian core and Tigris directly) and the tunnel lane, with one
   line on what each lane needs;
 - the slots: the tunnel's fixed slot ports (slot_ports.SLOT_PORTS), one row each. The tunnel status holds no per-slot
@@ -14,7 +14,7 @@ text and the rows for each one:
 - the custom connectors, with their tunnel_exposed flag, and the custom_tunnel_opt_in setting, which is off by default.
 
 Nothing here starts, stops, saves or reads a file. The panel calls the status check, the log read and the saves; this
-module only turns their answers into words and rows. A state that is not running is never shown as connected
+module only turns their answers into words and rows. A state that is not running is never shown as running
 (local-trust contract, rule 7).
 """
 
@@ -28,8 +28,8 @@ from meridian_desktop.log_tail import LogTail
 from meridian_desktop.settings_store import Settings
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, TunnelStatus
 
-# The status headlines. "Connected" only when the runner reports the tunnel running.
-CONNECTED_HEADLINE = "Connected"
+# The status headlines. The running headline says the tunnel process runs. It does not say claude.ai is connected.
+RUNNING_HEADLINE = "Tunnel process running"
 NOT_CONNECTED_HEADLINE = "Not connected"
 UNKNOWN_HEADLINE = "Not connected: the status is unknown"
 NOT_CHECKED_HEADLINE = "Not checked yet"
@@ -163,7 +163,8 @@ class SlotRow:
 
 def panel_status(status: TunnelStatus | None, failure: str | None = None) -> PanelStatus:
     """The status block for one finished check. ``status`` is None when the check raised, and then ``failure``
-    holds only the exception's class name. Connected is shown only for a running tunnel. Anything else says not connected."""
+    holds only the exception's class name. The running headline is shown only for a running tunnel process. Anything else
+    says not connected."""
     if status is None:
         detail = " ".join(
             (tunnel_status.CHECK_FAILED_REASON.format(failure or tunnel_status.NO_FAILURE_NAME), PANEL_CHECK_HINT)
@@ -171,7 +172,7 @@ def panel_status(status: TunnelStatus | None, failure: str | None = None) -> Pan
         return PanelStatus(UNKNOWN_HEADLINE, tunnel_status.NO_TIME_TEXT, detail)
     checked = tunnel_status.CHECKED_TEMPLATE.format(status.checked_at.strftime(tunnel_status.TIME_FORMAT))
     if status.state == RUNNING:
-        return PanelStatus(CONNECTED_HEADLINE, checked, status.reason)
+        return PanelStatus(RUNNING_HEADLINE, checked, status.reason)
     if status.state == NOT_RUNNING:
         return PanelStatus(NOT_CONNECTED_HEADLINE, checked, f"{status.reason} {PANEL_START_HINT}")
     return PanelStatus(UNKNOWN_HEADLINE, checked, f"{status.reason} {PANEL_CHECK_HINT}")
@@ -269,7 +270,6 @@ def log_message(tail: LogTail | None) -> str:
 __all__ = [
     "CHECKING_TEXT",
     "CHECK_BUTTON_TEXT",
-    "CONNECTED_HEADLINE",
     "CONNECTORS_HEADING",
     "LOG_EMPTY_TEXT",
     "LOG_FAILED_TEXT",
@@ -296,6 +296,7 @@ __all__ = [
     "PANEL_INTRO",
     "PANEL_TITLE",
     "PanelStatus",
+    "RUNNING_HEADLINE",
     "SLOTS_HEADING",
     "SLOTS_INTRO",
     "SLOT_COLUMNS",

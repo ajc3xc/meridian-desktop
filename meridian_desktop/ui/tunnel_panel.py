@@ -2,7 +2,7 @@
 
 It shows, top to bottom:
 
-- Status: connected or not, and when the tunnel was last checked. One read-only pass runs on the thread pool when the
+- Status: running or not, and when the tunnel was last checked. One read-only pass runs on the thread pool when the
   panel is first shown, and again when Check now is pressed or a Start or Stop has finished. The pass reads the status
   call and then the tail of the tunnel log.
 - Start, Stop and Restart: the existing tunnel commands, through ScopeControls. Each one asks the owner first, in the same

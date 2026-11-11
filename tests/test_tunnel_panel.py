@@ -133,9 +133,9 @@ def _check_and_wait(qtbot, panel, until_text: str, name: str = "tunnelpanel-head
 # ------------------------------------------------------------------ the status words (no Qt)
 
 
-def test_a_running_tunnel_reads_connected_with_its_check_time():
+def test_a_running_tunnel_reads_process_running_with_its_check_time():
     shown = model.panel_status(_status(RUNNING))
-    assert shown.headline == "Connected"
+    assert shown.headline == model.RUNNING_HEADLINE == "Tunnel process running"
     assert shown.checked == f"Checked at {STAMP_TEXT}."
     assert shown.detail == "The runner reports the tunnel process as running."
 
@@ -148,16 +148,16 @@ def test_a_stopped_tunnel_reads_not_connected_and_says_how_to_start_it():
     assert model.PANEL_START_HINT in shown.detail
 
 
-def test_an_unknown_or_failed_check_never_reads_as_connected():
+def test_an_unknown_or_failed_check_never_reads_as_running():
     unknown = model.panel_status(_status(UNKNOWN, "The runner could not verify whether the tunnel process is running."))
     assert unknown.headline == model.UNKNOWN_HEADLINE
-    assert unknown.headline != "Connected"
+    assert unknown.headline != model.RUNNING_HEADLINE
 
     failed = model.panel_status(None, "RuntimeError")
     assert failed.headline == model.UNKNOWN_HEADLINE
     assert failed.checked == "The check did not finish, so no time was recorded."
     assert "RuntimeError" in failed.detail
-    assert failed.headline != model.CONNECTED_HEADLINE
+    assert failed.headline != model.RUNNING_HEADLINE
 
 
 def test_the_tunnel_lane_is_live_only_while_the_tunnel_runs():
@@ -225,9 +225,9 @@ def test_an_unusable_connector_is_listed_without_a_tunnel_switch():
 # ------------------------------------------------------------------ the widget
 
 
-def test_status_shows_connected_when_the_runner_reports_the_tunnel_running(qtbot, settings_path, tmp_path):
+def test_status_shows_process_running_when_the_runner_reports_the_tunnel_running(qtbot, settings_path, tmp_path):
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"))
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
     assert _label(panel, "tunnelpanel-checked").text().startswith("Checked at ")
     assert "Live." in _label(panel, "tunnelpanel-lane-tunnel").text()
 
@@ -239,10 +239,10 @@ def test_status_shows_not_connected_when_the_runner_reports_the_tunnel_stopped(q
     assert "Not live" in _label(panel, "tunnelpanel-lane-tunnel").text()
 
 
-def test_a_status_call_that_raises_is_not_shown_as_connected(qtbot, settings_path, tmp_path):
+def test_a_status_call_that_raises_is_not_shown_as_running(qtbot, settings_path, tmp_path):
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=raising_call)
     _check_and_wait(qtbot, panel, model.UNKNOWN_HEADLINE)
-    assert _label(panel, "tunnelpanel-headline").text() != "Connected"
+    assert _label(panel, "tunnelpanel-headline").text() != model.RUNNING_HEADLINE
 
 
 def test_start_stop_and_restart_are_the_tunnel_controls(qtbot, settings_path, tmp_path):
@@ -494,7 +494,7 @@ def test_the_slot_table_lists_each_slot_port_and_keeps_every_state_not_reported_
     assert [_cells(table, row) for row in range(table.rowCount())] == expected
 
     # The status says running, and the table still reports no slot state, because the status carries no slot data.
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
     assert [_cells(table, row) for row in range(table.rowCount())] == expected
 
 
@@ -504,7 +504,7 @@ def test_the_recent_log_shows_the_last_fifty_lines_of_a_temp_file_with_secrets_r
     log.write_text("\n".join(body) + "\n", encoding="utf-8")
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=log)
 
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
 
     view = panel.findChild(QPlainTextEdit, "tunnelpanel-log")
     expected = [f"line {n}" for n in range(71, 120)] + ["connected with token=[redacted]"]
@@ -521,7 +521,7 @@ def test_a_missing_tunnel_log_says_no_log_yet_and_shows_no_lines(qtbot, settings
     )
     assert _label(panel, "tunnelpanel-log-message").text() == model.LOG_NOT_READ_TEXT
 
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
 
     assert panel.findChild(QPlainTextEdit, "tunnelpanel-log").toPlainText() == ""
     assert _label(panel, "tunnelpanel-log-message").text() == log_tail.NO_LOG_YET_TEXT
@@ -534,7 +534,7 @@ def test_a_tunnel_log_that_cannot_be_read_says_so(qtbot, settings_path, tmp_path
         qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=tmp_path,
     )
 
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
 
     assert panel.findChild(QPlainTextEdit, "tunnelpanel-log").toPlainText() == ""
     assert _label(panel, "tunnelpanel-log-message").text() == log_tail.UNREADABLE_TEXT
@@ -545,7 +545,7 @@ def test_the_log_is_read_again_on_each_check(qtbot, settings_path, tmp_path):
     log.write_text("first\nsecond\n", encoding="utf-8")
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"), log_path=log)
     view = panel.findChild(QPlainTextEdit, "tunnelpanel-log")
-    _check_and_wait(qtbot, panel, "Connected")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
     assert view.toPlainText() == "first\nsecond"
 
     with log.open("a", encoding="utf-8") as handle:
