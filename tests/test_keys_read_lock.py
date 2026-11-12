@@ -5,16 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from meridian_desktop.keys_export import EXPORT_NAME
 
 REPO = Path(__file__).resolve().parents[1]
 READ_RULE = f"Read(**/{EXPORT_NAME})"
 ABSOLUTE_READ_RULE = f"Read(//**/{EXPORT_NAME})"
-# The deny entries the project settings held before this rule. The desktop repo had none, so the list is empty. Any entry
-# added later goes here, so this test fails if a later edit replaces the list instead of merging into it.
-EXISTING_DENY_ENTRIES: tuple[str, ...] = ()
+# The deny entries the project settings must keep. The desktop repo held none before this rule, so the read lock's own two
+# rules are the entries it holds now. Any entry added later goes here too, so an edit that replaces the list instead of
+# merging into it fails the test below.
+EXISTING_DENY_ENTRIES: tuple[str, ...] = (READ_RULE, ABSOLUTE_READ_RULE)
 AGENTS_SENTENCE = f"The keys backup file, {EXPORT_NAME}, must never be read by an agent."
 
 
@@ -28,15 +27,13 @@ def test_agents_md_says_the_keys_backup_file_is_never_read_by_an_agent():
     assert AGENTS_SENTENCE in text
 
 
-def test_the_project_settings_deny_reads_of_the_keys_backup_and_keep_the_existing_deny_entries():
+def test_the_project_settings_are_tracked_and_keep_every_deny_entry():
+    # .claude/settings.json is tracked: the .gitignore re-includes it, so every checkout has the read lock. A missing file
+    # means the lock is gone from this checkout, and the test fails rather than skipping.
     path = REPO / ".claude" / "settings.json"
-    if not path.exists():
-        # .claude/ is in .gitignore as local Claude Code state, so a clean checkout has no project settings file to check.
-        pytest.skip("no local .claude/settings.json in this checkout; the rule lives in the owner's local settings")
+    assert path.is_file(), "the read lock is missing: .claude/settings.json must be present in every checkout"
     deny = json.loads(path.read_text(encoding="utf-8"))["permissions"]["deny"]
 
     assert isinstance(deny, list)
-    assert READ_RULE in deny
-    assert ABSOLUTE_READ_RULE in deny
     for entry in EXISTING_DENY_ENTRIES:
-        assert entry in deny
+        assert entry in deny, f"the deny entry {entry} was dropped from .claude/settings.json"

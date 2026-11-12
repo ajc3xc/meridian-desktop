@@ -8,5 +8,7 @@ __pycache__/
 .pixi/*
 !.pixi/config.toml
 # local Claude Code state and the owner's local handoff notes (not part of the source tree)
-.claude/
+# .claude/settings.json is the one tracked file under .claude/: it carries the read lock every checkout needs.
+.claude/*
+!.claude/settings.json
 docs/handoffs/
