@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -104,6 +104,15 @@ def backed_up_text(count: int, taken_at: datetime) -> str:
     return f"Backed up {count} {noun} on {day_text(taken_at)}."
 
 
+NEVER_BACKED_UP_TEXT = "Never backed up"
+
+
+def backup_time_text(when: datetime) -> str:
+    """The UTC time in plain words for the table, such as 2 Nov 2026 08:25 UTC."""
+    utc = _utc(when)
+    return f"{utc.day} {_MONTHS[utc.month - 1][:3]} {utc.year} {utc:%H:%M} UTC"
+
+
 def destination_text(folder: Path) -> str:
     """The line that states where backups are written, shown before a backup is run."""
     return f"Backups are saved to: {folder}"
@@ -156,14 +165,41 @@ def backup_hosted(
     *,
     folder: Path,
     taken_at: datetime,
+    only_ids: Collection[str] | None = None,
 ) -> BackupWritten:
-    """Read the hosted project list with ``list_hosted`` and write all of it as the newest backup, in one run.
+    """Read the hosted project list with ``list_hosted`` and write it as the newest backup, in one run.
 
-    A failed read raises before anything is written. An answer with no usable project raises NoUsableProjects, and
-    writes and removes nothing. The token is passed to ``list_hosted`` and goes nowhere else.
+    ``only_ids`` limits the backup to those project ids. None means every project in the list. A failed read raises
+    before anything is written. An answer with no usable project raises NoUsableProjects, and writes and removes
+    nothing. The token is passed to ``list_hosted`` and goes nowhere else.
     """
     rows = list_hosted(hosted_url, token)
+    if only_ids is not None:
+        rows = [row for row in rows if isinstance(row, Mapping) and row.get("id") in only_ids]
     return write_backup(rows, folder=folder, taken_at=taken_at)
+
+
+def last_backed_up(folder: Path) -> dict[str, datetime]:
+    """The newest backup time that each project id appears in, read from the backup files in ``folder``. Reads only.
+
+    Files are read newest first, so the first time seen for an id is its newest backup. A file that cannot be read
+    is skipped, and the rest are still read.
+    """
+    found: dict[str, datetime] = {}
+    for path in _backup_files(folder):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            taken = datetime.strptime(document["taken_at"], _JSON_TIME).replace(tzinfo=timezone.utc)
+            rows = document["projects"]
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            kept = _kept_row(row)
+            if kept is not None and kept["id"] not in found:
+                found[kept["id"]] = taken
+    return found
 
 
 def _backup_files(folder: Path) -> list[Path]:
@@ -225,6 +261,7 @@ __all__ = [
     "BACKUP_DIR_NAME",
     "BACKUPS_KEPT",
     "KEPT_FIELDS",
+    "NEVER_BACKED_UP_TEXT",
     "NO_PROJECTS_TEXT",
     "NO_TOKEN_TEXT",
     "BackupWritten",
@@ -233,8 +270,10 @@ __all__ = [
     "backup_dir",
     "backup_hosted",
     "backup_name",
+    "backup_time_text",
     "day_text",
     "destination_text",
+    "last_backed_up",
     "prune_backups",
     "utc_now",
     "write_backup",

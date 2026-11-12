@@ -71,6 +71,8 @@ NONE_TEXT = "(none)"
 BACKUP_BUTTON_TEXT = "Back up hosted projects to this computer"
 BACKUP_RUNNING_TEXT = "Backing up hosted projects..."
 BACKUP_FAILED_TEXT = "Projects could not be backed up"
+SELECTED_BACKUP_BUTTON_TEXT = "Back up selected projects to this computer"
+SELECTED_NONE_TEXT = "Select one or more projects in the table first."
 
 FIELD_LABELS = {
     "id": "ID",
@@ -81,9 +83,12 @@ FIELD_LABELS = {
     "priority": "Priority",
     "parent_project_id": "Parent project",
     "created_at": "Created at",
+    "last_backup": "Last backup",
 }
-# The table columns, in display order. Each one is in PROJECT_COLUMNS.
-TABLE_FIELDS = ("name", "status", "priority", "created_at")
+# The table columns, in display order. Each one is in PROJECT_COLUMNS, except the last: the newest time this computer
+# backed the project up, read from the backups folder. It is not a hosted field.
+TABLE_FIELDS = ("name", "status", "priority", "created_at", "last_backup")
+LAST_BACKUP_FIELD = "last_backup"
 # The name cell stores its tree depth under this role. The delegate reads it to indent the name.
 TREE_DEPTH_ROLE = Qt.ItemDataRole.UserRole + 1
 TREE_INDENT_PX = 18
@@ -199,7 +204,12 @@ def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool]
     return outcome, _usable_token(token)
 
 
-def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
+def _backup_cell(when: object) -> str:
+    """The Last backup cell: the UTC time of the newest local backup of the project, or Never backed up."""
+    return projects_backup.NEVER_BACKED_UP_TEXT if when is None else projects_backup.backup_time_text(when)
+
+
+def _backup_work(store: SettingsStore, sources: DataSources, only_ids: list[str] | None = None) -> _Backed:
     """Runs on a worker: backs up all the hosted projects in one run, through the same hosted reader the tab uses."""
     settings = store.load().settings
     token = sources.get_token()
@@ -212,6 +222,7 @@ def _backup_work(store: SettingsStore, sources: DataSources) -> _Backed:
             str(token),
             folder=projects_backup.backup_dir(),
             taken_at=projects_backup.utc_now(),
+            only_ids=None if only_ids is None else set(only_ids),
         )
     except projects_backup.NoUsableProjects:
         # An empty answer writes nothing, so the backups already on disk are still there.
@@ -300,6 +311,7 @@ class ProjectsTab(QWidget):
         # A backup runs one at a time.
         self._backup_widgets: tuple[QPushButton, QLabel, QLabel] | None = None
         self._backup_running = False
+        self._selected_backup_button: QPushButton | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
@@ -319,7 +331,8 @@ class ProjectsTab(QWidget):
         self._table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in TABLE_FIELDS])
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Ctrl or Shift click selects several projects, so a backup can be run for just those.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -389,9 +402,14 @@ class ProjectsTab(QWidget):
 
     def _fill(self) -> None:
         self._table.setRowCount(len(self._rows))
+        backed = self._last_backups()
         for row_index, (row, depth) in enumerate(zip(self._rows, self._depths)):
             for column, field in enumerate(TABLE_FIELDS):
-                item = QTableWidgetItem(_table_text(row.get(field)))
+                if field == LAST_BACKUP_FIELD:
+                    text = _backup_cell(backed.get(str(row.get("id") or "")))
+                else:
+                    text = _table_text(row.get(field))
+                item = QTableWidgetItem(text)
                 if column == 0:
                     item.setData(TREE_DEPTH_ROLE, depth)
                 self._table.setItem(row_index, column, item)
@@ -403,6 +421,7 @@ class ProjectsTab(QWidget):
 
     @Slot()
     def _show_detail(self) -> None:
+        self._update_selected_button()
         selected = sorted({item.row() for item in self._table.selectedItems()})
         if not selected or selected[0] >= len(self._rows):
             self._detail.setText(DETAIL_EMPTY_TEXT)
@@ -425,14 +444,23 @@ class ProjectsTab(QWidget):
         destination.setText(projects_backup.destination_text(projects_backup.backup_dir()))
         for widget in (button, destination, status):
             widget.setVisible(saved)
+        if self._selected_backup_button is not None:
+            self._selected_backup_button.setVisible(saved)
+        self._update_selected_button()
 
     def _build_backup_row(self) -> tuple[QPushButton, QLabel, QLabel]:
         column = QVBoxLayout()
         row = QHBoxLayout()
         button = QPushButton(BACKUP_BUTTON_TEXT, self)
         button.setObjectName("projects-backup-button")
-        button.clicked.connect(self._start_backup)
+        button.clicked.connect(lambda _checked=False: self._start_backup())
         row.addWidget(button)
+        selected = QPushButton(SELECTED_BACKUP_BUTTON_TEXT, self)
+        selected.setObjectName("projects-backup-selected")
+        selected.setEnabled(False)
+        selected.clicked.connect(lambda _checked=False: self._start_backup(self._selected_ids()))
+        self._selected_backup_button = selected
+        row.addWidget(selected)
         row.addStretch(1)
         destination = make_selectable(QLabel("", self))
         destination.setObjectName("projects-backup-destination")
@@ -449,17 +477,50 @@ class ProjectsTab(QWidget):
         self.layout().insertLayout(1, column)
         return button, destination, status
 
-    def _start_backup(self, _checked: bool = False) -> None:
-        """Start the one backup, which reads every hosted project in one run. A press while one runs does nothing."""
+    def _start_backup(self, only_ids: list[str] | None = None) -> None:
+        """Start one backup run: every hosted project, or only ``only_ids``. A press while one runs does nothing."""
         if self._backup_running or self._backup_widgets is None:
             return
         button, _destination, status = self._backup_widgets
+        if only_ids is not None and not only_ids:
+            status.setText(SELECTED_NONE_TEXT)
+            return
         self._backup_running = True
         button.setEnabled(False)
+        if self._selected_backup_button is not None:
+            self._selected_backup_button.setEnabled(False)
         status.setText(BACKUP_RUNNING_TEXT)
         # The job gets the store and the sources, not self: a worker never holds the tab.
-        work = functools.partial(_backup_work, self._settings, self._sources)
+        work = functools.partial(_backup_work, self._settings, self._sources, only_ids)
         QThreadPool.globalInstance().start(_BackupJob(self._owner, work, shared_delivery()))
+
+    def _selected_ids(self) -> list[str]:
+        """The ids of the projects selected in the table, in table order. Only real rows count."""
+        rows = sorted({index.row() for index in self._table.selectionModel().selectedRows()})
+        ids = []
+        for row_index in rows:
+            if row_index < len(self._rows) and self._rows[row_index].get("id"):
+                ids.append(str(self._rows[row_index]["id"]))
+        return ids
+
+    def _update_selected_button(self) -> None:
+        """The selected-backup button is on only when a project is selected and no backup is running."""
+        if self._selected_backup_button is None:
+            return
+        self._selected_backup_button.setEnabled(bool(self._selected_ids()) and not self._backup_running)
+
+    def _last_backups(self) -> dict[str, object]:
+        """The newest local backup time for each project id, from the backups folder. Nothing is sent or read hosted."""
+        return projects_backup.last_backed_up(projects_backup.backup_dir())
+
+    def _refresh_backup_column(self) -> None:
+        """Set the Last backup cell of every row again, after a backup has been written."""
+        backed = self._last_backups()
+        column = TABLE_FIELDS.index(LAST_BACKUP_FIELD)
+        for row_index, row in enumerate(self._rows):
+            item = self._table.item(row_index, column)
+            if item is not None:
+                item.setText(_backup_cell(backed.get(str(row.get("id") or ""))))
 
     def _show_backup(self, report: _Backed) -> None:
         self._backup_running = False
@@ -468,6 +529,8 @@ class ProjectsTab(QWidget):
         button, _destination, status = self._backup_widgets
         button.setEnabled(True)
         status.setText(report.message)
+        self._update_selected_button()
+        self._refresh_backup_column()
 
     # ----------------------------------------------------------- first show
 

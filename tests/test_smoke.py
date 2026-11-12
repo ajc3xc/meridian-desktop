@@ -347,7 +347,7 @@ def test_projects_tab_lists_rows_and_has_no_write_controls(qtbot, settings_path,
 
     qtbot.waitUntil(lambda: table.rowCount() == 3, timeout=5000)
     headers = tuple(table.horizontalHeaderItem(column).text() for column in range(table.columnCount()))
-    assert headers == ("Name", "Status", "Priority", "Created at")
+    assert headers == ("Name", "Status", "Priority", "Created at", "Last backup")
     # Newest is a subproject of Oldest, so it nests under Oldest. The roots keep the reader's order,
     # newest first (Middle, then Oldest), and Newest follows its parent Oldest.
     assert [table.item(row, 0).text() for row in range(3)] == ["Middle", "Oldest", "Newest"]
