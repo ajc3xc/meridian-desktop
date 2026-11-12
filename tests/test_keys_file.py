@@ -29,9 +29,18 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
-from meridian_desktop.keys_file import MAX_FILE_BYTES, FileNames, KeysFileError, read_names, read_value
+from meridian_desktop.keys_file import (
+    MAX_FILE_BYTES,
+    FileNames,
+    KeysFileError,
+    is_classified,
+    read_names,
+    read_value,
+    split_by_classification,
+)
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
+from meridian_desktop import api_keys
 from meridian_desktop.ui import keys_section as keys_module
 from meridian_desktop.ui.keys_section import (
     FILE_LISTED_MANY_TEXT,
@@ -543,3 +552,83 @@ def test_the_file_is_never_written_by_choosing_checking_removing_or_stopping(qtb
     qtbot.waitUntil(lambda: section.findChild(QWidget, "keys-entry-anthropic") is None, timeout=5000)
 
     assert _state(path) == before
+
+
+# ----------------------------------------------------------- the classified and unclassified groups
+
+
+def _layout_order(section: KeysSection) -> list[str]:
+    """The object names of the widgets in the Keys list, in the order they are laid out. Hidden ones are included."""
+    layout = section._entry_layout  # noqa: SLF001 - the order of the list is what the groups are checked by
+    widgets = (layout.itemAt(index).widget() for index in range(layout.count()))
+    return [widget.objectName() for widget in widgets if widget is not None]
+
+
+def test_a_name_is_classified_only_when_the_built_in_registry_holds_it(monkeypatch):
+    # The real registry holds RunPod alone. A file name is refused when it is RunPod, so no file name is classified today.
+    assert is_classified("RunPod") is True
+    assert is_classified("OpenAI") is False
+    assert split_by_classification(["OpenAI", "Anthropic"]) == ([], ["OpenAI", "Anthropic"])
+    monkeypatch.setattr(api_keys, "BUILT_IN_NAMES", ("RunPod", "OpenAI"))
+    assert is_classified("openai") is True, "the match ignores case, as a name's slug does"
+    assert is_classified("Anthropic") is False
+    assert split_by_classification(["Anthropic", "OpenAI", "GitHub"]) == (["OpenAI"], ["Anthropic", "GitHub"])
+
+
+def test_with_no_file_name_in_the_registry_the_block_shows_only_the_unclassified_group(qtbot, settings_path, tmp_path):
+    path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": FAKE_VALUE_TWO})
+    section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
+
+    _choose(section)
+
+    assert section.findChild(QLabel, "keys-file-classified-heading").isHidden()
+    assert not section.findChild(QLabel, "keys-file-unclassified-heading").isHidden()
+    order = _layout_order(section)
+    assert order.index("keys-file-unclassified-heading") < order.index("keys-entry-openai") < order.index("keys-entry-anthropic")
+
+
+def test_the_block_lists_the_classified_group_first_under_its_heading(qtbot, settings_path, tmp_path, monkeypatch):
+    # The block asks the registry through these two names, so the test puts one file name in the registry.
+    monkeypatch.setattr(keys_module, "is_classified", lambda name: name.casefold() == "openai")
+    monkeypatch.setattr(
+        keys_module,
+        "split_by_classification",
+        lambda names: (
+            [name for name in names if name.casefold() == "openai"],
+            [name for name in names if name.casefold() != "openai"],
+        ),
+    )
+    path = _write(tmp_path, {"Anthropic": FAKE_VALUE, "OpenAI": FAKE_VALUE_TWO, "GitHub": FAKE_VALUE})
+    section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
+
+    _choose(section)
+
+    order = _layout_order(section)
+    classified = order.index("keys-file-classified-heading")
+    unclassified = order.index("keys-file-unclassified-heading")
+    assert classified < order.index("keys-entry-openai") < unclassified
+    assert unclassified < order.index("keys-entry-anthropic") < order.index("keys-entry-github")
+    assert not section.findChild(QLabel, "keys-file-classified-heading").isHidden()
+    assert not section.findChild(QLabel, "keys-file-unclassified-heading").isHidden()
+    assert FAKE_VALUE not in _all_text(section)
+    assert FAKE_VALUE_TWO not in _all_text(section)
+
+
+def test_a_group_heading_hides_when_the_search_hides_its_group(qtbot, settings_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(keys_module, "is_classified", lambda name: name.casefold() == "openai")
+    monkeypatch.setattr(
+        keys_module,
+        "split_by_classification",
+        lambda names: (
+            [name for name in names if name.casefold() == "openai"],
+            [name for name in names if name.casefold() != "openai"],
+        ),
+    )
+    path = _write(tmp_path, {"Anthropic": FAKE_VALUE, "OpenAI": FAKE_VALUE_TWO})
+    section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
+    _choose(section)
+
+    section.findChild(QLineEdit, "keys-search").setText("openai")
+
+    assert not section.findChild(QLabel, "keys-file-classified-heading").isHidden()
+    assert section.findChild(QLabel, "keys-file-unclassified-heading").isHidden()

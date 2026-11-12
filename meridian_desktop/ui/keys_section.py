@@ -65,7 +65,7 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
-from meridian_desktop.keys_file import FileNames, log_listing, read_names
+from meridian_desktop.keys_file import FileNames, is_classified, log_listing, read_names, split_by_classification
 from meridian_desktop.secret_store import SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.confirm import ask_yes_no
@@ -155,6 +155,9 @@ FILE_CHOOSER_FILTER = "JSON files (*.json)"
 FROM_FILE_NOTE = "From file"
 FROM_FILE_DETAIL = "The value stays in the keys file. It is read only when you press Check."
 REMOVED_FROM_FILE_TEXT = "Removed {name} from the list for this session. The keys file is unchanged."
+# The two groups of From file names. A name is classified when it is in the built-in key registry (api_keys).
+CLASSIFIED_HEADING_TEXT = "Classified: the name is in the built-in key registry"
+UNCLASSIFIED_HEADING_TEXT = "Unclassified: the name is not in the built-in key registry"
 
 # A confirmation: (parent, title, text) -> True only when the owner clicks Yes.
 Confirm = Callable[[QWidget, str, str], bool]
@@ -363,6 +366,12 @@ class KeysSection(QWidget):
         column.addLayout(self._entry_layout)
         if self._runpod_card is not None:
             self._build_runpod_frame()
+        # The two group headings of the From file cards. They join the list only while their group has a card, so the list
+        # holds the keychain cards and RunPod alone otherwise.
+        self._classified_heading = _bold(_label(self, "keys-file-classified-heading", CLASSIFIED_HEADING_TEXT))
+        self._unclassified_heading = _bold(_label(self, "keys-file-unclassified-heading", UNCLASSIFIED_HEADING_TEXT))
+        self._classified_heading.setVisible(False)
+        self._unclassified_heading.setVisible(False)
 
         self._build_file_control(column)
 
@@ -628,6 +637,7 @@ class KeysSection(QWidget):
             self._file_path.setToolTip("")
             self._set_file_status("")
             self._drop_file_cards(set())
+            self._lay_out_file_groups([])
             return
         self._file_path.setText(FILE_PATH_TEXT.format(name=Path(path).name))
         self._file_path.setToolTip(path)
@@ -636,6 +646,7 @@ class KeysSection(QWidget):
         if listing.problem is not None:
             self._set_file_status(listing.problem)
             self._drop_file_cards(set())
+            self._lay_out_file_groups([])
             return
         self._set_file_status(_listed_text(len(listing.names)))
         keychain_slugs = {slug(name) for name in keychain_names}
@@ -647,6 +658,24 @@ class KeysSection(QWidget):
         self._drop_file_cards(set(shown))
         for name in shown:
             self._card_for(name, from_file=True).status.setText(FROM_FILE_NOTE)
+        self._lay_out_file_groups(shown)
+
+    def _lay_out_file_groups(self, names: list[str]) -> None:
+        """Order the From file cards: the classified names under their heading, then the unclassified under theirs.
+
+        A heading shows only when its group has a card. The keychain cards and RunPod stay in front of both groups, because
+        _reorder runs after this.
+        """
+        classified, unclassified = split_by_classification(names)
+        for heading, group in ((self._classified_heading, classified), (self._unclassified_heading, unclassified)):
+            self._entry_layout.removeWidget(heading)
+            heading.setVisible(bool(group))
+            if group:
+                self._entry_layout.addWidget(heading)
+            for name in group:
+                frame = self._cards[name].frame
+                self._entry_layout.removeWidget(frame)
+                self._entry_layout.addWidget(frame)
 
     def _log_listing(self, path: str, listing: FileNames) -> None:
         """Write a listing of the keys file to the control log, unless it is the one last written for this path."""
@@ -693,10 +722,17 @@ class KeysSection(QWidget):
         if self._runpod_frame is not None:
             frames.append((RUNPOD_NAME, self._runpod_frame))
         any_match = False
+        # A group heading shows only while one of its From file cards is on screen.
+        group_shown = {True: False, False: False}
         for name, frame in frames:
             match = not query or query in name.casefold()
             frame.setVisible(match)
             any_match = any_match or match
+            card = self._cards.get(name)
+            if match and card is not None and card.from_file:
+                group_shown[is_classified(name)] = True
+        self._classified_heading.setVisible(group_shown[True])
+        self._unclassified_heading.setVisible(group_shown[False])
         # Nothing is said while the names are still being read, because no card exists yet to match against.
         self._search_empty.setVisible(bool(query) and not any_match and not self._loading)
 

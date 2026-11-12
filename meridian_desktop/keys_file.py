@@ -15,11 +15,12 @@ writes the same lines to the control log, one line for each refused entry, so th
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from meridian_desktop import api_keys
 from meridian_desktop.api_keys import BUILT_IN_NAMES, KeyNameError, clean_name, slug
 from meridian_desktop.runner_controls import append_control_line, default_log_path
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH
@@ -90,6 +91,20 @@ class _Object:
 
 def _local_now() -> datetime:
     return datetime.now().astimezone()
+
+
+def is_classified(name: str) -> bool:
+    """True when ``name`` is in the built-in key registry, ``api_keys.BUILT_IN_NAMES``. Every other name is unclassified.
+
+    The registry is read on each call, so a name the registry gains is classified at once.
+    """
+    return slug(name) in {slug(known) for known in api_keys.BUILT_IN_NAMES}
+
+
+def split_by_classification(names: Iterable[str]) -> tuple[list[str], list[str]]:
+    """The names split into (classified, unclassified). Each group keeps the order the names came in."""
+    listed = list(names)
+    return [name for name in listed if is_classified(name)], [name for name in listed if not is_classified(name)]
 
 
 def _read_pairs(path: Path) -> list[tuple[str, object]]:
@@ -244,8 +259,10 @@ __all__ = [
     "FileNames",
     "KeysFileError",
     "Refusal",
+    "is_classified",
     "listing_log_lines",
     "log_listing",
     "read_names",
     "read_value",
+    "split_by_classification",
 ]
