@@ -278,7 +278,8 @@ def test_the_dependency_names_the_three_tools_and_says_they_are_unavailable_whil
 
 
 def test_the_start_hint_points_to_the_tunnel_panel_and_names_no_terminal_command():
-    assert "Tunnel panel in Settings" in START_HINT
+    assert "Tunnel panel" in START_HINT
+    assert "in Settings" not in START_HINT
     assert "asks first" in START_HINT
     assert "Home" in CHECK_HINT
     assert "pixi run" not in START_HINT

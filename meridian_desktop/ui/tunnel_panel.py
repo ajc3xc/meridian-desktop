@@ -7,14 +7,12 @@ It shows, top to bottom:
   call and then the tail of the tunnel log.
 - Start, Stop and Restart: the existing tunnel commands, through ScopeControls. Each one asks the owner first, in the same
   dialog as the rest of the runner controls, and the gate (tunnel_control_enabled and the core setup) turns them off with
-  the reason shown. The Home tunnel card holds no start or stop control; it opens this panel.
+  the reason shown. The Home tunnel card has a Start of its own, through the same ScopeControls; Stop and Restart are only here.
 - Lanes: the direct lane and the tunnel lane. The tunnel lane shows whether it is live, and each lane gets one line on
   what it needs.
 - Slots: the tunnel's slot ports, one row each, with the state the tunnel status reports. The status reports no state for
   a slot yet, so each row says it is not reported.
 - Recent log: the last 50 lines of the tunnel log, already redacted. The panel only reads it.
-- Tool groups: one switch per group. Each switch saves the existing disabled_tools setting, so it is the same switch as
-  the group switch under MCP tools in Settings.
 - Custom connectors: the tunnel opt-in (off by default), and each saved connector with its tunnel flag.
 
 The words and rows come from meridian_desktop/tunnel_panel_model.py. Saves go through the settings store, and a settings
@@ -43,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import custom_connectors, tool_catalog
+from meridian_desktop import custom_connectors
 from meridian_desktop import tunnel_panel_model as model
 from meridian_desktop.custom_connectors import ConnectorError
 from meridian_desktop.log_tail import LogTail, read_tunnel_log_tail
@@ -128,8 +126,6 @@ class TunnelPanel(QWidget):
         # Identifies this panel's checks. A plain object, so a job can hold it without holding the panel.
         self._owner = object()
         self._state: str | None = None
-        self._group_boxes: dict[str, QCheckBox] = {}
-        self._group_counts: dict[str, QLabel] = {}
         shared_delivery().delivered.connect(self._on_delivered)
 
         heading = _heading(self, "tunnelpanel-heading", model.PANEL_TITLE)
@@ -159,20 +155,6 @@ class TunnelPanel(QWidget):
         self._slots_heading = _heading(self, "tunnelpanel-slots-heading", model.SLOTS_HEADING)
         self._slots_intro = _text(self, "tunnelpanel-slots-intro", model.SLOTS_INTRO)
         self._slots = _slot_table(self)
-
-        # Tool groups: one switch per group, saved as the existing disabled_tools setting.
-        self._groups_heading = _heading(self, "tunnelpanel-groups-heading", model.GROUPS_HEADING)
-        self._groups_intro = _text(self, "tunnelpanel-groups-intro", model.GROUPS_INTRO)
-        group_column = QVBoxLayout()
-        for group in tool_catalog.GROUPS:
-            box = QCheckBox(model.GROUP_SWITCH_TEXT.format(title=group.title), self)
-            box.setObjectName(f"tunnelpanel-group-{group.id}")
-            box.toggled.connect(lambda checked, gid=group.id: self._on_group_toggled(gid, checked))
-            count = _text(self, f"tunnelpanel-group-{group.id}-count")
-            self._group_boxes[group.id] = box
-            self._group_counts[group.id] = count
-            group_column.addWidget(box)
-            group_column.addWidget(count)
 
         # Custom connectors: the opt-in, then each saved connector with its tunnel flag.
         self._connectors_heading = _heading(self, "tunnelpanel-connectors-heading", model.CONNECTORS_HEADING)
@@ -213,9 +195,6 @@ class TunnelPanel(QWidget):
         column.addWidget(self._slots_heading)
         column.addWidget(self._slots_intro)
         column.addWidget(self._slots)
-        column.addWidget(self._groups_heading)
-        column.addWidget(self._groups_intro)
-        column.addLayout(group_column)
         column.addWidget(self._connectors_heading)
         column.addWidget(self._connectors_intro)
         column.addWidget(self._opt_in)
@@ -304,12 +283,6 @@ class TunnelPanel(QWidget):
     def refresh(self) -> None:
         """Show the saved choices again. Showing them saves nothing, and reads no status."""
         settings = self._store.load().settings
-        for row in model.group_rows(settings.disabled_tools):
-            box = self._group_boxes[row.id]
-            box.blockSignals(True)  # showing the saved value must not save it again
-            box.setChecked(row.on)
-            box.blockSignals(False)
-            self._group_counts[row.id].setText(row.count)
         self._opt_in.blockSignals(True)
         self._opt_in.setChecked(settings.custom_tunnel_opt_in)
         self._opt_in.blockSignals(False)
@@ -368,15 +341,6 @@ class TunnelPanel(QWidget):
         self._show(SAVED_TEXT)
         self.refresh()
         return True
-
-    def _on_group_toggled(self, group_id: str, checked: bool) -> None:
-        keys = set(model.group_toggle_keys(group_id))
-        off = set(self._store.load().settings.disabled_tools)
-        if checked:
-            off -= keys
-        else:
-            off |= keys
-        self._save_changes(disabled_tools=tool_catalog.normalise(off))
 
     def _on_opt_in_toggled(self, checked: bool) -> None:
         self._save_changes(custom_tunnel_opt_in=bool(checked))

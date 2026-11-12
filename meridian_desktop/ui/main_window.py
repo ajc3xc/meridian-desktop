@@ -10,7 +10,7 @@ owner presses it.
 Home (ui/home_tab.py) has one card for each part of Meridian: the local Meridian server, the tunnel, the services
 (the LaTeX engine and the slot ports), Zotero, the AI clients and their tools, and the updates. Each card checks its
 part on its own when the window first shows, again every five minutes while Home is showing, and when Check now is
-pressed. The tunnel's Start, Stop and Restart are in the Tunnel panel in Settings, and each asks first. The Zotero launch
+pressed. The tunnel card's Start is on Home, Stop and Restart are on the Tunnel tab, and each asks first. The Zotero launch
 asks first too. Search (ui/search_tab.py) lists the local server's code, outputs and research, grouped by source. It has no
 search box. Code and outputs have no list route yet, so they send nothing, and research runs are read from the Local URL.
 The Tunnel tab (ui/tunnel_panel.py) is the one place for the tunnel: its status, Start, Stop and
@@ -428,6 +428,8 @@ class MainWindow(QMainWindow):
             if name == "Home":
                 home = HomeTab(self._home_deps(), parent=self.tabs)
                 home.settingsRequested.connect(self._show_settings)
+                home.tunnelRequested.connect(self._show_tunnel)
+                home.tunnelChanged.connect(self._on_tunnel_changed)
                 self._home_page = home
                 page: QWidget = home
             elif name == "Projects":
@@ -455,11 +457,12 @@ class MainWindow(QMainWindow):
                     parent=self.tabs,
                 )
             elif name == "Tunnel":
-                # The one place for the tunnel: status, Start, Stop and Restart, the lanes, the tool groups and the custom
+                # The tunnel's status, Start, Stop and Restart (the Home card has its own Start), the lanes, the tool groups and the custom
                 # connectors. Its status is read when the tab is first shown. Settings no longer holds a copy.
                 self._tunnel_panel = TunnelPanel(self._store, self._runner_actions, self._tunnel_runner.status, parent=self.tabs)
                 # The panel has its own heading. The scroll area keeps its lower part reachable, as Zotero and LaTeX are.
                 page = _scroll_page(self._tunnel_panel, self.tabs)
+                self._tunnel_page = page
             elif name == "Search":
                 # Nothing is searched on build or show. Search or Enter reads the Local URL at that moment.
                 page = SearchTab(_saved_local_url(self._store), parent=self.tabs)
@@ -600,6 +603,19 @@ class MainWindow(QMainWindow):
     def _show_settings(self) -> None:
         """Switch to the Settings tab. Home's Settings buttons use this."""
         self.tabs.setCurrentWidget(self._settings_page)
+
+    def _show_tunnel(self) -> None:
+        """Switch to the Tunnel tab. Home's Open the Tunnel panel button uses this."""
+        self.tabs.setCurrentWidget(self._tunnel_page)
+
+    @Slot()
+    def _on_tunnel_changed(self) -> None:
+        """A Start from the Home tunnel card has finished. Read the Tunnel tab and the top-bar line again, so all three agree."""
+        panel = getattr(self, "_tunnel_panel", None)
+        if panel is not None:
+            panel.check()
+        if self._saved_mode == TUNNEL_MODE:
+            self._start_tunnel_check()
 
     @Slot(int)
     def _on_tab_changed(self, index: int) -> None:

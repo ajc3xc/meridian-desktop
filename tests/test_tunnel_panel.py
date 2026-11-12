@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QCheckBox, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QWidget
 
-from meridian_desktop import log_tail, slot_ports, tool_catalog
+from meridian_desktop import log_tail, slot_ports
 from meridian_desktop import tunnel_panel_model as model
 from meridian_desktop.log_tail import LogTail
 from meridian_desktop.runner_client import RunnerResult
@@ -186,19 +186,11 @@ def test_each_lane_says_what_it_needs():
     assert "needs this desktop or the tunnel running" in tunnel.needs
 
 
-def test_a_group_is_on_only_when_every_tool_in_it_is_on():
-    rows = {row.id: row for row in model.group_rows(())}
-    assert all(row.on for row in rows.values())
-    code = tool_catalog.group_keys("code")
-    assert rows["code"].count == f"{len(code)} of {len(code)} on"
-
-
-def test_a_group_with_some_tools_off_is_unchecked_and_counts_them():
-    keys = tool_catalog.group_keys("debug")
-    rows = {row.id: row for row in model.group_rows(keys[:2])}
-    assert rows["debug"].on is False
-    assert rows["debug"].count == f"{len(keys) - 2} of {len(keys)} on"
-    assert rows["code"].on is True
+def test_the_tunnel_panel_holds_no_tool_group_switches(qtbot, settings_path, tmp_path):
+    # The tool groups are the MCP tools switches in Settings. They are not part of the tunnel panel.
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
+    names = [box.objectName() for box in panel.findChildren(QCheckBox)]
+    assert not [name for name in names if name.startswith("tunnelpanel-group-")]
 
 
 def test_the_tunnel_opt_in_is_off_by_default():
@@ -283,31 +275,6 @@ def test_the_start_button_is_off_while_the_tunnel_switch_is_off(qtbot, settings_
     assert confirm.asked == [] and spawn.calls == []
 
 
-def test_the_group_switch_turns_every_tool_of_the_group_off_and_on(qtbot, settings_path, tmp_path):
-    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
-    code_keys = set(tool_catalog.group_keys("code"))
-    box = _box(panel, "tunnelpanel-group-code")
-    assert box.isChecked() is True
-
-    box.click()  # off
-    assert set(SettingsStore(settings_path).load().settings.disabled_tools) == code_keys
-    assert _box(panel, "tunnelpanel-group-code").isChecked() is False
-    assert _label(panel, "tunnelpanel-group-code-count").text() == f"0 of {len(code_keys)} on"
-
-    _box(panel, "tunnelpanel-group-code").click()  # on again
-    assert SettingsStore(settings_path).load().settings.disabled_tools == ()
-    assert _box(panel, "tunnelpanel-group-code").isChecked() is True
-
-
-def test_a_group_with_one_tool_off_shows_unchecked_with_its_count(qtbot, settings_path, tmp_path):
-    keys = tool_catalog.group_keys("latex")
-    _settings(settings_path, disabled_tools=(keys[0],))
-    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
-    panel.refresh()
-    assert _box(panel, "tunnelpanel-group-latex").isChecked() is False
-    assert _label(panel, "tunnelpanel-group-latex-count").text() == f"{len(keys) - 1} of {len(keys)} on"
-
-
 def test_the_opt_in_is_off_by_default_and_saves_only_when_turned_on(qtbot, settings_path, tmp_path):
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
     assert _box(panel, "tunnelpanel-opt-in").isChecked() is False
@@ -348,7 +315,7 @@ def test_a_settings_file_with_a_problem_is_not_written_over(qtbot, settings_path
     before = settings_path.read_text(encoding="utf-8")
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path)
 
-    _box(panel, "tunnelpanel-group-docs").click()
+    _box(panel, "tunnelpanel-opt-in").click()
 
     assert settings_path.read_text(encoding="utf-8") == before
     assert _label(panel, "tunnelpanel-message").text() == PROBLEM_TEXT

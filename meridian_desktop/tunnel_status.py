@@ -72,7 +72,7 @@ DEPENDENCY_TEXT = (
 # Where the owner starts or checks the tunnel. The buttons are in the Tunnel panel in Settings, and Start asks first. No
 # command is typed by hand, so these hints name the panel and never a terminal command.
 START_HINT = (
-    "To start it, press Start in the Tunnel panel in Settings. The desktop asks first and starts nothing without a yes."
+    "To start it, press Start on the Home tunnel card or in the Tunnel panel. The desktop asks first and starts nothing without a yes."
 )
 CHECK_HINT = "Press Check now on Home to check it again."
 

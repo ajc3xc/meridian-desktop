@@ -138,6 +138,8 @@ class RunnerActions(QObject):
     """
 
     coreChanged = Signal()
+    # Emitted when a tunnel or local call is claimed or released, so every control for that scope reads its state again.
+    scopeBusyChanged = Signal()
 
     def __init__(
         self,
@@ -175,6 +177,8 @@ class RunnerActions(QObject):
         # Identifies this object's searches. A plain object, so a job can hold it without holding the object.
         self._locate_owner = object()
         self._locate_generation = 0
+        # The owner that holds each scope's one call (the Tunnel tab's controls and the Home card's Start share it).
+        self._scope_owner: dict[str, object] = {}
         shared_delivery().delivered.connect(self._on_located)
 
     def _log(self) -> Path:
@@ -193,6 +197,25 @@ class RunnerActions(QObject):
     def locating(self) -> bool:
         """True while a core search is running."""
         return self._locating
+
+    def scope_busy_by_other(self, scope: str, owner: object) -> bool:
+        """True while a different control holds this scope's call. Only one start, stop or restart runs per scope."""
+        holder = self._scope_owner.get(scope)
+        return holder is not None and holder is not owner
+
+    def begin_scope_call(self, scope: str, owner: object) -> bool:
+        """Claim the scope for one owner's call. False when another owner holds it. Starts nothing."""
+        if self.scope_busy_by_other(scope, owner):
+            return False
+        self._scope_owner[scope] = owner
+        self.scopeBusyChanged.emit()
+        return True
+
+    def end_scope_call(self, scope: str, owner: object) -> None:
+        """Release the scope when this owner's whole action has finished. A restart holds it through its start too."""
+        if self._scope_owner.get(scope) is owner:
+            del self._scope_owner[scope]
+            self.scopeBusyChanged.emit()
 
     def core(self) -> CoreSetup:
         """The settings as they are saved now. Read on the calling thread, and cheap (one small file).

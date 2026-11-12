@@ -1,4 +1,4 @@
-"""Start, Stop and Restart for one runner scope: the tunnel on the Tunnel tab, the local server in Settings. Qt code.
+"""Start, Stop and Restart for one runner scope: the tunnel on the Home card and the Tunnel tab, the local server in Settings. Qt code.
 
 Every button asks the owner first, in a dialog that names the exact command, the scope and the working folder
 (rule 2). Cancel changes nothing. The call runs on the thread pool, and its result comes back through the shared
@@ -35,6 +35,8 @@ from meridian_desktop.ui.runner_actions import CoreSetup, RunnerActions, submit
 from meridian_desktop.ui.text import make_selectable
 
 RESTART = "restart"
+# Every control a card can offer. A card may offer only some: the Home tunnel card offers Start alone.
+ALL_CONTROLS = (START, STOP, RESTART)
 TUNNEL_OFF_TEXT = (
     "The tunnel controls are off. Turn them on with the button here. Each one still asks first, "
     "and the desktop never starts or stops the tunnel by itself."
@@ -70,6 +72,7 @@ RESTART_BLOCKED_TEXT = (
     "Restart stopped before the start, so nothing was started. The controls are now off, or the core setup changed."
 )
 ACTION_FAILED_TEXT = "The {label} action could not be completed ({failure})."
+BUSY_OTHER_TEXT = "The {label} is busy with another action, so nothing was started or stopped. Try again when it finishes."
 
 Gate = Callable[[CoreSetup], tuple[bool, str]]
 
@@ -115,6 +118,7 @@ class ScopeControls(QWidget):
         *,
         prefix: str,
         parent: QWidget | None = None,
+        offered: tuple[str, ...] = ALL_CONTROLS,
     ) -> None:
         super().__init__(parent)
         self.setObjectName(f"{prefix}-controls")
@@ -136,17 +140,18 @@ class ScopeControls(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
-        self._start = QPushButton(BUTTON_TEXT[START].format(label=self._label), self)
-        self._start.setObjectName(f"{prefix}-start")
-        self._stop = QPushButton(BUTTON_TEXT[STOP].format(label=self._label), self)
-        self._stop.setObjectName(f"{prefix}-stop")
-        self._restart = QPushButton(BUTTON_TEXT[RESTART].format(label=self._label), self)
-        self._restart.setObjectName(f"{prefix}-restart")
+        # Only the offered controls get a button, so a card that offers Start alone holds no Stop or Restart button.
+        self._buttons: dict[str, QPushButton] = {}
+        for kind in ALL_CONTROLS:
+            if kind in offered:
+                button = QPushButton(BUTTON_TEXT[kind].format(label=self._label), self)
+                button.setObjectName(f"{prefix}-{kind}")
+                self._buttons[kind] = button
         # The one-step fix. It is shown only while the gate is off, next to the greyed controls, and says what it does.
         self._fix = QPushButton(self)
         self._fix.setObjectName(f"{prefix}-fix")
         self._fix.setVisible(False)
-        for button in (self._start, self._stop, self._restart, self._fix):
+        for button in (*self._buttons.values(), self._fix):
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -156,12 +161,14 @@ class ScopeControls(QWidget):
         layout.addWidget(self._note)
         layout.addWidget(self._result)
 
-        self._start.clicked.connect(self._on_start_clicked)
-        self._stop.clicked.connect(self._on_stop_clicked)
-        self._restart.clicked.connect(self._on_restart_clicked)
+        handlers = {START: self._on_start_clicked, STOP: self._on_stop_clicked, RESTART: self._on_restart_clicked}
+        for kind, button in self._buttons.items():
+            button.clicked.connect(handlers[kind])
         self._fix.clicked.connect(self._on_fix_clicked)
         # The core search and a chosen core folder change the gate, so the buttons read the setup again then.
         actions.coreChanged.connect(self.refresh_enabled)
+        # Another tab or card may hold this scope's one call, so the buttons read that again when it changes.
+        actions.scopeBusyChanged.connect(self._set_buttons)
         self.refresh_enabled()
 
     # ----------------------------------------------------------- state
@@ -178,8 +185,8 @@ class ScopeControls(QWidget):
         self._set_buttons()
 
     def _set_buttons(self) -> None:
-        on = self._enabled_by_gate and not self._busy
-        for button in (self._start, self._stop, self._restart):
+        on = self._enabled_by_gate and not self._busy and not self._actions.scope_busy_by_other(self._scope, self._owner)
+        for button in self._buttons.values():
             button.setEnabled(on)
         self._fix.setVisible(self._fix_kind is not None)
         self._fix.setEnabled(self._fix_kind is not None and not self._busy)
@@ -189,6 +196,8 @@ class ScopeControls(QWidget):
         self._result.setVisible(bool(text))
 
     def _finish(self) -> None:
+        # The whole action is over, so this widget gives the scope back. A restart kept it through its start too.
+        self._actions.end_scope_call(self._scope, self._owner)
         self._set_buttons()
         self.actionFinished.emit()
 
@@ -242,6 +251,10 @@ class ScopeControls(QWidget):
             # The buttons are off, so nothing is asked and nothing runs. The gate note already says why.
             self.refresh_enabled()
             return
+        if self._actions.scope_busy_by_other(self._scope, self._owner):
+            # Another tab or card is running this scope's call, so nothing is asked and nothing runs.
+            self._show(BUSY_OTHER_TEXT.format(label=self._label))
+            return
         first = STOP if restart else subcommand
         if restart:
             question = RESTART_STOP_QUESTION.format(label=self._label)
@@ -256,6 +269,11 @@ class ScopeControls(QWidget):
         self._submit(first, core.python, core.cwd, then=START if restart else None, restart=restart)
 
     def _submit(self, subcommand: str, python: str, cwd: str, *, then: str | None, restart: bool = False) -> None:
+        # Claim the scope first. A restart already holds it from its stop, so the claim simply succeeds again.
+        if not self._actions.begin_scope_call(self._scope, self._owner):
+            self._show(BUSY_OTHER_TEXT.format(label=self._label))
+            self._finish()
+            return
         self._busy = True
         self._pending = (python, cwd, then)
         self._generation += 1

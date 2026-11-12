@@ -4,9 +4,10 @@ The cards are the local Meridian server, the tunnel, the services (the LaTeX eng
 AI clients and their tools, and the updates. Each card runs its check when the window first shows, again every five
 minutes while Home is showing, and when Check now is pressed. No button starts the first check.
 
-The checks read only, with one exception the owner confirms first: Launch Zotero asks in the same confirmation dialog
-the Zotero panel uses. The tunnel card has no start or stop control. Its one button only switches to Settings, where the
-Tunnel panel (ui/tunnel_panel.py) holds the tunnel's Start, Stop and Restart. The other Settings buttons only switch tabs.
+The checks read only, with two exceptions the owner confirms first: Launch Zotero asks in the same confirmation dialog
+the Zotero panel uses, and the tunnel card's Start asks in the same dialog the Tunnel tab uses (ScopeControls, gated the
+same way). The tunnel card has no Stop or Restart. Its other button switches to the Tunnel tab, where the Tunnel panel
+(ui/tunnel_panel.py) holds Stop and Restart as well. The other buttons only switch tabs.
 
 Every check runs on the thread pool through runner_actions.submit, so the window stays responsive, and no check holds
 a card. Each card keeps a generation number, so an answer from a superseded check is dropped. A check that has not
@@ -61,12 +62,14 @@ from meridian_desktop.home_status import (
 )
 from meridian_desktop.latex_client import EngineStatus
 from meridian_desktop.runner_client import RunnerResult
+from meridian_desktop.runner_controls import SCOPE_TUNNEL, START
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.tunnel_status import read_tunnel_status
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions, submit
+from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.services_page import probe_engine_status
 from meridian_desktop.ui.text import (
     BlockLine,
@@ -90,11 +93,12 @@ ROW_GAP = 6
 ROW_BUTTON_GAP = 6
 INTRO_TEXT = (
     "Each card checks its part of Meridian on its own: when this window opens, and again every five minutes while "
-    "Home is showing. The checks only read. Launch Zotero asks before it acts. The tunnel's controls are in the Tunnel panel."
+    "Home is showing. The checks only read. Launch Zotero asks before it acts. The tunnel's Start is on its card, and Stop "
+    "and Restart are on the Tunnel tab."
 )
 CHECK_NOW_TEXT = "Check now"
 TITLE_TEXT = "Home"
-# The Tunnel card's one control. It opens the Tunnel panel in Settings, where the tunnel's Start, Stop and Restart are.
+# The Tunnel card's button that opens the Tunnel tab, where the tunnel's Stop and Restart are.
 OPEN_TUNNEL_PANEL_TEXT = "Open the Tunnel panel"
 LAUNCH_CANCELLED_TEXT = "Launch cancelled. Nothing was started and no file was written."
 LAUNCHING_TEXT = "Launching Zotero..."
@@ -551,10 +555,14 @@ class HomeTab(QWidget):
     """The Home tab: the cards in two columns, a Check now button, and the one-line intro.
 
     ``settingsRequested`` is emitted when a card's Settings button is pressed. The window connects it to its own
-    Settings switch. A signal, not a callback, so the tab never holds the window in memory.
+    Settings switch. ``tunnelRequested`` is emitted by the tunnel card's Open the Tunnel panel button, and the window
+    connects it to the Tunnel tab. Signals, not callbacks, so the tab never holds the window in memory.
     """
 
     settingsRequested = Signal()
+    tunnelRequested = Signal()
+    # Emitted when a Start from the tunnel card has finished, so the Tunnel tab and the top bar read the tunnel again.
+    tunnelChanged = Signal()
 
     def __init__(self, deps: HomeDeps, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -672,15 +680,27 @@ class HomeTab(QWidget):
         self._refresh_updates()
 
     def _controls_row(self) -> None:
-        """The Tunnel card's one control: a button that opens the Tunnel panel in Settings. Start, Stop and Restart live there."""
+        """The Tunnel card's controls: Start, which asks first and is off while the tunnel switch or the core is not set (the
+        same gate and dialog as the Tunnel tab), and a button that opens the Tunnel tab, where Stop and Restart are."""
+        deps = self._deps
+        if deps.actions is not None:
+            self._tunnel_start = ScopeControls(
+                SCOPE_TUNNEL, deps.actions, tunnel_gate, prefix="home-tunnel", offered=(START,), parent=self._tunnel,
+            )
+            self._tunnel_start.actionFinished.connect(self._on_tunnel_action_finished)
+            self._tunnel.add_body(self._tunnel_start)
         self._tunnel_settings = QPushButton(OPEN_TUNNEL_PANEL_TEXT, self._tunnel)
         self._tunnel_settings.setObjectName("home-tunnel-settings")
-        self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_settings())
+        self._tunnel_settings.clicked.connect(lambda _checked=False: self._open_tunnel())
         self._tunnel.add_body(self._tunnel_settings)
-        deps = self._deps
         if deps.actions is not None:
             # The launch-time core search can finish after the boot checks, so the core-dependent cards read again then.
             deps.actions.coreChanged.connect(self._on_core_changed)
+
+    def _on_tunnel_action_finished(self) -> None:
+        """A Start from the tunnel card has finished: read the card, and tell the window to read the Tunnel tab too."""
+        self._tunnel.check(replace=True)
+        self.tunnelChanged.emit()
 
     def _on_core_changed(self) -> None:
         """The core search finished, or the core setup was saved: the Tunnel and Tools cards read again.
@@ -730,6 +750,9 @@ class HomeTab(QWidget):
 
     def _open_settings(self) -> None:
         self.settingsRequested.emit()
+
+    def _open_tunnel(self) -> None:
+        self.tunnelRequested.emit()
 
     def _open_release_page(self) -> None:
         bar = self._deps.updates

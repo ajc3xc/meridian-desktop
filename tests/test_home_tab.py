@@ -292,11 +292,16 @@ def _core_settings(tmp_path):
     return store
 
 
-def test_the_tunnel_card_holds_no_start_or_stop_control_and_opens_the_tunnel_panel(qtbot, tmp_path):
+def test_the_tunnel_card_offers_start_and_opens_the_tunnel_tab_but_holds_no_stop_or_restart(qtbot, tmp_path):
     tab = _shown(qtbot, _deps(tmp_path))
     _wait_settled(qtbot, tab, "tunnel")
-    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart"):
+    for name in ("tunnel-start", "tunnel-stop", "tunnel-restart", "home-tunnel-stop", "home-tunnel-restart"):
         assert tab.findChild(QPushButton, name) is None, name
+    # No core is set in this test, so the card's Start is off, and the gate says why.
+    start = tab.findChild(QPushButton, "home-tunnel-start")
+    assert start is not None
+    assert start.text() == "Start tunnel"
+    assert start.isEnabled() is False
     settings_button = tab.findChild(QPushButton, "home-tunnel-settings")
     assert settings_button is not None
     assert settings_button.isVisible()
@@ -364,10 +369,43 @@ def test_a_search_still_running_does_not_re_read_the_cards_yet(qtbot, tmp_path):
     assert len(reads) == before
 
 
-def test_open_settings_asks_the_window_to_switch_tabs(qtbot, tmp_path):
+def test_the_tunnel_card_start_asks_first_and_runs_nothing_when_the_owner_says_no(qtbot, tmp_path):
+    store = _core_settings(tmp_path)
+    asked = []
+
+    def confirm(parent, title, body, confirm_text):
+        asked.append(confirm_text)
+        return False
+
+    actions = RunnerActions(store, make_control=lambda python, cwd: None, confirm=confirm)
+    tab = _shown(qtbot, _deps(tmp_path, actions=actions))
+    _wait_settled(qtbot, tab, "tunnel")
+    start = tab.findChild(QPushButton, "home-tunnel-start")
+    assert start.isEnabled() is True
+    start.click()
+    assert asked == ["Start"]
+    assert tab.findChild(QLabel, "home-tunnel-control-result").text() == "Start cancelled. Nothing was started."
+
+
+def test_a_tunnel_call_on_another_control_disables_the_home_start_until_it_ends(qtbot, tmp_path):
+    store = _core_settings(tmp_path)
+    actions = RunnerActions(store, make_control=lambda python, cwd: None, confirm=lambda *args: False)
+    tab = _shown(qtbot, _deps(tmp_path, actions=actions))
+    _wait_settled(qtbot, tab, "tunnel")
+    start = tab.findChild(QPushButton, "home-tunnel-start")
+    assert start.isEnabled() is True
+    # Another owner holds the tunnel's one call, as the Tunnel tab's Stop or Restart does while it runs.
+    other = object()
+    assert actions.begin_scope_call("tunnel", other) is True
+    assert start.isEnabled() is False
+    actions.end_scope_call("tunnel", other)
+    assert start.isEnabled() is True
+
+
+def test_open_tunnel_panel_asks_the_window_to_switch_to_the_tunnel_tab(qtbot, tmp_path):
     tab = _shown(qtbot, _deps(tmp_path))
     _wait_settled(qtbot, tab, "tunnel")
-    with qtbot.waitSignal(tab.settingsRequested, timeout=2000):
+    with qtbot.waitSignal(tab.tunnelRequested, timeout=2000):
         tab.findChild(QPushButton, "home-tunnel-settings").click()
 
 

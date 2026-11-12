@@ -321,7 +321,7 @@ def test_the_top_bar_detail_names_the_tools_that_need_the_tunnel(state):
 def test_a_tunnel_that_is_not_running_says_how_to_start_it_and_that_the_desktop_does_not():
     detail = bar_texts(_status(NOT_RUNNING))[1]
     assert START_HINT in detail
-    assert "Tunnel panel in Settings" in detail
+    assert "Tunnel panel" in detail
     assert "pixi run" not in detail  # no hand-typed terminal command
     # A running tunnel gets no start instructions at all.
     assert START_HINT not in bar_texts(_status(RUNNING))[1]
@@ -592,7 +592,7 @@ def test_a_failed_save_on_the_switch_to_tunnel_runs_no_check(qtbot, settings_pat
 # ------------------------------------------------------------------ no start control, and plain labels
 
 
-def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_by_default(qtbot, settings_path):
+def test_tunnel_controls_sit_on_the_tunnel_tab_and_home_offers_only_start_all_disabled_by_default(qtbot, settings_path):
     runner = RecordingRunner(reply=_status_reply("not_started"))
     window = _window(qtbot, settings_path, mode="tunnel", runner=runner)
     qtbot.waitUntil(lambda: _line(window).startswith("Tunnel not running. "), timeout=5000)
@@ -607,6 +607,7 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     # Only the owner-confirmed controls are start-like: the Zotero start, the local scope's three buttons in
     # Settings, and the tunnel scope's three buttons in the Tunnel panel in Settings (docs/local-trust-contract.md).
     assert start_like == [
+        "home-tunnel-start",
         "local-restart", "local-start", "local-stop",
         "tunnel-restart", "tunnel-start", "tunnel-stop",
         "zotero-start",
@@ -616,9 +617,12 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     tunnel_buttons = [b for b in buttons if b.objectName().startswith("tunnel-") and b.objectName() != "tunnel-fix"]
     assert tunnel_buttons
     assert all(not b.isEnabled() for b in tunnel_buttons)
+    # The Home card's Start is the same control, so it is off with the same gate.
+    home_start = window.findChild(QPushButton, "home-tunnel-start")
+    assert home_start is not None and home_start.isEnabled() is False
 
-    # The tunnel controls are in the Tunnel panel in Settings, and nowhere else. The Home tunnel card holds only the button
-    # that opens that panel, and the top bar holds no button. No other tab or card holds a tunnel control.
+    # The tunnel controls are on the Tunnel tab. Home's tunnel card holds only its Start and the button that opens that tab
+    # (and the fix button while the gate is off). The top bar holds no button. No other tab or card holds a tunnel control.
     from meridian_desktop.ui.tunnel_panel import TunnelPanel
 
     tunnel_panel = window.findChild(TunnelPanel, "tunnel-panel")
@@ -626,6 +630,10 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
     assert all(b in _user_buttons(tunnel_panel) for b in tunnel_buttons)
     tunnel_card = window.findChild(QFrame, "home-card-tunnel")
     assert tunnel_card is not None
+    card_names = {b.objectName() for b in _user_buttons(tunnel_card)}
+    # home-tunnel-action is the card's generic action button. tunnel_view sets no action, so it stays hidden.
+    assert card_names <= {"home-tunnel-start", "home-tunnel-fix", "home-tunnel-settings", "home-tunnel-action"}, card_names
+    assert window.findChild(QPushButton, "home-tunnel-action").isHidden()
     assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(tunnel_card))
     for name in ("Projects", "Sessions", "Search"):
         other = window.tabs.widget(_tab_index(window, name))
@@ -636,6 +644,12 @@ def test_tunnel_start_stop_restart_sit_only_on_the_tunnel_tab_and_stay_disabled_
         assert not any(b.objectName().startswith("tunnel-") for b in _user_buttons(other_card)), card
     for widget in (window.mode_selector, window.tunnel_status_label, window.tunnel_detail, window.mode_description):
         assert _user_buttons(widget) == []
+
+
+def test_home_open_tunnel_panel_button_switches_to_the_tunnel_tab(qtbot, settings_path):
+    window = _window(qtbot, settings_path)
+    window.findChild(QPushButton, "home-tunnel-settings").click()
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Tunnel"
 
 
 def test_the_tunnel_text_never_says_not_built_yet(qtbot, settings_path):
