@@ -65,12 +65,14 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
+from meridian_desktop.keys_export import write_names_export
 from meridian_desktop.keys_file import FileNames, is_classified, log_listing, read_names, split_by_classification
 from meridian_desktop.secret_store import SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import submit
+from meridian_desktop.projects_backup import BACKUP_DIR_NAME, utc_now
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.user_environment import UserEnvironmentError
 
@@ -158,6 +160,10 @@ REMOVED_FROM_FILE_TEXT = "Removed {name} from the list for this session. The key
 # The two groups of From file names. A name is classified when it is in the built-in key registry (api_keys).
 CLASSIFIED_HEADING_TEXT = "Classified: the name is in the built-in key registry"
 UNCLASSIFIED_HEADING_TEXT = "Unclassified: the name is not in the built-in key registry"
+# The names-only export. The file it writes holds names and classifications, and no value.
+EXPORT_TEXT = "Export key names"
+EXPORTED_TEXT = "Saved the key names and their classification to {path}. No value is in the file."
+EXPORT_FAILED_TEXT = "Not saved: the key names could not be written. Try again."
 
 # A confirmation: (parent, title, text) -> True only when the owner clicks Yes.
 Confirm = Callable[[QWidget, str, str], bool]
@@ -406,6 +412,14 @@ class KeysSection(QWidget):
         row.addWidget(self._new_value, 1)
         row.addWidget(self._add_button)
         column.addLayout(row)
+
+        export_row = QHBoxLayout()
+        self._export_button = QPushButton(EXPORT_TEXT, self)
+        self._export_button.setObjectName("keys-export-names")
+        export_row.addWidget(self._export_button)
+        export_row.addStretch(1)
+        column.addLayout(export_row)
+        self._export_button.clicked.connect(self._on_export_names)
 
         self._add_button.clicked.connect(self._on_add_clicked)
         self._new_value.returnPressed.connect(self._on_add_clicked)
@@ -956,6 +970,23 @@ class KeysSection(QWidget):
         self._hidden_file_slugs.clear()
         self.refresh()
         self._show(FILE_STOPPED_TEXT)
+
+    @Slot()
+    def _on_export_names(self) -> None:
+        """Write the names-only export beside settings.json: each key name and its classification, and no value."""
+        path = self._keys_file_path()
+        file_names = read_names(path).names if path else ()
+        try:
+            written = write_names_export(
+                self._settings.path.parent / BACKUP_DIR_NAME,
+                self._keys.names(),
+                file_names,
+                taken_at=utc_now(),
+            )
+        except OSError:
+            self._show(EXPORT_FAILED_TEXT)
+            return
+        self._show(EXPORTED_TEXT.format(path=written))
 
     def _save_keys_file(self, path: str) -> None:
         """Save the keys file path, or "" to stop using a file. Every other settings key is kept.
