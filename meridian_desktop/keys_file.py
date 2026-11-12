@@ -94,11 +94,17 @@ def _local_now() -> datetime:
 
 
 def is_classified(name: str) -> bool:
-    """True when ``name`` is in the built-in key registry, ``api_keys.BUILT_IN_NAMES``. Every other name is unclassified.
+    """True when ``name`` is a known service (``key_services.SERVICES``) or a built-in name (``BUILT_IN_NAMES``).
 
-    The registry is read on each call, so a name the registry gains is classified at once.
+    Every other name is unclassified. Both lists are read on each call, so a name either gains is classified at once.
+    key_services is imported here, not at the top of the module: key_services imports read_value from this module, so a
+    top-level import would be circular.
     """
-    return slug(name) in {slug(known) for known in api_keys.BUILT_IN_NAMES}
+    from meridian_desktop import key_services
+
+    known = {slug(service.name) for service in key_services.SERVICES}
+    known |= {slug(built_in) for built_in in api_keys.BUILT_IN_NAMES}
+    return slug(name) in known
 
 
 def split_by_classification(names: Iterable[str]) -> tuple[list[str], list[str]]:

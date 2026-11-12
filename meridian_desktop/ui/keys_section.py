@@ -157,9 +157,10 @@ FILE_CHOOSER_FILTER = "JSON files (*.json)"
 FROM_FILE_NOTE = "From file"
 FROM_FILE_DETAIL = "The value stays in the keys file. It is read only when you press Check."
 REMOVED_FROM_FILE_TEXT = "Removed {name} from the list for this session. The keys file is unchanged."
-# The two groups of From file names. A name is classified when it is in the built-in key registry (api_keys).
-CLASSIFIED_HEADING_TEXT = "Classified: the name is in the built-in key registry"
-UNCLASSIFIED_HEADING_TEXT = "Unclassified: the name is not in the built-in key registry"
+# The two groups of From file names. A name is classified when it is a known service (key_services)
+# or a built-in name (api_keys).
+CLASSIFIED_HEADING_TEXT = "Classified: the name is a known service or a built-in name"
+UNCLASSIFIED_HEADING_TEXT = "Unclassified: the name is neither a known service nor a built-in name"
 # The names-only export. The file it writes holds names and classifications, and no value.
 EXPORT_TEXT = "Export key names"
 EXPORTED_TEXT = "Saved the key names and their classification to {path}. No value is in the file."

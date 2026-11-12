@@ -58,7 +58,7 @@ def test_the_rows_hold_each_name_its_source_and_its_classification_once():
     assert rows == [
         {"name": "RunPod", "source": SOURCE_KEYCHAIN, "classification": CLASSIFIED},
         {"name": "Personal", "source": SOURCE_KEYCHAIN, "classification": UNCLASSIFIED},
-        {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": UNCLASSIFIED},
+        {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": CLASSIFIED},
     ], "a file name the keychain also holds shows once, as the keychain name"
 
 
@@ -72,7 +72,7 @@ def test_the_export_is_one_json_document_with_its_version_time_and_rows(tmp_path
         "exported_at": "2026-11-01T12:00:00Z",
         "keys": [
             {"name": "RunPod", "source": SOURCE_KEYCHAIN, "classification": CLASSIFIED},
-            {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": UNCLASSIFIED},
+            {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": CLASSIFIED},
         ],
     }
 
@@ -85,6 +85,34 @@ def test_a_second_export_replaces_the_first_and_leaves_no_temp_file(tmp_path):
     names = [row["name"] for row in json.loads(path.read_text(encoding="utf-8"))["keys"]]
     assert names == ["RunPod", "New"]
     assert sorted(child.name for child in tmp_path.iterdir()) == [EXPORT_NAME]
+
+
+def test_the_temp_file_is_flushed_and_synced_before_it_replaces_the_export(tmp_path, monkeypatch):
+    # The whole export must be on disk at the moment of the sync, and the sync must come before the replace. The fake
+    # sync reads the temp file as it is then: a missing flush would leave it short, and the assertion would fail there.
+    temp = tmp_path / (EXPORT_NAME + ".tmp")
+    document = keys_export.export_document(["RunPod"], ["OpenAI"], taken_at=WHEN)
+    expected = json.dumps(document, ensure_ascii=False, indent=2)
+    events: list[str] = []
+    real_fsync = keys_export.os.fsync
+    real_replace = keys_export.os.replace
+
+    def recording_fsync(fd):
+        events.append("fsync")
+        assert temp.read_text(encoding="utf-8") == expected, "the whole export is written and flushed before the sync"
+        real_fsync(fd)
+
+    def recording_replace(src, dst):
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(keys_export.os, "fsync", recording_fsync)
+    monkeypatch.setattr(keys_export.os, "replace", recording_replace)
+
+    path = write_names_export(tmp_path, ["RunPod"], ["OpenAI"], taken_at=WHEN)
+
+    assert events == ["fsync", "replace"], "the sync comes before the replace, once each"
+    assert path.read_text(encoding="utf-8") == expected
 
 
 def test_a_failed_replace_keeps_the_earlier_export_and_removes_the_temp_file(tmp_path, monkeypatch):
@@ -116,7 +144,7 @@ def test_the_export_button_writes_names_and_no_value_beside_settings(qtbot, sett
     assert json.loads(text)["keys"] == [
         {"name": "RunPod", "source": SOURCE_KEYCHAIN, "classification": CLASSIFIED},
         {"name": "Personal", "source": SOURCE_KEYCHAIN, "classification": UNCLASSIFIED},
-        {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": UNCLASSIFIED},
+        {"name": "OpenAI", "source": SOURCE_KEYS_FILE, "classification": CLASSIFIED},
     ]
     assert FAKE_VALUE not in text, "no value of a keychain name is in the export"
     assert FAKE_FILE_VALUE not in text, "no value of a file name is in the export"

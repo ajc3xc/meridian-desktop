@@ -40,7 +40,7 @@ from meridian_desktop.keys_file import (
 )
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH, KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
-from meridian_desktop import api_keys
+from meridian_desktop import api_keys, key_services
 from meridian_desktop.ui import keys_section as keys_module
 from meridian_desktop.ui.keys_section import (
     FILE_LISTED_MANY_TEXT,
@@ -564,19 +564,25 @@ def _layout_order(section: KeysSection) -> list[str]:
     return [widget.objectName() for widget in widgets if widget is not None]
 
 
-def test_a_name_is_classified_only_when_the_built_in_registry_holds_it(monkeypatch):
-    # The real registry holds RunPod alone. A file name is refused when it is RunPod, so no file name is classified today.
+def test_a_name_is_classified_when_it_is_a_known_service_or_a_built_in_name(monkeypatch):
+    # Changed from the old rule, which classified only the built-in RunPod name. Each known service in key_services.SERVICES
+    # (OpenAI, Anthropic, GitHub) is classified now too, as is any built-in name. Every other name stays unclassified.
     assert is_classified("RunPod") is True
-    assert is_classified("OpenAI") is False
-    assert split_by_classification(["OpenAI", "Anthropic"]) == ([], ["OpenAI", "Anthropic"])
-    monkeypatch.setattr(api_keys, "BUILT_IN_NAMES", ("RunPod", "OpenAI"))
-    assert is_classified("openai") is True, "the match ignores case, as a name's slug does"
-    assert is_classified("Anthropic") is False
-    assert split_by_classification(["Anthropic", "OpenAI", "GitHub"]) == (["OpenAI"], ["Anthropic", "GitHub"])
+    assert is_classified("OpenAI") is True
+    assert is_classified("Anthropic") is True
+    assert is_classified("GitHub") is True
+    assert is_classified("Acme") is False
+    assert split_by_classification(["Acme", "OpenAI", "Zeta"]) == (["OpenAI"], ["Acme", "Zeta"])
+    monkeypatch.setattr(api_keys, "BUILT_IN_NAMES", ("RunPod", "Acme"))
+    assert is_classified("acme") is True, "the match ignores case, as a name's slug does"
+    assert is_classified("Zeta") is False
+    assert split_by_classification(["Zeta", "Acme", "GitHub"]) == (["Acme", "GitHub"], ["Zeta"])
+    monkeypatch.setattr(key_services, "SERVICES", (key_services.KeyService("Zeta", "A test service.", "a test page"),))
+    assert is_classified("zeta") is True, "a name the known services list gains is classified at once"
 
 
-def test_with_no_file_name_in_the_registry_the_block_shows_only_the_unclassified_group(qtbot, settings_path, tmp_path):
-    path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": FAKE_VALUE_TWO})
+def test_no_file_name_is_a_known_service_so_the_block_shows_only_the_unclassified_group(qtbot, settings_path, tmp_path):
+    path = _write(tmp_path, {"Acme": FAKE_VALUE, "Zeta": FAKE_VALUE_TWO})
     section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
 
     _choose(section)
@@ -584,7 +590,7 @@ def test_with_no_file_name_in_the_registry_the_block_shows_only_the_unclassified
     assert section.findChild(QLabel, "keys-file-classified-heading").isHidden()
     assert not section.findChild(QLabel, "keys-file-unclassified-heading").isHidden()
     order = _layout_order(section)
-    assert order.index("keys-file-unclassified-heading") < order.index("keys-entry-openai") < order.index("keys-entry-anthropic")
+    assert order.index("keys-file-unclassified-heading") < order.index("keys-entry-acme") < order.index("keys-entry-zeta")
 
 
 def test_the_block_lists_the_classified_group_first_under_its_heading(qtbot, settings_path, tmp_path, monkeypatch):

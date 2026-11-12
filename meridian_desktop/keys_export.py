@@ -77,7 +77,12 @@ def write_names_export(
     path = folder / EXPORT_NAME
     temp = folder / (EXPORT_NAME + ".tmp")
     try:
-        temp.write_text(text, encoding="utf-8")
+        # Flush and sync the temp file before the replace, as settings_store.save does, so the export on disk is whole
+        # before it takes the name of the earlier one.
+        with temp.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temp, path)
     except OSError:
         with contextlib.suppress(OSError):
