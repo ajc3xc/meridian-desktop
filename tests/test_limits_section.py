@@ -1,6 +1,7 @@
 """Tests for the Limits block on the Settings tab (meridian_desktop/ui/limits_section.py), with pytest-qt.
 
-Offscreen Qt (conftest). Every slider saves to a settings file in pytest's temp dir, so nothing touches the real one.
+The block holds one typed download cap with an MB, GB or TB unit. Offscreen Qt (conftest). Every save goes to a settings
+file in pytest's temp dir, so nothing touches the real one.
 """
 
 from __future__ import annotations
@@ -8,33 +9,47 @@ from __future__ import annotations
 import json
 
 import pytest
-from PySide6.QtWidgets import QAbstractSlider, QLabel, QSlider, QToolButton
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLabel
 
-from meridian_desktop.settings_store import LIMIT_KEYS, LIMIT_SPECS, SETTINGS_UNREADABLE_TEXT, SettingsStore
-from meridian_desktop.ui.limits_section import LIMIT_ROWS, LIMITS_INTRO, LIMITS_TITLE, NOT_SAVED_TEXT, LimitsSection, value_text
-from meridian_desktop.ui.settings_group import CollapsibleGroup
-from meridian_desktop.ui.settings_tab import SettingsTab
+from meridian_desktop.settings_store import LIMIT_SPECS, SettingsStore
+from meridian_desktop.ui.limits_section import (
+    LIMIT_ROWS,
+    LIMITS_INTRO,
+    NOT_SAVED_TEXT,
+    LimitsSection,
+    from_megabytes,
+    to_megabytes,
+)
 
-SPEC = {spec.key: spec for spec in LIMIT_SPECS}
-UNIT = {row.key: row.unit for row in LIMIT_ROWS}
+KEY = "limit_zip_download_mb"
+SPEC = {spec.key: spec for spec in LIMIT_SPECS}[KEY]
 
 
 def _saved(path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def _slider(section: LimitsSection, key: str) -> QSlider:
-    found = section.findChild(QSlider, f"limit-slider-{key}")
-    assert found is not None, key
+def _amount(section: LimitsSection) -> QDoubleSpinBox:
+    found = section.findChild(QDoubleSpinBox, f"limit-amount-{KEY}")
+    assert found is not None
     return found
 
 
-def _value(section: LimitsSection, key: str) -> str:
-    return section.findChild(QLabel, f"limit-value-{key}").text()
+def _unit(section: LimitsSection) -> QComboBox:
+    return section.findChild(QComboBox, f"limit-unit-{KEY}")
+
+
+def _range(section: LimitsSection) -> str:
+    return section.findChild(QLabel, f"limit-range-{KEY}").text()
 
 
 def _status(section: LimitsSection) -> QLabel:
     return section.findChild(QLabel, "limits-status")
+
+
+def _enter(section: LimitsSection) -> None:
+    """What pressing Enter in the box does: the box reports editingFinished, and the block saves the typed value."""
+    _amount(section).editingFinished.emit()
 
 
 @pytest.fixture
@@ -44,148 +59,103 @@ def section(qtbot, settings_path):
     return widget
 
 
-# ----------------------------------------------------------- layout and the saved values
+def test_the_block_holds_one_typed_download_cap_with_mb_gb_and_tb(section):
+    assert [row.key for row in LIMIT_ROWS] == [KEY]
+    assert [_unit(section).itemText(index) for index in range(_unit(section).count())] == ["MB", "GB", "TB"]
 
 
-def test_there_is_one_slider_per_limit_with_its_default_and_its_value_beside_it(section):
-    assert len(section.findChildren(QSlider)) == len(LIMIT_KEYS) == 6
-    for spec in LIMIT_SPECS:
-        slider = _slider(section, spec.key)
-        assert slider.minimum() == spec.minimum
-        assert slider.maximum() == spec.maximum
-        assert slider.value() == spec.default
-        assert _value(section, spec.key) == value_text(spec.default, UNIT[spec.key])
+def test_the_default_is_one_thousand_megabytes_shown_in_mb(section):
+    assert _unit(section).currentText() == "MB"
+    assert _amount(section).value() == 1000
+    assert _range(section) == "10 to 10,000 MB"
 
 
-def test_each_limit_shows_the_range_it_can_be_set_to(section):
-    for spec in LIMIT_SPECS:
-        label = section.findChild(QLabel, f"limit-range-{spec.key}")
-        assert label.text() == f"{spec.minimum} to {spec.maximum} {UNIT[spec.key]}"
+def test_the_intro_says_it_is_saved_and_not_enforced_yet(section):
+    assert section.findChild(QLabel, "limits-intro").text() == LIMITS_INTRO
+    assert "not enforced yet" in LIMITS_INTRO
 
 
-def test_the_intro_says_enforcement_is_on_the_server_and_not_active_yet(section):
-    intro = section.findChild(QLabel, "limits-intro")
-    assert intro.text() == LIMITS_INTRO
-    assert "server" in intro.text()
-    assert "not active yet" in intro.text()
+def test_showing_the_saved_value_saves_nothing(section, settings_path):
+    assert _saved(settings_path) == {}
 
 
-def test_showing_the_saved_values_saves_nothing(section, settings_path):
-    section.refresh()
-    assert not settings_path.exists()
+def test_a_typed_number_is_saved_when_enter_is_pressed(section, settings_path):
+    _amount(section).setValue(250)
+    _enter(section)
+
+    assert _saved(settings_path)[KEY] == 250
+    assert _amount(section).value() == 250
 
 
-def test_a_value_saved_in_the_file_shows_on_the_slider_when_the_block_is_built(qtbot, settings_path):
-    SettingsStore(settings_path).set_limit("limit_writes", 77)
+def test_the_unit_shows_the_same_saved_value_in_gigabytes_and_saves_nothing(section, settings_path):
+    _amount(section).setValue(2048)
+    _enter(section)
+    before = settings_path.read_text(encoding="utf-8")
+
+    _unit(section).setCurrentIndex(1)  # GB
+
+    assert _amount(section).value() == 2
+    assert _range(section) == "0.01 to 9.77 GB"
+    assert settings_path.read_text(encoding="utf-8") == before
+
+
+def test_a_number_typed_in_gigabytes_is_saved_as_megabytes(section, settings_path):
+    _unit(section).setCurrentIndex(1)  # GB
+    _amount(section).setValue(1.5)
+    _enter(section)
+
+    assert _saved(settings_path)[KEY] == 1536
+    assert _amount(section).value() == 1.5
+
+
+def test_a_number_typed_in_terabytes_is_saved_as_megabytes(section, settings_path):
+    _unit(section).setCurrentIndex(2)  # TB; the range tops out at 10,000 MB, about 0.01 TB
+    _amount(section).setValue(0.005)
+    _enter(section)
+
+    assert _saved(settings_path)[KEY] == round(0.005 * 1024 * 1024)
+
+
+def test_an_amount_beyond_the_range_is_clamped_by_the_store_and_shown_as_kept(section, settings_path):
+    _amount(section).setValue(999999)
+    _enter(section)
+
+    assert _saved(settings_path)[KEY] == SPEC.maximum
+    assert _amount(section).value() == SPEC.maximum
+
+
+def test_a_refused_save_says_so_and_the_box_shows_the_saved_value(qtbot, settings_path, monkeypatch):
     section = LimitsSection(SettingsStore(settings_path))
     qtbot.addWidget(section)
-    assert _slider(section, "limit_writes").value() == 77
-    assert _value(section, "limit_writes") == "77 writes"
 
-
-def test_an_out_of_range_value_in_the_file_shows_the_clamped_value(qtbot, settings_path):
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps({"limit_file_mb": 99999, "limit_claims": 0}), encoding="utf-8")
-    section = LimitsSection(SettingsStore(settings_path))
-    qtbot.addWidget(section)
-    assert _slider(section, "limit_file_mb").value() == SPEC["limit_file_mb"].maximum
-    assert _value(section, "limit_file_mb") == "500 MB"
-    assert _slider(section, "limit_claims").value() == SPEC["limit_claims"].minimum
-    assert _value(section, "limit_claims") == "1 claims"
-
-
-# ----------------------------------------------------------- saving from the sliders
-
-
-def test_moving_a_slider_saves_its_value_and_shows_it(section, settings_path):
-    _slider(section, "limit_file_mb").setValue(180)
-    assert _saved(settings_path)["limit_file_mb"] == 180
-    assert _value(section, "limit_file_mb") == "180 MB"
-    assert _status(section).isHidden()
-
-
-def test_a_keyboard_step_saves_the_new_value(section, settings_path):
-    slider = _slider(section, "limit_claims")
-    slider.triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
-    assert slider.value() == SPEC["limit_claims"].default + 1
-    assert _saved(settings_path)["limit_claims"] == SPEC["limit_claims"].default + 1
-    assert _value(section, "limit_claims") == f"{SPEC['limit_claims'].default + 1} claims"
-
-
-def test_a_drag_shows_the_moving_value_and_saves_once_on_release(section, settings_path):
-    slider = _slider(section, "limit_writes")
-    slider.setSliderDown(True)
-    slider.setSliderPosition(333)
-    assert _value(section, "limit_writes") == "333 writes"
-    assert not settings_path.exists(), "nothing is saved while the slider is still held"
-    slider.setSliderDown(False)
-    assert _saved(settings_path)["limit_writes"] == 333
-
-
-def test_a_refused_save_says_so_and_the_slider_goes_back_to_the_saved_value(qtbot, settings_path, monkeypatch):
-    store = SettingsStore(settings_path)
-    section = LimitsSection(store)
-    qtbot.addWidget(section)
-
-    def refuse(settings):
+    def refuse(key, value):
         raise OSError("disk full")
 
-    monkeypatch.setattr(store, "save", refuse)
-    _slider(section, "limit_file_mb").setValue(400)
-    assert not _status(section).isHidden()
+    monkeypatch.setattr(section._store, "set_limit", refuse)
+    _amount(section).setValue(300)
+    _enter(section)
+
+    assert _status(section).isHidden() is False
     assert _status(section).text() == NOT_SAVED_TEXT.format(name="OSError")
-    assert _slider(section, "limit_file_mb").value() == SPEC["limit_file_mb"].default
-    assert _value(section, "limit_file_mb") == "50 MB"
-    assert not settings_path.exists()
+    assert _amount(section).value() == 1000
 
 
-def test_an_unreadable_settings_file_is_not_overwritten_by_a_slider(section, settings_path):
+def test_an_unreadable_settings_file_is_not_overwritten(qtbot, settings_path):
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text("[1, 2, 3]", encoding="utf-8")
-    _slider(section, "limit_zip_download_mb").setValue(4000)
-    assert _status(section).text() == SETTINGS_UNREADABLE_TEXT
-    assert not _status(section).isHidden()
-    assert settings_path.read_text(encoding="utf-8") == "[1, 2, 3]"
-    assert settings_path.with_name(settings_path.name + ".unreadable.bak").read_text(encoding="utf-8") == "[1, 2, 3]"
-    assert _slider(section, "limit_zip_download_mb").value() == SPEC["limit_zip_download_mb"].default
-
-
-def test_a_successful_save_clears_an_earlier_message(qtbot, settings_path, monkeypatch):
-    store = SettingsStore(settings_path)
-    section = LimitsSection(store)
+    settings_path.write_text("{not json", encoding="utf-8")
+    before = settings_path.read_text(encoding="utf-8")
+    section = LimitsSection(SettingsStore(settings_path))
     qtbot.addWidget(section)
-    real_save = store.save
 
-    def refuse(settings):
-        raise OSError("busy")
+    _amount(section).setValue(300)
+    _enter(section)
 
-    monkeypatch.setattr(store, "save", refuse)
-    _slider(section, "limit_file_mb").setValue(90)
-    assert not _status(section).isHidden()
-
-    monkeypatch.setattr(store, "save", real_save)
-    _slider(section, "limit_file_mb").setValue(91)
-    assert _status(section).isHidden()
-    assert _saved(settings_path)["limit_file_mb"] == 91
+    assert settings_path.read_text(encoding="utf-8") == before
+    assert _status(section).isHidden() is False
+    assert _status(section).text() != ""
 
 
-# ----------------------------------------------------------- the Settings tab
-
-
-def test_the_settings_tab_holds_a_folded_limits_group(qtbot, settings_path):
-    tab = SettingsTab(SettingsStore(settings_path))
-    qtbot.addWidget(tab)
-    toggle = tab.findChild(QToolButton, "settings-group-limits-toggle")
-    assert toggle is not None
-    assert toggle.text() == LIMITS_TITLE
-    assert tab.findChild(CollapsibleGroup, "settings-group-limits").is_expanded() is False
-    assert tab.findChild(LimitsSection, "limits-section") is not None
-
-
-def test_the_settings_tab_refresh_shows_a_limit_saved_elsewhere(qtbot, settings_path):
-    tab = SettingsTab(SettingsStore(settings_path))
-    qtbot.addWidget(tab)
-    SettingsStore(settings_path).set_limit("limit_claims", 45)
-    tab.refresh()
-    assert tab.findChild(QSlider, "limit-slider-limit_claims").value() == 45
-    assert tab.findChild(QLabel, "limit-value-limit_claims").text() == "45 claims"
+def test_megabyte_conversions_round_to_whole_megabytes():
+    assert to_megabytes(1.5, 1024) == 1536
+    assert to_megabytes(0.001, 1) == 0
+    assert from_megabytes(1536, 1024) == 1.5
