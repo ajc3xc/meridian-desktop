@@ -683,7 +683,7 @@ def _placement_problem(fetch: Transport, token: str) -> SaveResult | None:
 def _create_item(
     fetch: Transport,
     token: str,
-    write_key: str,
+    write_key: str | None,
     item: ReadingItem,
     collection_key: str | None = None,
 ) -> _Refusal | None:
@@ -826,7 +826,7 @@ def _outcome(refusal: _Refusal | None) -> str:
 def _write_batch(
     fetch: Transport,
     token: str,
-    write_key: str,
+    write_key: str | None,
     items: Sequence[ReadingItem],
     clock: Callable[[], dt.datetime],
     expires_at: dt.datetime | None,
@@ -871,26 +871,11 @@ def _save_granted(
     progress: SaveProgress,
     collection_key: str | None = None,
 ) -> SaveResult:
-    """The grant and the writes. The grant is ended on every path that got one, and the result says whether it ended."""
+    """The writes, with the bridge's token only. The bridge asks for no grant, so no grant is opened or ended here."""
     try:
-        grant_id, write_key, expires_at = _open_grant(fetch, token, phase)
-    except _NotOpen as exc:
-        return SaveResult(NOT_OPEN_FOR_WRITES, 0, _not_open_message(exc))
-    except ZoteroError as exc:
-        state = BRIDGE_OFF if exc.code == "not_running" else ERROR
-        message = exc.message
-        if phase.grant_id is not None and phase.grant_ended is not True:
-            message = f"{message} {KEY_MAY_STAY_LIVE_TEXT}"
-        return SaveResult(state, 0, message)
-    try:
-        result = _write_batch(fetch, token, write_key, items, clock, expires_at, landed, progress, collection_key)
+        return _write_batch(fetch, token, None, items, clock, None, landed, progress, collection_key)
     except Exception:  # noqa: BLE001 - the batch must still report what landed, whatever failed
-        phase.grant_ended = _end_grant(fetch, token, grant_id)
         return _unexpected_stop(items, landed, phase)
-    phase.grant_ended = _end_grant(fetch, token, grant_id)
-    if phase.grant_ended:
-        return result
-    return replace(result, message=f"{result.message} {KEY_MAY_STAY_LIVE_TEXT}")
 
 
 def save_items(

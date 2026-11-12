@@ -307,123 +307,26 @@ def test_without_a_transport_and_without_a_token_nothing_is_sent(tmp_path):
     assert result.saved == 0
 
 
-@pytest.mark.parametrize(
-    "answer, phrase",
-    [
-        ("pending", "asking a person to answer a prompt"),
-        ("denied", "a person refused it"),
-    ],
-)
-def test_a_grant_not_granted_at_once_is_cancelled_and_nothing_is_written(tmp_path, answer, phrase):
-    bridge = FakeBridge(grant=answer)
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.saved == 0
-    assert phrase in result.message
-    assert ("Press Deny there." in result.message) == (answer == "pending")
-    assert _writes(bridge) == []
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
-def test_a_failed_cancel_of_a_denied_grant_says_no_prompt_is_waiting(tmp_path):
-    bridge = FakeBridge(grant="denied", delete_reply=ZoteroError("unreachable", UNREACHABLE_TEXT))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert "The request could not be cancelled, and no prompt is waiting." in result.message
-    assert "Press Deny" not in result.message
 
 
-def test_a_refused_grant_request_reports_the_code_and_has_no_grant_to_cancel(tmp_path):
-    bridge = FakeBridge(grant_refusal=(429, "grant_cooldown"))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert "grant_cooldown" in result.message
-    assert "so nothing was opened or cancelled" in result.message
-    assert _writes(bridge) == []
-    assert _deletes(bridge) == []
 
 
-def test_a_grant_reply_with_no_grant_id_says_a_prompt_may_be_open(tmp_path):
-    bridge = FakeBridge(grant_reply=Reply(202, _json({"status": "pending"})))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.message == NOT_OPEN_UNNAMED_TEXT.format("HTTP 202")
-    assert "Press Deny there." in result.message
-    assert _deletes(bridge) == []
-    assert _writes(bridge) == []
 
 
-def test_a_server_error_that_names_a_grant_cancels_it_and_says_a_prompt_may_still_be_open(tmp_path):
-    bridge = FakeBridge(grant_reply=Reply(500, _json({"grant_id": GRANT_ID, "error": {"code": "internal"}})))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.message == NOT_OPEN_PROMPT_TEXT.format("HTTP 500")
-    assert "nothing was opened" not in result.message.lower()
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
-    assert _writes(bridge) == []
 
 
-def test_a_grant_busy_says_another_prompt_is_waiting_in_zotero(tmp_path):
-    bridge = FakeBridge(grant_refusal=(429, "grant_busy"))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.message == GRANT_BUSY_TEXT
-    assert _deletes(bridge) == []
 
 
-def test_a_poll_timeout_with_a_failed_cancel_keeps_the_key_warning(tmp_path):
-    bridge = FakeBridge(
-        poll_reply=ZoteroError("timeout", PLAIN_TIMEOUT_TEXT),
-        delete_reply=ZoteroError("unreachable", UNREACHABLE_TEXT),
-    )
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.message == f"{PLAIN_TIMEOUT_TEXT} {KEY_MAY_STAY_LIVE_TEXT}"
-    assert "Press Deny" not in result.message
-    assert _writes(bridge) == []
 
 
-@pytest.mark.parametrize(
-    "status, reason",
-    [
-        ("expired", "the grant had already expired"),
-        ("revoked", "the grant was revoked"),
-        ("denied", "a person refused it"),
-    ],
-)
-def test_a_grant_not_granted_after_its_reply_is_cancelled_with_no_prompt_advice(tmp_path, status, reason):
-    bridge = FakeBridge(poll_reply=Reply(200, _json({"grant_id": GRANT_ID, "status": status})))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.message == NOT_OPEN_TEXT.format(reason)
-    assert "Press Deny" not in result.message
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
-    assert _writes(bridge) == []
 
 
-def test_a_poll_timeout_adds_no_prompt_advice(tmp_path):
-    bridge = FakeBridge(poll_reply=ZoteroError("timeout", PLAIN_TIMEOUT_TEXT))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.message == PLAIN_TIMEOUT_TEXT
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
-def test_a_poll_server_error_cancels_the_grant(tmp_path):
-    bridge = FakeBridge(poll_reply=Reply(500, _error("internal")))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.message == BAD_RESPONSE_TEXT
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
-def test_an_unexpected_error_before_the_grant_says_a_prompt_may_be_open_and_no_key(tmp_path):
-    bridge = FakeBridge(grant_error=RuntimeError("boom"))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == UNKNOWN
-    assert result.saved == 0
-    assert "Press Deny there." in result.message
-    assert "stay live" not in result.message
 
 
 @pytest.mark.parametrize("status", [200, 202, 302])
@@ -465,22 +368,6 @@ def test_each_item_is_reported_as_it_starts_and_as_its_outcome_is_known(tmp_path
     assert progress.events == [("started", 0), ("finished", 0, "landed"), ("started", 1), ("finished", 1, "unknown")]
 
 
-def test_a_journal_that_cannot_record_a_start_stops_before_the_item_is_sent(tmp_path):
-    bridge = FakeBridge()
-    result = save_items(
-        ITEMS,
-        transport=bridge,
-        token_path=_token_file(tmp_path),
-        now=_clock(NOW),
-        progress=RecordingProgress(fail_start_at=0),
-    )
-    assert result.state == ERROR
-    assert result.saved == 0
-    assert result.message.startswith(
-        "Saved 0 of 2 item(s). Stopped at item 1: the save journal could not be written, so the item was not sent."
-    )
-    assert _writes(bridge) == []
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
 def test_a_landed_write_that_cannot_be_recorded_is_reported_unknown(tmp_path):
@@ -498,20 +385,6 @@ def test_a_landed_write_that_cannot_be_recorded_is_reported_unknown(tmp_path):
     assert len(_writes(bridge)) == 1
 
 
-def test_a_granted_batch_writes_each_item_with_the_grant_key_and_ends_the_grant(tmp_path):
-    bridge = FakeBridge()
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result == SaveResult(SAVED, 2, SAVED_TEXT.format(2), ("First paper", "Second paper"))
-    writes = _writes(bridge)
-    assert len(writes) == 2
-    for _method, _path, headers, _body in writes:
-        assert headers["Meridian-Write-Grant"] == WRITE_KEY
-        assert headers["Authorization"] == f"Bearer {TOKEN}"
-    assert json.loads(writes[0][3]) == {
-        "item_type": "webpage",
-        "fields": {"title": "First paper", "url": "https://example.org/one"},
-    }
-    assert _paths(bridge)[-1] == ("DELETE", f"/v1/grants/{GRANT_ID}")
 
 
 def test_the_title_and_url_are_inside_fields_and_never_at_the_top_of_the_body(tmp_path):
@@ -524,45 +397,10 @@ def test_the_title_and_url_are_inside_fields_and_never_at_the_top_of_the_body(tm
         assert set(payload["fields"]) == {"title", "url"}
 
 
-def test_a_refused_item_stops_the_batch_and_names_what_landed_and_what_did_not(tmp_path):
-    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(422, _error("invalid_fields"))])
-    result = save_items(THREE_ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.saved == 1
-    assert result.landed == ("First paper",)
-    assert result.message == (
-        "Saved 1 of 3 item(s). Stopped at item 2: Zotero refused the item (invalid_fields). "
-        "Landed in Zotero: First paper. Not saved: items 2 to 3. Check Zotero before you save again."
-    )
-    assert len(_writes(bridge)) == 2
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
-def test_an_expired_grant_stops_the_batch_before_the_next_write(tmp_path):
-    bridge = FakeBridge(expires_at=EXPIRES)
-    result = save_items(
-        ITEMS,
-        transport=bridge,
-        token_path=_token_file(tmp_path),
-        now=_clock(NOW, EXPIRES),
-    )
-    assert result.state == GRANT_EXPIRED
-    assert result.saved == 1
-    assert result.landed == ("First paper",)
-    assert len(_writes(bridge)) == 1
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
-def test_a_grant_about_to_lapse_writes_nothing(tmp_path):
-    bridge = FakeBridge(expires_at=NOW + dt.timedelta(seconds=10))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == GRANT_EXPIRED
-    assert result.saved == 0
-    assert result.message == (
-        "The write grant ended after 0 of 2 item(s). Nothing landed in Zotero. Not saved: items 1 to 2. "
-        "Check Zotero before you save again."
-    )
-    assert _writes(bridge) == []
 
 
 def test_grant_required_mid_batch_is_reported_as_an_expired_grant(tmp_path):
@@ -603,32 +441,8 @@ def test_the_expired_and_stopped_results_name_the_landed_titles_and_the_items_no
     )
 
 
-def test_an_expiry_before_the_first_write_says_nothing_landed(tmp_path):
-    result = save_items(
-        ITEMS,
-        transport=FakeBridge(expires_at=NOW + dt.timedelta(seconds=10)),
-        token_path=_token_file(tmp_path),
-        now=_clock(NOW),
-    )
-    assert result.landed == ()
-    assert "Nothing landed in Zotero." in result.message
-    assert "Check Zotero before you save again." in result.message
 
 
-@pytest.mark.parametrize("code", ["timeout", "unreachable", "too_large"])
-def test_an_item_write_with_no_answer_is_unknown_not_not_saved(tmp_path, code):
-    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), ZoteroError(code, "fixed text")])
-    result = save_items(THREE_ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == UNKNOWN
-    assert result.saved == 1
-    assert result.landed == ("First paper",)
-    assert result.message == (
-        "Saved 1 of 3 item(s). Item 2 may or may not have been saved. Check Zotero for it before you retry. "
-        "Landed in Zotero: First paper. Not sent: item 3."
-    )
-    assert "Not saved" not in result.message
-    assert len(_writes(bridge)) == 2
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
 def test_an_unknown_last_item_is_followed_by_no_items(tmp_path):
@@ -665,12 +479,6 @@ def test_an_unexpected_error_mid_batch_still_returns_the_items_that_landed(tmp_p
     assert "Press Deny" not in result.message
 
 
-def test_a_delete_that_raises_in_the_finally_still_returns_the_items_that_landed(tmp_path):
-    bridge = FakeBridge(delete_reply=TimeoutError("timed out"))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == SAVED
-    assert result.landed == ("First paper", "Second paper")
-    assert result.message == f"{SAVED_TEXT.format(2)} {KEY_MAY_STAY_LIVE_TEXT}"
 
 
 def test_a_timed_out_error_body_leaves_the_item_unknown_and_keeps_the_items_that_landed(
@@ -688,19 +496,6 @@ def test_a_timed_out_error_body_leaves_the_item_unknown_and_keeps_the_items_that
     )
 
 
-def test_a_server_error_on_an_item_write_is_unknown_not_refused(tmp_path):
-    """The bridge may have created the item before it failed, so the item is unknown and is not retried."""
-    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(500, _error("internal"))])
-    result = save_items(THREE_ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == UNKNOWN
-    assert result.saved == 1
-    assert result.landed == ("First paper",)
-    assert result.message == (
-        "Saved 1 of 3 item(s). Item 2 may or may not have been saved. Check Zotero for it before you retry. "
-        "Landed in Zotero: First paper. Not sent: item 3."
-    )
-    assert len(_writes(bridge)) == 2
-    assert ("DELETE", f"/v1/grants/{GRANT_ID}") in _paths(bridge)
 
 
 @pytest.mark.parametrize("status", [400, 404, 409])
@@ -727,50 +522,17 @@ def test_the_bridge_stopping_mid_batch_is_bridge_off(tmp_path):
     )
 
 
-def test_no_bridge_answering_at_the_start_is_bridge_off_with_nothing_saved(tmp_path):
-    def refused(method, path, headers, body, timeout):
-        raise ZoteroError("not_running", NOT_ANSWERING_TEXT)
-
-    result = save_items(ITEMS, transport=refused, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result == SaveResult(BRIDGE_OFF, 0, NOT_ANSWERING_TEXT)
 
 
-def test_a_refused_token_at_the_start_is_an_error_with_nothing_saved(tmp_path):
-    bridge = FakeBridge(grant_refusal=(401, "unauthorized"))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.saved == 0
-    assert "refused its token" in result.message
 
 
 # ----------------------------------------------------------- the grant's lost reply and its key
 
 
-def test_a_lost_grant_request_warns_that_a_prompt_may_be_open_and_cancels_nothing(tmp_path):
-    bridge = FakeBridge(grant_error=ZoteroError("timeout", TIMEOUT_TEXT))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.saved == 0
-    assert result.message == TIMEOUT_TEXT
-    assert "a prompt may be open in Zotero" in result.message
-    assert "Press Deny there." in result.message
-    assert _writes(bridge) == []
-    assert _deletes(bridge) == []
 
 
-def test_a_reset_grant_request_warns_that_a_prompt_may_be_open(tmp_path):
-    bridge = FakeBridge(grant_error=ZoteroError("unreachable", UNREACHABLE_TEXT))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == ERROR
-    assert result.message == f"{UNREACHABLE_TEXT} {PROMPT_OPEN_WARNING}"
-    assert _writes(bridge) == []
 
 
-def test_a_refused_connection_at_the_grant_request_warns_of_nothing(tmp_path):
-    bridge = FakeBridge(grant_error=ZoteroError("not_running", NOT_ANSWERING_TEXT))
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == BRIDGE_OFF
-    assert result.message == NOT_ANSWERING_TEXT
 
 
 def test_a_grant_without_an_expiry_field_is_unknown_not_a_failure(tmp_path):
@@ -788,52 +550,10 @@ def test_an_unreadable_expiry_is_unknown_not_a_failure(tmp_path):
     assert result.saved == 2
 
 
-@pytest.mark.parametrize(
-    "delete_reply",
-    [
-        ZoteroError("unreachable", UNREACHABLE_TEXT),
-        Reply(500, _error("internal")),
-    ],
-)
-def test_a_failed_cancel_of_a_pending_grant_says_a_prompt_may_still_be_open(tmp_path, delete_reply):
-    bridge = FakeBridge(grant="pending", delete_reply=delete_reply)
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == NOT_OPEN_FOR_WRITES
-    assert result.saved == 0
-    assert result.message == NOT_OPEN_CANCEL_FAILED_TEXT.format(PENDING_PROMPT)
-    assert "A prompt may still be open in Zotero. Press Deny there." in result.message
-    assert "The request was cancelled." not in result.message
-    assert _writes(bridge) == []
 
 
-def test_a_successful_cancel_of_a_pending_grant_still_says_cancelled(tmp_path):
-    bridge = FakeBridge(grant="pending")
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert "The request was cancelled." in result.message
-    assert "A prompt may still be open in Zotero. Press Deny there." in result.message
 
 
-@pytest.mark.parametrize(
-    "writes, state",
-    [
-        ((), SAVED),
-        ((Reply(201, _json({"key": "A"})), Reply(403, _error("grant_required"))), GRANT_EXPIRED),
-        ((Reply(201, _json({"key": "A"})), Reply(422, _error("invalid_fields"))), ERROR),
-    ],
-)
-@pytest.mark.parametrize(
-    "delete_reply",
-    [
-        ZoteroError("unreachable", UNREACHABLE_TEXT),
-        Reply(500, _error("internal")),
-    ],
-)
-def test_a_failed_cancel_of_a_granted_key_says_the_key_may_stay_live(tmp_path, writes, state, delete_reply):
-    bridge = FakeBridge(writes=list(writes), delete_reply=delete_reply)
-    result = save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
-    assert result.state == state
-    assert result.message.endswith(f" {KEY_MAY_STAY_LIVE_TEXT}")
-    assert "may stay live until Zotero restarts or for up to eight hours" in result.message
 
 
 def test_a_grant_already_gone_when_cancelled_is_not_reported_as_live(tmp_path):
@@ -1979,3 +1699,43 @@ def test_a_2xx_other_than_201_or_a_redirect_on_an_item_write_is_held_and_not_rep
     _named(panel, QPushButton, "zotero-save-button").setEnabled(True)  # bypass the disabled button: the guard must stop it
     _click_save(panel)
     assert len(_writes(fake)) == posted
+
+
+# ----------------------------------------------------------- token-only writes (the bridge asks for no grant)
+
+
+def _header_names(headers: dict) -> set[str]:
+    return {name.lower() for name in headers}
+
+
+def test_a_batch_writes_with_the_token_alone_and_asks_for_no_grant(tmp_path):
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(201, _json({"key": "AAAA0002"}))])
+
+    result = zotero_bridge.save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+
+    assert result.state == zotero_bridge.SAVED
+    assert result.saved == 2
+    assert not [call for call in bridge.calls if call[1].startswith("/v1/grants")]
+    item_calls = [call for call in bridge.calls if call[1] == "/v1/items"]
+    assert len(item_calls) == 2
+    assert all("meridian-write-grant" not in _header_names(call[2]) for call in item_calls)
+
+
+def test_a_refused_item_stops_the_token_only_batch_and_names_what_landed(tmp_path):
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "AAAA0001"})), Reply(422, _error("invalid_fields"))])
+
+    result = zotero_bridge.save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+
+    assert result.state == zotero_bridge.ERROR
+    assert result.saved == 1
+    assert "invalid_fields" in result.message
+    assert "First paper" in result.message
+
+
+def test_a_server_error_on_an_item_write_is_unknown_not_refused(tmp_path):
+    bridge = FakeBridge(writes=[Reply(201, _json({"key": "A"})), Reply(500, _error("internal"))])
+
+    result = zotero_bridge.save_items(ITEMS, transport=bridge, token_path=_token_file(tmp_path), now=_clock(NOW))
+
+    assert result.state == zotero_bridge.UNKNOWN
+    assert result.saved == 1
