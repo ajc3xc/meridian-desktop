@@ -65,6 +65,7 @@ from meridian_desktop.hosted_client import BadBaseUrl, HostedError
 from meridian_desktop.local_client import LocalClientError, assert_loopback
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
 from meridian_desktop.settings_store import DEFAULT_HOSTED_URL, DEFAULT_LOCAL_URL, SettingsStore, SettingsUnreadable
+from meridian_desktop.ssh_config import read_host_names as read_ssh_config_names
 from meridian_desktop.token_store import TokenStoreError
 from meridian_desktop.tools_status import ToolsStatus
 from meridian_desktop.ui.client_setup_section import ClientSetupSection
@@ -109,10 +110,14 @@ HOSTED_URL_SAVED_TEXT = "Hosted URL saved."
 GPU_HOSTS_TITLE = "GPU hosts over SSH"
 GPU_HOSTS_INTRO = (
     "SSH host names from your ssh config, separated by commas, for example gpu-box, lab-a100. The GPUs tab reads each "
-    "one in batch mode: no password prompt, and an unknown host key is refused. Hosts are never scanned from your ssh config."
+    "one in batch mode: no password prompt, and an unknown host key is refused. The ssh config is read only when you press "
+    "Add names from my ssh config. That adds the Host names it finds to this box, and nothing is saved until you press Save."
 )
 GPU_HOSTS_SAVED_TEXT = "Saved. The GPUs tab reads these hosts on its next refresh."
 GPU_HOSTS_CLEARED_TEXT = "Saved. No SSH hosts are read by the GPUs tab."
+ADD_SSH_BUTTON_TEXT = "Add names from my ssh config"
+SSH_NONE_FOUND_TEXT = "No host names were found in your ssh config file, so nothing was added."
+SSH_ADDED_TEXT = "Added {count} name(s) from your ssh config: {names}. Press Save SSH hosts to keep them."
 TOKEN_SET_TEXT = "Hosted token: set"
 TOKEN_NOT_SET_TEXT = "Hosted token: not set"
 SIGN_IN_STARTING_TEXT = "Starting the sign-in with Hosted Meridian..."
@@ -582,6 +587,10 @@ class SettingsTab(QWidget):
         self._gpu_hosts.setPlaceholderText("SSH host names, for example gpu-box, lab-a100")
         self._gpu_hosts.setAccessibleName("SSH host names for the GPUs tab")
         row.addWidget(self._gpu_hosts, 1)
+        self._add_ssh_names = QPushButton(ADD_SSH_BUTTON_TEXT, body)
+        self._add_ssh_names.setObjectName("settings-add-ssh-names")
+        self._add_ssh_names.clicked.connect(self._on_add_ssh_names_clicked)
+        row.addWidget(self._add_ssh_names)
         self._save_gpu_hosts = QPushButton("Save SSH hosts", body)
         self._save_gpu_hosts.setObjectName("settings-save-gpu-hosts")
         self._save_gpu_hosts.clicked.connect(self._on_save_gpu_hosts_clicked)
@@ -807,6 +816,17 @@ class SettingsTab(QWidget):
             return
         self.refresh()  # show the path back from the saved file
         _set_message(self._db_message, DB_SAVED_TEXT)
+
+    @Slot()
+    def _on_add_ssh_names_clicked(self) -> None:
+        """Add the Host names from the owner's ssh config to the box. Nothing is saved here: Save SSH hosts does that."""
+        found = read_ssh_config_names()
+        if not found:
+            _set_message(self._gpu_hosts_message, SSH_NONE_FOUND_TEXT)
+            return
+        typed = [name.strip() for name in self._gpu_hosts.text().split(",") if name.strip()]
+        self._gpu_hosts.setText(", ".join(dict.fromkeys([*typed, *found])))
+        _set_message(self._gpu_hosts_message, SSH_ADDED_TEXT.format(count=len(found), names=", ".join(found)))
 
     @Slot()
     def _on_save_gpu_hosts_clicked(self) -> None:
