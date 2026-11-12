@@ -159,11 +159,14 @@ def runner_log_text(result: RunnerResult) -> str:
 
 
 def log_pane_text(tail: LogTail, texts: LogText) -> str:
-    """A file log's pane text: its redacted lines, or the fixed text for its missing, empty or unreadable state."""
+    """A file log's pane text: its redacted lines, newest first, or the fixed text for its missing, empty or unreadable state.
+
+    The file is in time order, oldest first, so the lines are reversed here. The most recent line is at the top.
+    """
     if tail.status == STATUS_OK:
         if not tail.lines:
             return texts.empty
-        return "\n".join(redact_text(line) for line in tail.lines)
+        return "\n".join(redact_text(line) for line in reversed(tail.lines))
     if tail.status == STATUS_NO_LOG_YET:
         return texts.missing
     return texts.unreadable
@@ -485,7 +488,9 @@ class LogsPage(QWidget):
         if grouped is None:
             return
         selected = self._control_pick.currentData()
-        self._control_text.setPlainText(launch_view(grouped, selected=selected, query=self._control_search.text()))
+        self._control_text.setPlainText(
+            launch_view(grouped, selected=selected, query=self._control_search.text(), newest_first=True)
+        )
 
     def _show_file_pane(
         self,

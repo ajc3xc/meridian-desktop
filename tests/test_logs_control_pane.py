@@ -213,11 +213,12 @@ def test_control_pane_groups_the_lines_by_local_launch_and_names_the_rule(qtbot)
 
     assert control.calls == 1
     assert _label(page, "logs-control-rule") == MARKER_RULE_TEXT
+    # Newest launch first, and the newest line first inside each launch.
     assert _text(page, "logs-control-text") == "\n\n".join(
         [
-            f"{BEFORE_TEXT}\n{LAUNCH_LINES[0]}",
-            f"{FIRST_LABEL}\n{LAUNCH_LINES[1]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[3]}",
             f"{SECOND_LABEL}\n{LAUNCH_LINES[4]}",
+            f"{FIRST_LABEL}\n{LAUNCH_LINES[3]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[1]}",
+            f"{BEFORE_TEXT}\n{LAUNCH_LINES[0]}",
         ]
     )
     assert _picker(page).isEnabled()
@@ -257,7 +258,7 @@ def test_search_narrows_the_shown_lines_within_the_chosen_launch_and_reads_nothi
     assert _text(page, "logs-control-text") == NO_MATCH_TEXT
 
     _search(page).setText("")
-    assert _text(page, "logs-control-text") == f"{FIRST_LABEL}\n{LAUNCH_LINES[1]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[3]}"
+    assert _text(page, "logs-control-text") == f"{FIRST_LABEL}\n{LAUNCH_LINES[3]}\n{LAUNCH_LINES[2]}\n{LAUNCH_LINES[1]}"
     assert control.calls == 1
 
 
@@ -267,7 +268,7 @@ def test_a_log_with_no_launch_line_and_no_time_has_no_picker_and_no_heading(qtbo
     _press(qtbot, page)
 
     assert _label(page, "logs-control-rule") == NONE_RULE_TEXT
-    assert _text(page, "logs-control-text") == "plain one\nplain two"
+    assert _text(page, "logs-control-text") == "plain two\nplain one"
     assert not _picker(page).isEnabled()
     assert _picker(page).count() == 0
     assert _search(page).isEnabled()

@@ -168,19 +168,23 @@ def group_by_launch(lines: Iterable[str], *, gap: dt.timedelta = DEFAULT_GAP) ->
 NO_MATCH_TEXT = "No line in the launches shown matches the search."
 
 
-def launch_view(grouped: GroupedLog, *, selected: str | None, query: str = "") -> str:
+def launch_view(grouped: GroupedLog, *, selected: str | None, query: str = "", newest_first: bool = False) -> str:
     """The text the view shows for ``grouped``: the chosen group, or every group, with only the lines that match ``query``.
 
     ``query`` is a case-insensitive substring, and blank means no filter. A group with no matching line is left out.
     A log with neither markers nor timestamps is shown with no heading, so its text is exactly its lines.
+    ``newest_first`` shows the newest launch first and the newest line first inside each launch. The launch numbers
+    stay in time order, so Launch 3 of 3 can come first.
     """
     needle = query.strip().casefold()
     plain = grouped.rule == RULE_NONE
     blocks: list[str] = []
-    for group in grouped.groups:
+    groups = reversed(grouped.groups) if newest_first else grouped.groups
+    for group in groups:
         if selected is not None and group.key != selected:
             continue
-        lines = [line for line in group.lines if not needle or needle in line.casefold()]
+        group_lines = reversed(group.lines) if newest_first else group.lines
+        lines = [line for line in group_lines if not needle or needle in line.casefold()]
         if not lines:
             continue
         blocks.append("\n".join(lines) if plain else "\n".join([group.label, *lines]))
