@@ -35,6 +35,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from meridian_desktop import resources
+from meridian_desktop.resources import ResourceRow
+
 # ----------------------------------------------------------------- limits and fixed text
 
 MAX_HOSTS = 8
@@ -109,10 +112,11 @@ GPU_MARKER = "---GPU---"
 APPS_MARKER = "---APPS---"
 SLURM_MARKER = "---SLURM---"
 LSF_MARKER = "---LSF---"
+RES_MARKER = "---RES---"
 # Printed by the script's EXIT trap, after its final exit 0. Its presence is how the reader knows the script finished.
 END_MARKER = "---END---"
-SECTION_MARKERS = {GPU_MARKER: "GPU", APPS_MARKER: "APPS", SLURM_MARKER: "SLURM", LSF_MARKER: "LSF"}
-_STATUS_LINE = re.compile(r"---(GPU|APPS|SLURM|LSF)-RC=(\d+)---")
+SECTION_MARKERS = {GPU_MARKER: "GPU", APPS_MARKER: "APPS", SLURM_MARKER: "SLURM", LSF_MARKER: "LSF", RES_MARKER: "RES"}
+_STATUS_LINE = re.compile(r"---(GPU|APPS|SLURM|LSF|RES)-RC=(\d+)---")
 REMOTE_SCRIPT = "; ".join(
     [
         f"trap 'echo {END_MARKER}' EXIT",
@@ -124,6 +128,14 @@ REMOTE_SCRIPT = "; ".join(
         'echo "---APPS-RC=$?---"',
         f'if command -v squeue >/dev/null 2>&1; then echo {SLURM_MARKER}; squeue --me --noheader "--format={SQUEUE_FORMAT}"; echo "---SLURM-RC=$?---"; fi',
         f'if command -v bjobs >/dev/null 2>&1; then echo {LSF_MARKER}; bjobs -noheader -o "{LSF_FIELDS}"; echo "---LSF-RC=$?---"; fi',
+        # CPU and memory: the core count, the two memory totals, and two /proc/stat samples one second apart.
+        f"echo {RES_MARKER}",
+        "nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null",
+        'grep -E "^(MemTotal|MemAvailable):" /proc/meminfo 2>/dev/null',
+        "head -n 1 /proc/stat 2>/dev/null",
+        "sleep 1",
+        "head -n 1 /proc/stat 2>/dev/null",
+        'echo "---RES-RC=$?---"',
         "exit 0",
     ]
 )
@@ -216,6 +228,7 @@ class GpuSnapshot:
     gpus: tuple[GpuRow, ...] = ()
     jobs: tuple[GpuJob, ...] = ()
     statuses: tuple[SourceStatus, ...] = ()
+    resources: tuple[ResourceRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -223,6 +236,7 @@ class Reading:
     gpus: tuple[GpuRow, ...] = ()
     jobs: tuple[GpuJob, ...] = ()
     statuses: tuple[SourceStatus, ...] = ()
+    resources: tuple[ResourceRow, ...] = ()
 
 
 # ----------------------------------------------------------------- the default runner
@@ -749,6 +763,16 @@ def _remote_scheduler(
     return _scheduler_status(alias, part, CommandResult(returncode=section.status, stdout=section.text), parser)
 
 
+def _remote_resources(alias: str, section: _Section) -> ResourceRow:
+    """This host's cores, CPU use and memory, from its RES section. A section that never started printed none, and a
+    section that failed says so."""
+    if not section.started:
+        return resources.absent_row(alias, resources.SECTION_ABSENT_NOTE)
+    if section.status is None or section.status != 0:
+        return resources.failed_row(alias, resources.SECTION_FAILED_NOTE)
+    return resources.parse_section(alias, section.text)
+
+
 def _login_failed(result: CommandResult) -> bool:
     """True for a failed login that a retry will not fix soon: a refused key or a host key that is not accepted."""
     if result.returncode != 255:
@@ -785,6 +809,7 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Readin
                 SourceStatus(alias, PART_SLURM, STATE_FAILED, "Slurm could not be read."),
                 SourceStatus(alias, PART_LSF, STATE_FAILED, "LSF could not be read."),
             ),
+            resources=(resources.failed_row(alias, resources.SECTION_FAILED_NOTE),),
         )
     gpus, gpu_status = _remote_gpus(alias, sections["GPU"])
     apps, apps_status = _remote_apps(alias, sections["APPS"], gpus)
@@ -794,6 +819,7 @@ def _read_remote(run: Runner, alias: str, backoff: HostBackoff | None) -> Readin
         gpus=gpus,
         jobs=apps + slurm + lsf,
         statuses=(gpu_status, apps_status, slurm_status, lsf_status),
+        resources=(_remote_resources(alias, sections["RES"]),),
     )
 
 
@@ -821,21 +847,36 @@ def _runpod_reading(runpod: Callable[[], Mapping[str, Any]] | None) -> Reading:
     if not pods:
         return Reading(statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_EMPTY, "No RunPod pods."),))
     noun = "pod" if len(pods) == 1 else "pods"
-    return Reading(jobs=pods, statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_OK, f"{len(pods)} RunPod {noun}."),))
+    # The pod list carries no CPU or memory, so each pod's row says so instead of showing a number.
+    pod_rows = tuple(resources.not_reported_row(f"RunPod: {job.name}") for job in pods)
+    return Reading(
+        jobs=pods,
+        statuses=(SourceStatus(SOURCE_RUNPOD, PART_RUNPOD, STATE_OK, f"{len(pods)} RunPod {noun}."),),
+        resources=pod_rows,
+    )
 
 
 def _failed_reading(where: str) -> Reading:
     return Reading(statuses=(SourceStatus(where, PART_GPUS, STATE_FAILED, "This could not be read."),))
 
 
-def read_local(run: Runner, runpod: Callable[[], Mapping[str, Any]] | None = None) -> Reading:
-    """This computer's part: its GPUs, processes and schedulers, and the RunPod pods from the local server. Never raises."""
+def read_local(
+    run: Runner,
+    runpod: Callable[[], Mapping[str, Any]] | None = None,
+    local_resources: Callable[[], ResourceRow] | None = None,
+) -> Reading:
+    """This computer's part: its GPUs, processes, schedulers, CPU and memory, and the RunPod pods from the local server.
+
+    Never raises. ``local_resources`` is None when the caller does not read this computer's CPU and memory.
+    """
     local = _read_local(run)
     pods = _runpod_reading(runpod)
+    own = (local_resources(),) if local_resources is not None else ()
     return Reading(
         gpus=local.gpus,
         jobs=local.jobs + pods.jobs,
         statuses=local.statuses + pods.statuses,
+        resources=own + pods.resources,
     )
 
 
@@ -849,11 +890,19 @@ def assemble(checked_at: datetime, readings: Sequence[Reading]) -> GpuSnapshot:
     gpus: list[GpuRow] = []
     jobs: list[GpuJob] = []
     statuses: list[SourceStatus] = []
+    rows: list[ResourceRow] = []
     for reading in readings:
         gpus.extend(reading.gpus)
         jobs.extend(reading.jobs)
         statuses.extend(reading.statuses)
-    return GpuSnapshot(checked_at=checked_at, gpus=tuple(gpus), jobs=tuple(jobs), statuses=tuple(statuses))
+        rows.extend(reading.resources)
+    return GpuSnapshot(
+        checked_at=checked_at,
+        gpus=tuple(gpus),
+        jobs=tuple(jobs),
+        statuses=tuple(statuses),
+        resources=tuple(rows),
+    )
 
 
 def collect(
@@ -863,6 +912,7 @@ def collect(
     *,
     now: datetime | None = None,
     backoff: HostBackoff | None = None,
+    local_resources: Callable[[], ResourceRow] | None = None,
 ) -> GpuSnapshot:
     """Read every part once and return one snapshot. Never raises: a part that fails says so in its status line.
 
@@ -872,7 +922,7 @@ def collect(
     """
     checked_at = now if now is not None else datetime.now(timezone.utc)
     names = [name for name in hosts[:MAX_HOSTS] if check_alias(name)]
-    readings = [read_local(run, runpod)]
+    readings = [read_local(run, runpod, local_resources)]
     if names:
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(names))) as pool:
             readings.extend(pool.map(lambda alias: read_host(run, alias, backoff), names))
@@ -1020,6 +1070,10 @@ def status_table_rows(snapshot: GpuSnapshot) -> list[tuple[str, ...]]:
     return [(status.where, status.part, status.text) for status in snapshot.statuses]
 
 
+def resource_table_rows(snapshot: GpuSnapshot) -> list[tuple[str, ...]]:
+    return resources.rows_for_table(snapshot.resources)
+
+
 __all__ = [
     "ALIAS_PATTERN",
     "APP_FIELDS",
@@ -1063,6 +1117,7 @@ __all__ = [
     "parse_squeue",
     "run_command",
     "ssh_argv",
+    "resource_table_rows",
     "status_table_rows",
     "summary_text",
 ]

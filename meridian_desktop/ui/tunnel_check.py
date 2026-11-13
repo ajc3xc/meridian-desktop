@@ -1,6 +1,6 @@
 """The tunnel check job for the top bar. Qt code, so it sits in ui/.
 
-The main window runs one read-only tunnel status call on the thread pool each time Tunnel mode is chosen, and
+The main window runs one read-only tunnel status call on the thread pool each time Hosted mode is chosen, and
 this job carries it there. The Home tunnel card runs its own read through the same status call. The Tunnel panel
 uses TunnelReadJob, which runs the same status call and then reads the tail of the tunnel log. Nothing here starts,
 stops or restarts the tunnel.
@@ -8,11 +8,12 @@ stops or restarts the tunnel.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import QRunnable
 
 from meridian_desktop.log_tail import LogTail
+from meridian_desktop.slot_ports import SlotPortResult
 from meridian_desktop.tunnel_status import TunnelStatus
 
 
@@ -48,7 +49,8 @@ class TunnelReadJob(QRunnable):
 
     Both reads are read-only. The status read is reduced to its class name when it raises, as TunnelCheckJob does. The
     log read is guarded too, and a read that raises is delivered as None, which the panel shows as not read. The
-    deliver callable receives (status, failure_name, tail). It emits to the shared delivery object, never to a panel.
+    deliver callable receives (status, failure_name, tail, ports). ``ports`` is the port check's list of SlotPortResult,
+    or None when no ``ports_work`` was given or the check raised. It emits to the shared delivery object, never to a panel.
     """
 
     def __init__(
@@ -56,12 +58,14 @@ class TunnelReadJob(QRunnable):
         status_work: Callable[[], TunnelStatus],
         log_work: Callable[[], LogTail],
         deliver: Callable[[tuple], None],
+        ports_work: Callable[[], Sequence[SlotPortResult]] | None = None,
     ) -> None:
         super().__init__()
         self.setAutoDelete(True)
         self._status_work = status_work
         self._log_work = log_work
         self._deliver = deliver
+        self._ports_work = ports_work
 
     def run(self) -> None:
         status: TunnelStatus | None = None
@@ -75,7 +79,13 @@ class TunnelReadJob(QRunnable):
             tail = self._log_work()
         except Exception:  # noqa: BLE001 - a log that cannot be read is shown as not read, never as a crash
             tail = None
+        ports: list[SlotPortResult] | None = None
+        if self._ports_work is not None:
+            try:
+                ports = list(self._ports_work())
+            except Exception:  # noqa: BLE001 - a port check that raises is shown as not checked, never as a crash
+                ports = None
         try:
-            self._deliver((status, failure, tail))
+            self._deliver((status, failure, tail, ports))
         except RuntimeError:
             pass  # the shared delivery object is gone, for example at shutdown

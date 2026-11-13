@@ -205,7 +205,12 @@ def test_the_tree_tab_stays_read_only(qtbot, settings_path, tmp_path):
     qtbot.waitUntil(lambda: table.rowCount() == 5, timeout=5000)
 
     for widget_type in WRITE_CONTROLS:
-        assert tab.findChildren(widget_type) == [], widget_type.__name__
+        found = tab.findChildren(widget_type)
+        # The one text box is the search filter. It hides rows and never edits or sends anything.
+        if widget_type is QLineEdit:
+            assert [widget.objectName() for widget in found] == ["projects-search"], widget_type.__name__
+        else:
+            assert found == [], widget_type.__name__
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     assert isinstance(table.itemDelegateForColumn(0), _TreeNameDelegate)
 

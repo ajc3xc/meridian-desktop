@@ -6,8 +6,8 @@ text and the rows for each one:
 - the status: running or not, and when the tunnel was last checked (from tunnel_status.TunnelStatus);
 - the two lanes: the direct lane (claude.ai reaches Meridian core and Tigris directly) and the tunnel lane, with one
   line on what each lane needs;
-- the slots: the tunnel's fixed slot ports (slot_ports.SLOT_PORTS), one row each. The tunnel status holds no per-slot
-  data, so every slot's state says it is not reported;
+- the slots: the tunnel's fixed slot ports (slot_ports.SLOT_PORTS), one row each, with the plugin each serves and the
+  result of the last connect-only port check: listening or not listening, never healthy;
 - the recent log: the last LOG_TAIL_LINES lines of the tunnel log, already redacted by log_tail.read_tunnel_log_tail;
 - the tool groups the tunnel exposes, each on or off, using the existing tool-group settings (tool_catalog.py and the
   disabled_tools setting);
@@ -24,6 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from meridian_desktop import custom_connectors, log_tail, slot_ports, tool_catalog, tunnel_status
+from meridian_desktop.slot_ports import SlotPortResult
 from meridian_desktop.log_tail import LogTail
 from meridian_desktop.settings_store import Settings
 from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, TunnelStatus
@@ -64,15 +65,32 @@ TUNNEL_LANE_LIVE = "Live."
 TUNNEL_LANE_NOT_LIVE = "Not live: the tunnel is not running."
 TUNNEL_LANE_UNKNOWN = "Not live: the tunnel status is unknown."
 
-# The slot table. Its rows are the tunnel's fixed slot ports. The tunnel status holds no per-slot state, so every row
-# says so, and no slot is ever shown as listening, running or connected from here.
+# The slot table. Its rows are the tunnel's fixed slot ports. Each state is the result of a connect-only check on
+# 127.0.0.1 (slot_ports). Listening means something accepts a connection on the port. It is not a health check.
 SLOTS_HEADING = "Slots"
 SLOTS_INTRO = (
-    "The tunnel's slot ports, from the fixed table in this desktop. The tunnel status does not report a state for each "
-    "slot, so each state says so. Nothing here checks a port."
+    "The slot ports on this computer, checked with a connect-only test on 127.0.0.1 when you press Check now. "
+    "Listening means a process accepts a connection on the port. It does not show that the tool works. "
+    "Slots have no controls of their own: Start, Stop and Restart act on the whole tunnel."
 )
-SLOT_COLUMNS = ("Slot", "Port", "State")
-SLOT_STATE_NOT_REPORTED = "Not reported by the tunnel status."
+SLOT_COLUMNS = ("Slot", "Port", "Serves", "State")
+SLOT_STATE_NOT_CHECKED = "Not checked yet. Press Check now."
+SLOT_LISTENING = "Listening on this computer."
+SLOT_NOT_LISTENING = "Not listening."
+SLOT_NOT_ASSIGNED = "Not assigned to a tunnel plugin."
+# The plugin each built-in slot serves, by its name in the core's tunnel plugin list (meridian/tunnel_plugins.py).
+SLOT_SERVES = {
+    "fs": "filesystem",
+    "code": "code-intel",
+    "extract": "code-extractor",
+    "ppt": "powerpoint",
+    "word": "word",
+    "dc": "desktop-commander",
+    "docs": "meridian-docs",
+    "zotero": "zotero-mcp",
+    "outputs": "meridian-outputs",
+    "debug": "mcp-debugger",
+}
 
 # The recent log: the end of the tunnel log file, read through log_tail. The panel only reads it, and writes nothing.
 LOG_HEADING = "Recent tunnel log"
@@ -154,10 +172,11 @@ class ConnectorRow:
 
 @dataclass(frozen=True)
 class SlotRow:
-    """One tunnel slot port: its name, its loopback port, and the state the tunnel status gives for it."""
+    """One tunnel slot port: its name, its loopback port, the plugin it serves, and what the port check found."""
 
     slot: str
     port: int
+    serves: str
     state: str
 
 
@@ -241,10 +260,21 @@ def connector_rows(raw: Sequence, opt_in: bool) -> tuple[ConnectorRow, ...]:
     return tuple(rows)
 
 
-def slot_rows() -> tuple[SlotRow, ...]:
-    """One row for each slot port, in the order of slot_ports.SLOT_PORTS. TunnelStatus holds no slot data, so every
-    state is SLOT_STATE_NOT_REPORTED. A slot is never shown as listening, running or connected from here."""
-    return tuple(SlotRow(slot, port, SLOT_STATE_NOT_REPORTED) for slot, port in slot_ports.SLOT_PORTS)
+def slot_rows(results: Sequence[SlotPortResult] | None = None) -> tuple[SlotRow, ...]:
+    """One row for each slot port, in the order of slot_ports.SLOT_PORTS.
+
+    ``results`` is the last port check. None, or a slot the check did not report, is not checked yet. A listening port
+    says listening, never healthy."""
+    found = {result.slot: result for result in results or ()}
+    rows: list[SlotRow] = []
+    for slot, port in slot_ports.SLOT_PORTS:
+        result = found.get(slot)
+        if result is None:
+            state = SLOT_STATE_NOT_CHECKED
+        else:
+            state = SLOT_LISTENING if result.listening else SLOT_NOT_LISTENING
+        rows.append(SlotRow(slot, port, SLOT_SERVES.get(slot, SLOT_NOT_ASSIGNED), state))
+    return tuple(rows)
 
 
 def log_lines(tail: LogTail | None) -> tuple[str, ...]:
@@ -300,7 +330,11 @@ __all__ = [
     "SLOTS_HEADING",
     "SLOTS_INTRO",
     "SLOT_COLUMNS",
-    "SLOT_STATE_NOT_REPORTED",
+    "SLOT_LISTENING",
+    "SLOT_NOT_LISTENING",
+    "SLOT_NOT_ASSIGNED",
+    "SLOT_SERVES",
+    "SLOT_STATE_NOT_CHECKED",
     "SlotRow",
     "STATUS_HEADING",
     "TUNNEL_LANE_NAME",

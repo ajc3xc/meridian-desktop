@@ -257,11 +257,11 @@ def test_settings_page_is_scrollable(qtbot, settings_path):
     assert not any("Not built yet" in text for text in _label_texts(page))
 
 
-def test_mode_selector_offers_hosted_local_and_tunnel(qtbot, settings_path):
+def test_mode_selector_offers_hosted_and_local(qtbot, settings_path):
     window = _window(qtbot, settings_path)
     combo = window.mode_selector
-    assert [combo.itemData(i) for i in range(combo.count())] == ["hosted", "local", "tunnel"]
-    assert [combo.itemText(i) for i in range(combo.count())] == ["Hosted", "Local", "Tunnel"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["hosted", "local"]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Hosted", "Local"]
 
 
 def test_mode_selector_writes_to_temp_settings_path(qtbot, settings_path):
@@ -366,9 +366,14 @@ def test_projects_tab_lists_rows_and_has_no_write_controls(qtbot, settings_path,
     assert "Icon: rocket" in detail.text()
     assert "Parent project: p-old" in detail.text()
 
-    # No write control on the tab, and the table cannot be edited.
+    # No write control on the tab, and the table cannot be edited. The one text box is the search filter: it hides
+    # rows and never edits or sends anything.
     for widget_type in WRITE_CONTROLS:
-        assert page.findChildren(widget_type) == [], widget_type.__name__
+        found = page.findChildren(widget_type)
+        if widget_type is QLineEdit:
+            assert [widget.objectName() for widget in found] == ["projects-search"], widget_type.__name__
+        else:
+            assert found == [], widget_type.__name__
     assert table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
 
     # The fields the desktop never reads do not appear anywhere on the tab.

@@ -30,12 +30,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from PySide6.QtCore import QRunnable, QSize, Qt, QThreadPool, Slot
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QRunnable, QSize, Qt, QThreadPool, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -73,6 +74,9 @@ BACKUP_RUNNING_TEXT = "Backing up hosted projects..."
 BACKUP_FAILED_TEXT = "Projects could not be backed up"
 SELECTED_BACKUP_BUTTON_TEXT = "Back up selected projects to this computer"
 SELECTED_NONE_TEXT = "Select one or more projects in the table first."
+SEARCH_PLACEHOLDER_TEXT = "Search projects by name"
+SELECT_ALL_TEXT = "Select all shown"
+SELECT_NONE_TEXT = "Select none"
 
 FIELD_LABELS = {
     "id": "ID",
@@ -204,6 +208,14 @@ def _load(store: SettingsStore, sources: DataSources) -> tuple[Resolution, bool]
     return outcome, _usable_token(token)
 
 
+def selection_count_text(chosen: int, total: int, shown: int) -> str:
+    """The selection count for the backup row, such as "2 of 5 selected". A search that hides rows adds the shown count."""
+    text = f"{chosen} of {total} selected"
+    if shown < total:
+        text += f" ({shown} shown)"
+    return text
+
+
 def _backup_cell(when: object) -> str:
     """The Last backup cell: the UTC time of the newest local backup of the project, or Never backed up."""
     return projects_backup.NEVER_BACKED_UP_TEXT if when is None else projects_backup.backup_time_text(when)
@@ -312,6 +324,12 @@ class ProjectsTab(QWidget):
         self._backup_widgets: tuple[QPushButton, QLabel, QLabel] | None = None
         self._backup_running = False
         self._selected_backup_button: QPushButton | None = None
+        # Every backup-row widget, so one visibility rule covers them all. The row is built once a token is seen.
+        self._backup_extras: list[QWidget] = []
+        self._select_all_button: QPushButton | None = None
+        self._select_none_button: QPushButton | None = None
+        self._selection_count: QLabel | None = None
+        self._search: QLineEdit | None = None
         shared_delivery().delivered.connect(self._on_delivered)
         self._build()
 
@@ -325,6 +343,13 @@ class ProjectsTab(QWidget):
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
+
+        # A box that only hides the rows whose name does not match. It never edits or sends anything.
+        self._search = QLineEdit(self)
+        self._search.setObjectName("projects-search")
+        self._search.setPlaceholderText(SEARCH_PLACEHOLDER_TEXT)
+        self._search.textChanged.connect(self._apply_filter)
+        layout.addWidget(self._search)
 
         self._table = QTableWidget(0, len(TABLE_FIELDS), self)
         self._table.setObjectName("projects-table")
@@ -413,15 +438,19 @@ class ProjectsTab(QWidget):
                 if column == 0:
                     item.setData(TREE_DEPTH_ROLE, depth)
                 self._table.setItem(row_index, column, item)
-        if self._rows:
-            self._table.selectRow(0)
+        # The search hides rows that do not match, and a hidden row is never selected. The first shown row is selected.
+        self._apply_filter()
+        self._table.clearSelection()
+        first_shown = next((row for row in range(len(self._rows)) if not self._table.isRowHidden(row)), None)
+        if first_shown is not None:
+            self._table.selectRow(first_shown)
         self._show_detail()
 
     # ----------------------------------------------------------- detail
 
     @Slot()
     def _show_detail(self) -> None:
-        self._update_selected_button()
+        self._update_selection_controls()
         selected = sorted({item.row() for item in self._table.selectedItems()})
         if not selected or selected[0] >= len(self._rows):
             self._detail.setText(DETAIL_EMPTY_TEXT)
@@ -442,11 +471,9 @@ class ProjectsTab(QWidget):
             self._backup_widgets = self._build_backup_row()
         button, destination, status = self._backup_widgets
         destination.setText(projects_backup.destination_text(projects_backup.backup_dir()))
-        for widget in (button, destination, status):
+        for widget in (button, destination, status, *self._backup_extras):
             widget.setVisible(saved)
-        if self._selected_backup_button is not None:
-            self._selected_backup_button.setVisible(saved)
-        self._update_selected_button()
+        self._update_selection_controls()
 
     def _build_backup_row(self) -> tuple[QPushButton, QLabel, QLabel]:
         column = QVBoxLayout()
@@ -461,7 +488,23 @@ class ProjectsTab(QWidget):
         selected.clicked.connect(lambda _checked=False: self._start_backup(self._selected_ids()))
         self._selected_backup_button = selected
         row.addWidget(selected)
+        select_all = QPushButton(SELECT_ALL_TEXT, self)
+        select_all.setObjectName("projects-select-all")
+        select_all.clicked.connect(lambda _checked=False: self._select_all_shown())
+        self._select_all_button = select_all
+        row.addWidget(select_all)
+        select_none = QPushButton(SELECT_NONE_TEXT, self)
+        select_none.setObjectName("projects-select-none")
+        select_none.clicked.connect(lambda _checked=False: self._table.clearSelection())
+        self._select_none_button = select_none
+        row.addWidget(select_none)
+        count = make_selectable(QLabel("", self))
+        count.setObjectName("projects-selection-count")
+        count.setTextFormat(Qt.TextFormat.PlainText)
+        self._selection_count = count
+        row.addWidget(count)
         row.addStretch(1)
+        self._backup_extras.extend((selected, select_all, select_none, count))
         destination = make_selectable(QLabel("", self))
         destination.setObjectName("projects-backup-destination")
         destination.setTextFormat(Qt.TextFormat.PlainText)
@@ -503,11 +546,56 @@ class ProjectsTab(QWidget):
                 ids.append(str(self._rows[row_index]["id"]))
         return ids
 
-    def _update_selected_button(self) -> None:
-        """The selected-backup button is on only when a project is selected and no backup is running."""
-        if self._selected_backup_button is None:
+    def _update_selection_controls(self) -> None:
+        """Keep the selection controls in step with the table.
+
+        The selected-backup button is on only when a project is selected and no backup is running. Select all is on
+        when the search shows a row. The count says how many listed projects are selected, and how many the search shows.
+        """
+        chosen = len(self._selected_ids())
+        if self._selected_backup_button is not None:
+            self._selected_backup_button.setEnabled(chosen > 0 and not self._backup_running)
+        if self._select_all_button is not None:
+            self._select_all_button.setEnabled(self._shown_count() > 0)
+        if self._selection_count is not None:
+            self._selection_count.setText(selection_count_text(chosen, len(self._rows), self._shown_count()))
+
+    def _shown_count(self) -> int:
+        """How many listed rows the search leaves shown."""
+        return sum(1 for row in range(len(self._rows)) if not self._table.isRowHidden(row))
+
+    @Slot(str)
+    def _apply_filter(self, _text: str = "") -> None:
+        """Hide the rows whose name does not contain the search text, ignoring case. A hidden row is deselected."""
+        needle = self._search.text().strip().casefold() if self._search is not None else ""
+        hidden: list[int] = []
+        for row_index, row in enumerate(self._rows):
+            name = str(row.get("name") or "")
+            is_hidden = bool(needle) and needle not in name.casefold()
+            self._table.setRowHidden(row_index, is_hidden)
+            if is_hidden:
+                hidden.append(row_index)
+        self._set_rows_selected(hidden, selected=False)
+        self._update_selection_controls()
+
+    def _set_rows_selected(self, rows: list[int], *, selected: bool) -> None:
+        """Select or deselect whole rows in one change. An empty list changes nothing."""
+        if not rows:
             return
-        self._selected_backup_button.setEnabled(bool(self._selected_ids()) and not self._backup_running)
+        model = self._table.model()
+        last_column = model.columnCount() - 1
+        ranges = QItemSelection()
+        for row_index in rows:
+            ranges.select(model.index(row_index, 0), model.index(row_index, last_column))
+        flag = QItemSelectionModel.SelectionFlag.Select if selected else QItemSelectionModel.SelectionFlag.Deselect
+        self._table.selectionModel().select(ranges, flag | QItemSelectionModel.SelectionFlag.Rows)
+
+    @Slot()
+    def _select_all_shown(self) -> None:
+        """Select every row the search shows, and no hidden row."""
+        shown = [row for row in range(len(self._rows)) if not self._table.isRowHidden(row)]
+        self._table.clearSelection()
+        self._set_rows_selected(shown, selected=True)
 
     def _last_backups(self) -> dict[str, object]:
         """The newest local backup time for each project id, from the backups folder. Nothing is sent or read hosted."""
@@ -529,7 +617,7 @@ class ProjectsTab(QWidget):
         button, _destination, status = self._backup_widgets
         button.setEnabled(True)
         status.setText(report.message)
-        self._update_selected_button()
+        self._update_selection_controls()
         self._refresh_backup_column()
 
     # ----------------------------------------------------------- first show

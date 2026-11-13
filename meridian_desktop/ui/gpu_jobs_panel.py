@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from meridian_desktop import gpu_jobs
+from meridian_desktop import gpu_jobs, resources
 from meridian_desktop.gpu_jobs import GpuSnapshot, HostBackoff, Reading, Runner
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
@@ -51,6 +51,8 @@ TABLE_MAX_HEIGHT = 220
 GPU_COLUMNS = ("Host", "GPU", "Name", "Utilization", "Memory", "Temperature", "Power")
 JOB_COLUMNS = ("Source", "Host", "Job", "User", "Name or command", "State", "GPU", "GPU memory")
 STATUS_COLUMNS = ("Where", "Part", "Status")
+RESOURCE_COLUMNS = ("Target", "Cores", "CPU now", "Memory", "Note")
+RESOURCES_HEADING = "CPU, cores and memory"
 INTRO_TEXT = (
     "GPUs and GPU jobs on this computer, the SSH hosts saved in Settings, Slurm and LSF, and RunPod pods. "
     "Read-only: nothing is started, stopped or changed."
@@ -103,6 +105,11 @@ class _ReadJob(QRunnable):
             self._deliver(part)
         except RuntimeError:
             pass  # the panel was deleted while the read ran
+
+
+def _local_resources() -> resources.ResourceRow:
+    """This computer's CPU, cores and memory, read now. Looked up at each read, so a test can replace it."""
+    return resources.local_row(gpu_jobs.LOCAL_HOST)
 
 
 def _table(parent: QWidget, name: str, columns: Sequence[str]) -> QTableWidget:
@@ -206,6 +213,10 @@ class GpuJobsPanel(QWidget):
         self._summary = _label(self, "gpu-summary", "")
         layout.addWidget(self._summary)
 
+        layout.addWidget(_label(self, "gpu-resources-heading", RESOURCES_HEADING))
+        self._resources = _table(self, "gpu-resources", RESOURCE_COLUMNS)
+        layout.addWidget(self._resources)
+
         layout.addWidget(_label(self, "gpu-gpus-heading", GPUS_HEADING))
         self._gpus = _table(self, "gpu-gpus", GPU_COLUMNS)
         layout.addWidget(self._gpus)
@@ -249,7 +260,7 @@ class GpuJobsPanel(QWidget):
 
         def work() -> LocalPart:
             hosts = tuple(hosts_provider())
-            reading = gpu_jobs.read_local(run, runpod_provider)
+            reading = gpu_jobs.read_local(run, runpod_provider, _local_resources)
             return LocalPart(datetime.now(timezone.utc), hosts, reading)
 
         def failure() -> LocalPart:
@@ -361,18 +372,20 @@ class GpuJobsPanel(QWidget):
         gpu_rows = gpu_jobs.gpu_table_rows(snapshot)
         job_rows = gpu_jobs.job_table_rows(snapshot)
         status_rows = gpu_jobs.status_table_rows(snapshot)
+        resource_rows = gpu_jobs.resource_table_rows(snapshot)
         total = len(job_rows)
         self._jobs_cap.setVisible(total > JOB_ROW_LIMIT)
         if total > JOB_ROW_LIMIT:
             self._jobs_cap.setText(f"Showing {JOB_ROW_LIMIT} of {total}.")
         shown = job_rows[:JOB_ROW_LIMIT]
-        rendered = (tuple(gpu_rows), tuple(shown), tuple(status_rows))
+        rendered = (tuple(gpu_rows), tuple(shown), tuple(status_rows), tuple(resource_rows))
         if rendered == self._rendered:
             return
         self._rendered = rendered
         _fill(self._gpus, gpu_rows)
         _fill(self._jobs, shown)
         _fill(self._statuses, status_rows)
+        _fill(self._resources, resource_rows)
 
     # ----------------------------------------------------------- timer
 

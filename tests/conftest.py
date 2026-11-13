@@ -54,6 +54,23 @@ def no_loopback_probe_waits(monkeypatch):
         "probe_slot_ports",
         lambda: [SlotPortResult("test slot", 1, False)],
     )
+    # The Tunnel panel's slot check is the same connect-only probe, so it gets the same stand-in.
+    # This computer's CPU, cores and memory are read from the system, and the read sleeps a sample interval. A stand-in
+    # keeps every test fast and off the machine's real counters. A test that wants the real read replaces it again.
+    from meridian_desktop import resources
+
+    monkeypatch.setattr(
+        resources,
+        "local_row",
+        lambda host: resources.ResourceRow(host, resources.STATE_FAILED, note="Stand-in for this computer's counters."),
+    )
+    from meridian_desktop.ui import tunnel_panel
+
+    monkeypatch.setattr(
+        tunnel_panel,
+        "probe_slot_ports",
+        lambda: [SlotPortResult("test slot", 1, False)],
+    )
 
 
 @pytest.fixture(autouse=True)

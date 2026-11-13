@@ -25,6 +25,7 @@ from meridian_desktop.tunnel_status import NOT_RUNNING, RUNNING, UNKNOWN, Tunnel
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.scope_controls import TUNNEL_OFF_TEXT
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui import tunnel_panel
 from meridian_desktop.ui.tunnel_check import TunnelReadJob
 from meridian_desktop.ui.tunnel_panel import PROBLEM_TEXT, TunnelPanel
 
@@ -369,12 +370,21 @@ def _cells(table: QTableWidget, row: int) -> list[str]:
     return [table.item(row, column).text() for column in range(table.columnCount())]
 
 
-def test_the_slot_table_has_one_row_per_slot_port_and_never_claims_a_state():
+def test_the_slot_table_has_one_row_per_slot_port_and_is_not_checked_until_a_check():
     rows = model.slot_rows()
     assert [(row.slot, row.port) for row in rows] == list(slot_ports.SLOT_PORTS)
     assert len(rows) == 15
-    assert all(row.state == model.SLOT_STATE_NOT_REPORTED for row in rows)
-    assert not any(word in row.state.lower() for row in rows for word in ("listening", "running", "connected"))
+    assert all(row.state == model.SLOT_STATE_NOT_CHECKED for row in rows)
+
+
+def test_a_port_check_says_listening_or_not_listening_and_never_healthy():
+    results = [slot_ports.SlotPortResult("fs", 8808, True), slot_ports.SlotPortResult("code", 8809, False)]
+    rows = {row.slot: row for row in model.slot_rows(results)}
+    assert rows["fs"].state == model.SLOT_LISTENING and rows["fs"].serves == "filesystem"
+    assert rows["code"].state == model.SLOT_NOT_LISTENING and rows["code"].serves == "code-intel"
+    assert rows["extract"].state == model.SLOT_STATE_NOT_CHECKED, "a slot the check did not report is not checked"
+    assert rows["p0"].serves == model.SLOT_NOT_ASSIGNED
+    assert not any(word in row.state.lower() for row in rows.values() for word in ("healthy", "working", "connected"))
 
 
 def test_the_recent_log_shows_only_the_last_fifty_lines():
@@ -414,7 +424,7 @@ def test_the_read_job_delivers_the_status_and_the_log_tail_together():
     delivered: list[tuple] = []
     tail = LogTail(log_tail.STATUS_OK, Path("tunnel.log"), ("a line",))
     TunnelReadJob(lambda: _status(RUNNING), lambda: tail, delivered.append).run()
-    assert delivered == [(_status(RUNNING), None, tail)]
+    assert delivered == [(_status(RUNNING), None, tail, None)]
 
 
 def test_a_status_read_that_raises_is_delivered_with_its_class_name_only():
@@ -424,7 +434,7 @@ def test_a_status_read_that_raises_is_delivered_with_its_class_name_only():
         raise RuntimeError("a detail the panel must not show")
 
     TunnelReadJob(failing_status, lambda: None, delivered.append).run()
-    status, failure, tail = delivered[0]
+    status, failure, tail, _ports = delivered[0]
     assert status is None and failure == "RuntimeError" and tail is None
     assert "a detail the panel must not show" not in repr(delivered)
 
@@ -436,7 +446,7 @@ def test_a_log_read_that_raises_is_delivered_as_not_read():
         raise OSError("the disk went away")
 
     TunnelReadJob(lambda: _status(NOT_RUNNING), failing_log, delivered.append).run()
-    status, failure, tail = delivered[0]
+    status, failure, tail, _ports = delivered[0]
     assert status.state == NOT_RUNNING and failure is None and tail is None
     assert model.log_message(tail) == model.LOG_FAILED_TEXT
 
@@ -451,18 +461,41 @@ def test_a_read_job_whose_delivery_is_gone_does_not_raise():
 # ------------------------------------------------------------------ the slot table and the recent log (the widget)
 
 
-def test_the_slot_table_lists_each_slot_port_and_keeps_every_state_not_reported_while_running(
-    qtbot, settings_path, tmp_path,
-):
+def _expected_slot_cells(state_of):
+    return [
+        [slot, str(port), model.SLOT_SERVES.get(slot, model.SLOT_NOT_ASSIGNED), state_of(slot)]
+        for slot, port in slot_ports.SLOT_PORTS
+    ]
+
+
+def test_the_slot_table_fills_in_the_port_check_on_a_check(qtbot, settings_path, tmp_path, monkeypatch):
+    results = [slot_ports.SlotPortResult(slot, port, slot == "fs") for slot, port in slot_ports.SLOT_PORTS]
+    monkeypatch.setattr(tunnel_panel, "probe_slot_ports", lambda: results)
     panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"))
     table = panel.findChild(QTableWidget, "tunnelpanel-slots")
-    expected = [[slot, str(port), model.SLOT_STATE_NOT_REPORTED] for slot, port in slot_ports.SLOT_PORTS]
     assert table.rowCount() == len(slot_ports.SLOT_PORTS) == 15
-    assert [_cells(table, row) for row in range(table.rowCount())] == expected
+    assert [_cells(table, row) for row in range(table.rowCount())] == _expected_slot_cells(
+        lambda slot: model.SLOT_STATE_NOT_CHECKED
+    )
 
-    # The status says running, and the table still reports no slot state, because the status carries no slot data.
     _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
-    assert [_cells(table, row) for row in range(table.rowCount())] == expected
+    assert [_cells(table, row) for row in range(table.rowCount())] == _expected_slot_cells(
+        lambda slot: model.SLOT_LISTENING if slot == "fs" else model.SLOT_NOT_LISTENING
+    )
+
+
+def test_a_port_check_that_raises_leaves_every_slot_not_checked(qtbot, settings_path, tmp_path, monkeypatch):
+    def failing_probe():
+        raise OSError("a detail the slot table must not show")
+
+    monkeypatch.setattr(tunnel_panel, "probe_slot_ports", failing_probe)
+    panel, _spawn, _confirm = _panel(qtbot, settings_path, tmp_path, status_call=runner_reply("running"))
+    table = panel.findChild(QTableWidget, "tunnelpanel-slots")
+    _check_and_wait(qtbot, panel, model.RUNNING_HEADLINE)
+    assert [_cells(table, row) for row in range(table.rowCount())] == _expected_slot_cells(
+        lambda slot: model.SLOT_STATE_NOT_CHECKED
+    )
+    assert "a detail the slot table must not show" not in repr([_cells(table, r) for r in range(table.rowCount())])
 
 
 def test_the_recent_log_shows_the_last_fifty_lines_of_a_temp_file_with_secrets_redacted(qtbot, settings_path, tmp_path):

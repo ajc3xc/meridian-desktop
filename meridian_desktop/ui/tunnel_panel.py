@@ -10,8 +10,8 @@ It shows, top to bottom:
   the reason shown. The Home tunnel card has a Start of its own, through the same ScopeControls; Stop and Restart are only here.
 - Lanes: the direct lane and the tunnel lane. The tunnel lane shows whether it is live, and each lane gets one line on
   what it needs.
-- Slots: the tunnel's slot ports, one row each, with the state the tunnel status reports. The status reports no state for
-  a slot yet, so each row says it is not reported.
+- Slots: the tunnel's slot ports, one row each, with the plugin each serves and the last connect-only port check on
+  127.0.0.1 (listening or not). The check runs when Check now is pressed.
 - Recent log: the last 50 lines of the tunnel log, already redacted. The panel only reads it.
 - Custom connectors: the tunnel opt-in (off by default), and each saved connector with its tunnel flag.
 
@@ -21,7 +21,7 @@ file with a problem is never written over. Nothing here starts a process on its 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -53,6 +53,7 @@ from meridian_desktop.ui.delivery import Delivered, shared_delivery
 from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.scope_controls import ScopeControls, tunnel_gate
 from meridian_desktop.ui.text import enable_table_copy, make_selectable
+from meridian_desktop.slot_ports import SlotPortResult, probe_slot_ports
 from meridian_desktop.ui.tunnel_check import TunnelReadJob
 
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
@@ -80,7 +81,7 @@ def _heading(parent: QWidget, name: str, text: str) -> QLabel:
 
 
 def _slot_table(parent: QWidget) -> QTableWidget:
-    """The slot table, filled once. Its rows never change, and each state says it is not reported."""
+    """The slot table. Its rows are the slot ports. Each state is not checked until a check fills it in."""
     table = QTableWidget(0, len(model.SLOT_COLUMNS), parent)
     table.setObjectName("tunnelpanel-slots")
     table.setHorizontalHeaderLabels(list(model.SLOT_COLUMNS))
@@ -90,12 +91,16 @@ def _slot_table(parent: QWidget) -> QTableWidget:
     table.horizontalHeader().setStretchLastSection(True)
     table.setMaximumHeight(SLOT_TABLE_MAX_HEIGHT)
     enable_table_copy(table)  # read-only: Ctrl+C and the right-click Copy action copy the selected cells
-    rows = model.slot_rows()
+    _fill_slot_table(table, model.slot_rows())
+    return table
+
+
+def _fill_slot_table(table: QTableWidget, rows: tuple) -> None:
+    """Set the slot table's rows. The rows are the slot ports, in their fixed order, and only the cell text changes."""
     table.setRowCount(len(rows))
     for row_index, row in enumerate(rows):
-        for column, text in enumerate((row.slot, str(row.port), row.state)):
+        for column, text in enumerate((row.slot, str(row.port), row.serves, row.state)):
             table.setItem(row_index, column, QTableWidgetItem(text))
-    return table
 
 
 class TunnelPanel(QWidget):
@@ -114,12 +119,15 @@ class TunnelPanel(QWidget):
         status_call: Callable[[str], RunnerResult],
         parent: QWidget | None = None,
         log_path: Path | None = None,
+        port_probe: Callable[[], Sequence[SlotPortResult]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("tunnel-panel")
         self._store = store
         self._status_call = status_call
         self._log_path = log_path
+        # None means the real connect-only port check. A test passes a fake; it is read at each check.
+        self._port_probe = port_probe
         self._busy = False
         self._generation = 0
         self._read_once = False
@@ -151,7 +159,7 @@ class TunnelPanel(QWidget):
         self._direct_lane = _text(self, "tunnelpanel-lane-direct")
         self._tunnel_lane = _text(self, "tunnelpanel-lane-tunnel")
 
-        # Slots: the tunnel's slot ports, one row each. The status reports no state for a slot, so each row says so.
+        # Slots: the tunnel's slot ports, one row each. Each state is the last port check, or not checked yet.
         self._slots_heading = _heading(self, "tunnelpanel-slots-heading", model.SLOTS_HEADING)
         self._slots_intro = _text(self, "tunnelpanel-slots-intro", model.SLOTS_INTRO)
         self._slots = _slot_table(self)
@@ -228,11 +236,13 @@ class TunnelPanel(QWidget):
         delivery = shared_delivery()
         status_call = self._status_call
         log_path = self._log_path
+        port_probe = self._port_probe if self._port_probe is not None else probe_slot_ports
         QThreadPool.globalInstance().start(
             TunnelReadJob(
                 lambda: read_tunnel_status(status_call),
                 lambda: read_tunnel_log_tail(log_path),
                 lambda payload: delivery.delivered.emit(Delivered(owner, (generation, payload))),
+                ports_work=port_probe,
             )
         )
 
@@ -246,15 +256,22 @@ class TunnelPanel(QWidget):
         generation, payload = item.value
         if generation != self._generation:
             return
-        status, failure, tail = payload if isinstance(payload, tuple) and len(payload) == 3 else (None, None, None)
+        status, failure, tail, ports = (
+            payload if isinstance(payload, tuple) and len(payload) == 4 else (None, None, None, None)
+        )
         if status is not None and not isinstance(status, TunnelStatus):
             status, failure = None, None
         if tail is not None and not isinstance(tail, LogTail):
             tail = None
+        if isinstance(ports, list):
+            ports = [port for port in ports if isinstance(port, SlotPortResult)]
+        else:
+            ports = None
         self._busy = False
         self._check_button.setEnabled(True)
         self._show_status(status, failure)
         self._show_log(tail)
+        self._show_slots(ports)
 
     def _show_status(self, status: TunnelStatus | None, failure: str | None) -> None:
         shown = model.panel_status(status, failure)
@@ -263,6 +280,10 @@ class TunnelPanel(QWidget):
         self._detail.setText(shown.detail)
         self._state = status.state if status is not None else None
         self._render_lanes()
+
+    def _show_slots(self, results: list[SlotPortResult] | None) -> None:
+        """Show the last port check in the slot table. None means the check gave no results, so the rows say not checked."""
+        _fill_slot_table(self._slots, model.slot_rows(results))
 
     def _show_log(self, tail: LogTail | None) -> None:
         """Show the last lines of the log read, and say why there are none. The newest line stays in view."""
