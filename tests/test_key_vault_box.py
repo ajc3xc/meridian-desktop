@@ -208,7 +208,7 @@ def _keys(folder):
     return keys, backend
 
 
-def test_each_key_is_one_line_and_its_details_open_with_the_details_button(qtbot, folder):
+def test_each_key_shows_its_details_and_remove_with_no_details_toggle(qtbot, folder):
     keys, _backend = _keys(folder)
     keys.save("OpenAI", VALUE)
     keys.set_critical("OpenAI", True)
@@ -217,13 +217,10 @@ def test_each_key_is_one_line_and_its_details_open_with_the_details_button(qtbot
     qtbot.waitUntil(lambda: not section.loading, timeout=5000)
 
     details = section.findChild(QFrame, "keys-entry-openai-details")
-    toggle = section.findChild(QPushButton, "keys-entry-openai-details-toggle")
-    assert details.isHidden(), "the details are hidden until the owner asks"
-    assert toggle.text() == "Details"
-    assert not section.findChild(QLabel, "keys-entry-openai-badge").isHidden(), "the Critical badge stays on the one line"
-
-    toggle.click()
-
-    assert not details.isHidden()
-    assert toggle.text() == "Hide"
+    remove = section.findChild(QPushButton, "keys-entry-openai-remove")
+    assert section.findChild(QPushButton, "keys-entry-openai-details-toggle") is None, "there is no Details toggle"
+    assert not details.isHidden(), "the details are shown on the card"
+    assert remove is not None and not remove.isHidden(), "Remove sits on the name line, always shown"
+    assert remove.text() == "Remove"
+    assert not section.findChild(QLabel, "keys-entry-openai-badge").isHidden(), "the Critical badge stays on the name line"
     assert section.findChild(QLineEdit, "keys-entry-openai-value") is not None

@@ -148,8 +148,8 @@ SERVICE_CHOICES = (*(service.name for service in SERVICES), OTHER_CHOICE)
 # A known service's card: what the key is for, where it is made, and the check.
 CREATE_TEXT = "Create the key at {page}."
 CHECK_TEXT = "Check"
-SHOW_DETAILS_TEXT = "Details"
-HIDE_DETAILS_TEXT = "Hide"
+# A key from the keys file leaves the list only: the file is never changed, so the button does not say Remove.
+HIDE_FROM_LIST_TEXT = "Hide from list"
 CHECKING_TEXT = "Checking {service}..."
 # The keys file: its control, what it says about the file, and the names it lists.
 FILE_HEADING_TEXT = "Load keys from a file"
@@ -189,32 +189,14 @@ Confirm = Callable[[QWidget, str, str], bool]
 FileChooser = Callable[[QWidget], str]
 
 
-def _details_toggle(frame: QFrame, key: str) -> QPushButton:
-    """The Details button of a card. It is checkable, so its state says whether the details are open."""
-    toggle = QPushButton(SHOW_DETAILS_TEXT, frame)
-    toggle.setObjectName(f"keys-entry-{key}-details-toggle")
-    toggle.setCheckable(True)
-    return toggle
-
-
 def _details_panel(frame: QFrame, key: str) -> tuple[QFrame, QVBoxLayout]:
-    """The hidden part of a card: the service lines, the value row, the marks and the check. Returned with its layout."""
+    """The body of a card: the service lines, the value row, the marks and the check. Always shown, with no toggle."""
     panel = QFrame(frame)
     panel.setObjectName(f"keys-entry-{key}-details")
-    panel.setVisible(False)
+    panel.setVisible(True)
     layout = QVBoxLayout(panel)
     layout.setContentsMargins(0, 0, 0, 0)
     return panel, layout
-
-
-def _connect_details(toggle: QPushButton, panel: QFrame) -> None:
-    """Show or hide the details with the Details button, and name the button for what it does next."""
-
-    def set_shown(shown: bool) -> None:
-        panel.setVisible(shown)
-        toggle.setText(HIDE_DETAILS_TEXT if shown else SHOW_DETAILS_TEXT)
-
-    toggle.toggled.connect(set_shown)
 
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -567,10 +549,11 @@ class KeysSection(QWidget):
         head.addWidget(mark.badge)
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
-        toggle = _details_toggle(frame, key)
-        head.addWidget(toggle)
+        # Remove sits on the name line, so the owner can delete a key without opening anything.
+        remove = QPushButton(REMOVE_TEXT, frame)
+        remove.setObjectName(f"keys-entry-{key}-remove")
+        head.addWidget(remove)
         column.addLayout(head)
-        # One line per name. The details below stay hidden until the owner opens them with Details.
         panel, details = _details_panel(frame, key)
         column.addWidget(panel)
 
@@ -586,11 +569,8 @@ class KeysSection(QWidget):
         value.setPlaceholderText(NEW_VALUE_PLACEHOLDER)
         save = QPushButton(SAVE_VALUE_TEXT, panel)
         save.setObjectName(f"keys-entry-{key}-save")
-        remove = QPushButton(REMOVE_TEXT, panel)
-        remove.setObjectName(f"keys-entry-{key}-remove")
         row.addWidget(value, 1)
         row.addWidget(save)
-        row.addWidget(remove)
         details.addLayout(row)
         details.addLayout(_action_row(mark))
 
@@ -599,7 +579,6 @@ class KeysSection(QWidget):
         save.clicked.connect(lambda *_, n=name: self._on_save_value(n))
         value.returnPressed.connect(lambda *_, n=name: self._on_save_value(n))
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
-        _connect_details(toggle, panel)
         return _Card(frame, status, value, mark, check, check_result)
 
     def _make_file_card(self, name: str) -> _Card:
@@ -619,8 +598,10 @@ class KeysSection(QWidget):
         head.addWidget(badge)
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
-        toggle = _details_toggle(frame, key)
-        head.addWidget(toggle)
+        # The file is never changed, so this button only hides the name from the list until restart.
+        remove = QPushButton(HIDE_FROM_LIST_TEXT, frame)
+        remove.setObjectName(f"keys-entry-{key}-remove")
+        head.addWidget(remove)
         column.addLayout(head)
         panel, details = _details_panel(frame, key)
         column.addWidget(panel)
@@ -629,17 +610,9 @@ class KeysSection(QWidget):
             details.addWidget(_label(panel, f"keys-entry-{key}-description", service.description))
             details.addWidget(_label(panel, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
 
-        row = QHBoxLayout()
-        remove = QPushButton(REMOVE_TEXT, panel)
-        remove.setObjectName(f"keys-entry-{key}-remove")
-        row.addStretch(1)
-        row.addWidget(remove)
-        details.addLayout(row)
-
         check, check_result = self._check_row(panel, details, key, name, service)
 
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
-        _connect_details(toggle, panel)
         return _Card(frame, status, None, check=check, check_result=check_result, from_file=True)
 
     # ----------------------------------------------------------- state on screen
