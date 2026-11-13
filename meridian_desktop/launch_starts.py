@@ -8,7 +8,7 @@ Each start runs at most once, when the desktop launches, and only when its own s
   answers at the local URL, and the runner reports the local scope not running. It runs the fixed local start once,
   through runner_controls, which logs the attempt. The local URL check is an extra guard: the core's server stops any
   program already using its port before it starts, so a server the owner runs by hand must not be replaced.
-- The hosted tunnel (amendment G): only in Hosted or Tunnel mode, only when the core checkout and its Python were
+- The hosted tunnel (amendment G): only in Hosted mode, only when the core checkout and its Python were
   confirmed in Settings, only while the tunnel buttons are on (tunnel_control_enabled), and only when the runner
   reports the tunnel scope not running. It runs the fixed tunnel start once, through runner_controls, which logs the
   attempt. The tunnel gives claude.ai access to the working folder, so the owner confirms the switch in a dialog that
@@ -35,8 +35,8 @@ PROGRAM_ZOTERO = "Zotero"
 PROGRAM_LOCAL = "Local server"
 PROGRAM_TUNNEL = "Hosted tunnel"
 
-#: The desktop modes in which the tunnel start is allowed at launch (amendment G).
-TUNNEL_MODES = ("hosted", "tunnel")
+#: The desktop modes in which the tunnel start is allowed at launch (amendment G). The tunnel belongs to hosted mode.
+TUNNEL_MODES = ("hosted",)
 
 STARTED = "started"
 SKIPPED = "skipped"
@@ -59,7 +59,7 @@ LOCAL_FAILED_TEXT = "The local server was not started at launch. {}"
 LOCAL_STARTED_TEXT = "The local server was started once, at launch."
 TUNNEL_STARTED_TEXT = "The hosted tunnel was started once, at launch."
 TUNNEL_MODE_TEXT = (
-    "The hosted tunnel was not started at launch, because the desktop is not set to Hosted or Tunnel mode."
+    "The hosted tunnel was not started at launch, because the desktop is not set to Hosted mode."
 )
 TUNNEL_CONTROLS_OFF_TEXT = (
     "The hosted tunnel was not started at launch, because the tunnel buttons are off. Turn them on in Settings first."

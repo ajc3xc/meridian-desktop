@@ -611,16 +611,17 @@ def test_a_missing_settings_file_starts_in_hosted_only_when_a_token_is_saved(set
     assert _launch_mode(settings_path, FakeSecrets(None))[1] == "local"
 
 
-@pytest.mark.parametrize("mode", ["local", "hosted", "tunnel"])
+@pytest.mark.parametrize("mode, expected", [("local", "local"), ("hosted", "hosted"), ("tunnel", "hosted")])
 @pytest.mark.parametrize("token", [FAKE_TOKEN, None])
-def test_an_explicit_mode_in_the_file_always_wins_and_the_keychain_is_not_read(settings_path, mode, token):
+def test_an_explicit_mode_in_the_file_always_wins_and_the_keychain_is_not_read(settings_path, mode, expected, token):
+    # An older saved "tunnel" is Hosted now, so it is explicit Hosted and wins over the launch mode.
     _write(settings_path, json.dumps({"mode": mode}))
     secrets = FakeSecrets(token)
 
     store, resolved = _launch_mode(settings_path, secrets)
 
-    assert resolved == mode
-    assert store.load().settings.mode == mode
+    assert resolved == expected
+    assert store.load().settings.mode == expected
     assert secrets.reads == 0
 
 

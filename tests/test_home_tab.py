@@ -149,7 +149,7 @@ def test_every_card_checks_once_when_the_window_first_shows_with_no_click(qtbot,
         assert _headline(tab, key) != "Could not check", key
 
 
-@pytest.mark.parametrize("mode", ["local", "hosted", "tunnel"])
+@pytest.mark.parametrize("mode", ["local", "hosted"])
 def test_the_local_tunnel_and_services_cards_check_at_boot_in_every_saved_mode(qtbot, tmp_path, mode):
     """Home's boot checks do not depend on the saved mode. Only the one-line tunnel status in the window's mode bar does."""
     SettingsStore(tmp_path / "settings.json").save(Settings(mode=mode))

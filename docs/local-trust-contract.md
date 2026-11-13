@@ -79,7 +79,7 @@ F. Owner decision, 2026-10-23. `tunnel_control_enabled` now defaults to `true`, 
 G. Hosted tunnel at launch. The setting `tunnel_autostart` (default false) turns this on. When the desktop
    launches with it on, the desktop starts the tunnel once, through the fixed tunnel start in rule 3 and
    under the same timeouts and log as rules 5, 6 and E, only when all of these hold: the desktop is in
-   `hosted` or `tunnel` mode, the core checkout and its Python were confirmed in Settings, the tunnel
+   `hosted` mode, the core checkout and its Python were confirmed in Settings, the tunnel
    buttons are on (`tunnel_control_enabled`, Amendment F), and the runner reports the tunnel scope not
    running. Nothing else starts the tunnel by itself, and a launch that finds the tunnel running starts
    nothing.

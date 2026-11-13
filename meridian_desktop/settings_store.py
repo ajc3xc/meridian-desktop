@@ -24,9 +24,11 @@ from typing import Mapping
 from meridian_desktop.gpu_jobs import MAX_HOSTS, check_alias, parse_host_list
 
 # local: the Meridian server or database file on this computer. hosted: the hosted Meridian account.
-# tunnel: the hosted account, which reaches this computer through the tunnel. Its projects are read
-# the same way as hosted. A saved file with local or hosted reads exactly as it did before.
-VALID_MODES = ("local", "hosted", "tunnel")
+# The tunnel belongs to hosted: hosted tools reach this computer through it, and hosted mode shows its status. A saved
+# file with local or hosted reads exactly as it did before. An older saved "tunnel" reads as hosted (LEGACY_MODE_ALIASES).
+VALID_MODES = ("local", "hosted")
+# Older saved values that now mean another mode.
+LEGACY_MODE_ALIASES = {"tunnel": "hosted"}
 DEFAULT_MODE = "local"
 DEFAULT_HOSTED_URL = "https://usemeridian.us"
 DEFAULT_LOCAL_URL = "http://127.0.0.1:7878"
@@ -136,7 +138,7 @@ class Settings:
     tunnel_control_enabled: bool = True
     zotero_autostart: bool = False
     local_server_autostart: bool = False
-    # tunnel_autostart starts the hosted tunnel once at launch, only in Hosted or Tunnel mode. Default off, and turned
+    # tunnel_autostart starts the hosted tunnel once at launch, only in Hosted mode. Default off, and turned
     # on only after the owner confirms the dialog that names the working folder claude.ai can reach (amendment G).
     tunnel_autostart: bool = False
     confirmed_core_python: str = ""
@@ -257,6 +259,8 @@ def _from_mapping(data: Mapping) -> tuple[Settings, list[str]]:
     # warning, and neither is an invalid one, which is reported. The launch mode decides for those (see load).
     if "mode" in data:
         mode = data["mode"]
+        if isinstance(mode, str):
+            mode = LEGACY_MODE_ALIASES.get(mode, mode)
         if mode in VALID_MODES:
             values["mode"] = mode
             values["mode_explicit"] = True
@@ -688,6 +692,7 @@ class SettingsStore:
         return updated
 
     def set_mode(self, mode: str) -> Settings:
+        mode = LEGACY_MODE_ALIASES.get(mode, mode)
         if mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
         # The owner chose this mode, so it is explicit from now on and wins over the launch mode.

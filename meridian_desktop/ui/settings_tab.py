@@ -80,8 +80,9 @@ from meridian_desktop.ui.tools_panel import ToolsPanel
 from meridian_desktop.ui.tools_section import TOOLS_TITLE, ToolsSection
 from meridian_desktop.ui.text import make_selectable
 
-# Mode names in display order: (settings value, label). The top-bar selector uses this list too.
-MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"), ("tunnel", "Tunnel"))
+# Mode names in display order: (settings value, label). The top-bar selector uses this list too. The tunnel belongs to
+# Hosted, so it has no entry of its own.
+MODE_ITEMS = (("hosted", "Hosted"), ("local", "Local"))
 MODE_LABELS = dict(MODE_ITEMS)
 
 # The width the Settings column never shrinks below, so a label wraps instead of being cut off.
@@ -703,6 +704,11 @@ class SettingsTab(QWidget):
             return
         self._hosted_url.setText(url)
         _set_message(self._hosted_url_message, HOSTED_URL_SAVED_TEXT)
+
+    def start_sign_in(self) -> None:
+        """Start the browser sign-in, the same as its Sign in with browser button. The top bar's button calls this."""
+        if self._sign_in.isEnabled():
+            self._on_sign_in_clicked()
 
     @Slot()
     def _on_sign_in_clicked(self) -> None:

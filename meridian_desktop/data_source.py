@@ -11,9 +11,9 @@ Hosted mode:
 - no stored token: state "not_signed_in". Nothing is probed, read or fetched.
 - a stored token: the rows from the hosted client, source "hosted".
 
-Tunnel mode reads exactly as hosted mode does. Hosted tools reach this computer through the
-tunnel, so the projects come from the same hosted client with the same token. The tunnel's
-state is shown on the top bar, not checked here, and a stopped tunnel does not change what is read.
+The tunnel belongs to hosted mode. Hosted tools reach this computer through the tunnel, so the
+projects come from the same hosted client with the same token. The tunnel's state is shown on the
+top bar, not checked here, and a stopped tunnel does not change what is read.
 
 This module makes no network call and reads no file itself. Each outside effect is an
 injected callable in DataSources. The app passes the real functions (local_client.probe_health,
@@ -37,8 +37,8 @@ from meridian_desktop import local_client
 from meridian_desktop.hosted_client import HostedError
 from meridian_desktop.settings_store import VALID_MODES, Settings
 
-# The modes whose projects come from the hosted client: hosted, and tunnel (reached through the tunnel).
-HOSTED_PATH_MODES = ("hosted", "tunnel")
+# The modes whose projects come from the hosted client.
+HOSTED_PATH_MODES = ("hosted",)
 
 SOURCE_SERVER = "server"
 SOURCE_FILE = "file"
@@ -139,7 +139,7 @@ def _resolve_hosted(settings: Settings, sources: DataSources) -> Resolution:
 def resolve(settings: Settings, sources: DataSources) -> Resolution:
     """Return the one source the mode uses, with its rows, or the state that says why there is none.
 
-    "hosted" and "tunnel" both read through the hosted path. Raise ValueError when the mode is not one of VALID_MODES.
+    "hosted" reads through the hosted path. Raise ValueError when the mode is not one of VALID_MODES.
     """
     if settings.mode == "local":
         return _resolve_local(settings, sources)

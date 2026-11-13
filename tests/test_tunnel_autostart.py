@@ -1,7 +1,7 @@
 """Tests for the hosted-tunnel launch switch (amendment G): the Settings switch and the saved flag.
 
 The switch asks the owner before it turns on, names the exact tunnel command and the working folder claude.ai can
-reach, and starts nothing when it is turned on. It is refused outside Hosted or Tunnel mode, without a confirmed core,
+reach, and starts nothing when it is turned on. It is refused outside Hosted mode, without a confirmed core,
 and while the tunnel buttons are off. No dialog opens for a refusal, no runner process starts, and the settings file
 is a temp path.
 """
@@ -114,7 +114,7 @@ def test_the_tunnel_switch_starts_off_and_building_the_block_asks_nothing(qtbot,
 
 
 @pytest.mark.parametrize("mode", ["local"])
-def test_turning_the_tunnel_on_outside_hosted_or_tunnel_mode_is_refused_without_a_dialog(qtbot, settings_path, mode):
+def test_turning_the_tunnel_on_outside_hosted_mode_is_refused_without_a_dialog(qtbot, settings_path, mode):
     _core(settings_path, mode=mode)
     confirm = Confirm(True)
     section, _spawn = _section(qtbot, settings_path, confirm=confirm)

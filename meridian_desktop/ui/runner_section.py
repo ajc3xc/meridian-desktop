@@ -59,20 +59,20 @@ LOCAL_ON_TEXT = "Saved. The local server will start when the desktop opens, if t
 SWITCH_OFF_TEXT = "Saved. It will not start when the desktop opens."
 NOT_SAVED_TEXT = "Not saved: the settings file could not be written."
 TUNNEL_CHECK_TEXT = (
-    "Start the hosted tunnel when the desktop opens, only in Hosted or Tunnel mode and only when the runner "
+    "Start the hosted tunnel when the desktop opens, only in Hosted mode and only when the runner "
     "reports it not running"
 )
 TUNNEL_QUESTION = "Start the hosted tunnel when the desktop opens?"
 TUNNEL_BODY_EXTRA = (
-    "The tunnel starts once per desktop launch, only in Hosted or Tunnel mode, and only when the runner reports it "
+    "The tunnel starts once per desktop launch, only in Hosted mode, and only when the runner reports it "
     "not running. While it runs, claude.ai can reach the working folder shown above. It starts again on every desktop "
     "launch with no further question. Turn this switch off to stop that."
 )
-TUNNEL_MODE_NOT_SET_TEXT = "Not turned on. Set the desktop to Hosted or Tunnel mode first."
+TUNNEL_MODE_NOT_SET_TEXT = "Not turned on. Set the desktop to Hosted mode first."
 TUNNEL_CONTROLS_OFF_TEXT = "Not turned on. The tunnel buttons are off. Turn them on first."
 TUNNEL_CANCELLED_TEXT = "Not turned on. The tunnel will not start when the desktop opens."
 TUNNEL_ON_TEXT = (
-    "Saved. The tunnel will start when the desktop opens, if the desktop is in Hosted or Tunnel mode and the "
+    "Saved. The tunnel will start when the desktop opens, if the desktop is in Hosted mode and the "
     "runner reports it not running."
 )
 

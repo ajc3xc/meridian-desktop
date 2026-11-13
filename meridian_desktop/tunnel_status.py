@@ -76,7 +76,7 @@ START_HINT = (
 )
 CHECK_HINT = "Press Check now on Home to check it again."
 
-# The top bar's one line and its detail line in Tunnel mode. The Home tunnel card shows the same answers
+# The top bar's one line and its detail line in Hosted mode. The Home tunnel card shows the same answers
 # with its own headlines. The check time and "no time" text are shared with it.
 BAR_HEADLINES = {
     RUNNING: "Tunnel running",

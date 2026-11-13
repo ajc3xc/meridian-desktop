@@ -43,10 +43,10 @@ stages it for the next restart. The status bar shows the download and the staged
 reads that same one result without asking GitHub again. It is off when the auto_update or check_updates setting is
 false, and the app passes no transport under --smoke, so a smoke run makes no request.
 
-Tunnel mode reads projects the same way Hosted does. Its top bar shows one line with the tunnel's
-state (from one read-only status call, made when the mode is switched to Tunnel and at start in
-Tunnel mode), the tools that need the tunnel, and how to start it by hand. The top bar has no
-control that starts, stops or restarts anything.
+Hosted mode also shows the tunnel's status. Its top bar shows one line with the tunnel's state
+(from one read-only status call, made when Hosted is chosen and at start in Hosted mode), the tools
+that need the tunnel, and how to start it by hand. The top bar has no control that starts, stops or
+restarts anything.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ from meridian_desktop.hosted_client import Transport
 from meridian_desktop.restart_check import RestartWatch
 from meridian_desktop.runner_client import RunnerClient, RunnerResult
 from meridian_desktop.secret_store import KeyringSecretStore, SecretStore
-from meridian_desktop.settings_store import SettingsStore, SettingsUnreadable
+from meridian_desktop.settings_store import HOSTED_MODE, SettingsStore, SettingsUnreadable
 from meridian_desktop.tools_status import ToolsStatus, read_tools_status
 from meridian_desktop.tunnel_status import BAR_CHECKING_TEXT, DEPENDENCY_TEXT, bar_texts, read_tunnel_status
 from meridian_desktop.ui.connection_bar import ConnectionBar
@@ -88,6 +88,7 @@ from meridian_desktop.ui.runner_actions import RunnerActions
 from meridian_desktop.ui.search_tab import SearchTab
 from meridian_desktop.ui.sessions_panel import SessionsPanel
 from meridian_desktop.ui.settings_tab import LATEX_SECTION, MODE_ITEMS, SettingsTab
+from meridian_desktop.ui.tab_wheel import TabBarWheelBlocker
 from meridian_desktop.ui.text import make_selectable
 from meridian_desktop.ui.tunnel_check import TunnelCheckJob
 from meridian_desktop.ui.tunnel_panel import TunnelPanel
@@ -119,12 +120,14 @@ ZOTERO_SECTION = (
 
 STATUS_MESSAGE = "Home checks each part of Meridian when this window opens, then every five minutes while Home is showing."
 
-TUNNEL_MODE = "tunnel"
+# In Hosted mode the top bar shows the tunnel's status, because hosted tools reach this computer through the tunnel.
 # One plain sentence per mode. The one for the chosen mode shows under the selector.
 MODE_DESCRIPTIONS = {
-    "hosted": "Hosted: projects load from your hosted Meridian account, with the hosted token saved in Settings.",
+    "hosted": (
+        "Hosted: projects load from your hosted Meridian account, with the hosted token saved in Settings. "
+        "The top bar shows the tunnel's status, and hosted tools reach this computer through the tunnel."
+    ),
     "local": "Local: projects load from the Meridian server or database file on this computer.",
-    TUNNEL_MODE: "Tunnel: projects load the same way as Hosted. Hosted tools reach this computer through the tunnel.",
 }
 
 # The window opens at this size (width, height). The tab labels fit at 1280 px, and Home scrolls its cards
@@ -488,6 +491,9 @@ class MainWindow(QMainWindow):
         # Qt hides tabs behind scroll arrows when the bar is narrower than its labels. The window
         # may not shrink below the full bar, so every tab label stays visible.
         self.tabs.setMinimumWidth(self.tabs.tabBar().sizeHint().width())
+        # The tab bar takes no wheel turns, so the wheel scrolls the page and never moves between tabs.
+        self._tab_wheel = TabBarWheelBlocker(self)
+        self.tabs.tabBar().installEventFilter(self._tab_wheel)
         _fit_and_center(self, DEFAULT_WINDOW_SIZE)
 
         self.statusBar().showMessage(STATUS_MESSAGE)
@@ -495,16 +501,16 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._update_notice)
         self._update_notice.start()
         self._connection_bar.start()
-        # A saved Tunnel mode starts its status check now. Any other mode only shows its description.
+        # A saved Hosted mode starts its tunnel status check now. Local mode only shows its description.
         self._apply_mode_view(self._saved_mode)
         # The core search at start, and any later search or chosen core folder, changes what the tunnel check can reach.
-        # A Tunnel mode window checks again once a search has finished.
+        # A Hosted mode window checks again once a search has finished.
         self._runner_actions.coreChanged.connect(self._on_core_changed)
 
     @Slot()
     def _on_core_changed(self) -> None:
-        """Re-check the tunnel in Tunnel mode once the core search has finished. Other modes do nothing."""
-        if self._runner_actions.locating or self._saved_mode != TUNNEL_MODE:
+        """Re-check the tunnel in Hosted mode once the core search has finished. Local mode does nothing."""
+        if self._runner_actions.locating or self._saved_mode != HOSTED_MODE:
             return
         self._start_tunnel_check()
 
@@ -540,6 +546,7 @@ class MainWindow(QMainWindow):
         )
         # A sign-in or sign-out in Settings checks the top bar again at once.
         self._settings_tab.signedInChanged.connect(self._connection_bar.refresh)
+        self._connection_bar.signInRequested.connect(self._sign_in_from_bar)
         column.addWidget(self._settings_tab)
         # The Writing area sits in Settings, not as a tab: DOCX and Slides, each Not connected with its reason.
         column.addWidget(make_selectable(QLabel(WRITING_SECTION, container)))
@@ -567,7 +574,7 @@ class MainWindow(QMainWindow):
         self.mode_selector.currentIndexChanged.connect(self._on_mode_changed)
         bar.addWidget(self.mode_selector)
 
-        # The one-line tunnel status. It is shown only in Tunnel mode (see _apply_mode_view).
+        # The one-line tunnel status. It is shown only in Hosted mode (see _apply_mode_view).
         self.tunnel_status_label = make_selectable(QLabel(parent))
         self.tunnel_status_label.setObjectName("tunnel-mode-status")
         self.tunnel_status_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -581,7 +588,7 @@ class MainWindow(QMainWindow):
             self.settings_warning.hide()
         bar.addWidget(self.settings_warning, 1)
 
-        # The chosen mode's description. In Tunnel mode, the detail line names the tools that need the
+        # The chosen mode's description. In Hosted mode, the detail line names the tools that need the
         # tunnel and, when the tunnel is not running, how to start it by hand.
         self.mode_description = make_selectable(QLabel(parent))
         self.mode_description.setObjectName("mode-description")
@@ -604,6 +611,12 @@ class MainWindow(QMainWindow):
         """Switch to the Settings tab. Home's Settings buttons use this."""
         self.tabs.setCurrentWidget(self._settings_page)
 
+    @Slot()
+    def _sign_in_from_bar(self) -> None:
+        """The top bar's sign-in button: show Settings and start the same browser sign-in as its own button."""
+        self._show_settings()
+        self._settings_tab.start_sign_in()
+
     def _show_tunnel(self) -> None:
         """Switch to the Tunnel tab. Home's Open the Tunnel panel button uses this."""
         self.tabs.setCurrentWidget(self._tunnel_page)
@@ -614,7 +627,7 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_tunnel_panel", None)
         if panel is not None:
             panel.check()
-        if self._saved_mode == TUNNEL_MODE:
+        if self._saved_mode == HOSTED_MODE:
             self._start_tunnel_check()
 
     @Slot(int)
@@ -650,19 +663,19 @@ class MainWindow(QMainWindow):
         self._apply_mode_view(mode)
 
     def _apply_mode_view(self, mode: str) -> None:
-        """Show the description of ``mode``, and the tunnel lines only in Tunnel mode.
+        """Show the description of ``mode``, and the tunnel lines only in Hosted mode.
 
-        Switching to Tunnel mode starts one read-only status check. Nothing here starts, stops or
+        Switching to Hosted mode starts one read-only status check. Nothing here starts, stops or
         restarts the tunnel.
         """
         self.mode_description.setText(MODE_DESCRIPTIONS.get(mode, ""))
-        is_tunnel = mode == TUNNEL_MODE
-        self.tunnel_status_label.setVisible(is_tunnel)
-        self.tunnel_detail.setVisible(is_tunnel)
-        if is_tunnel:
+        shows_tunnel = mode == HOSTED_MODE
+        self.tunnel_status_label.setVisible(shows_tunnel)
+        self.tunnel_detail.setVisible(shows_tunnel)
+        if shows_tunnel:
             self._start_tunnel_check()
         else:
-            # A check still running for Tunnel mode is dropped when it finishes.
+            # A check still running once the mode has left Hosted is dropped when it finishes.
             self._tunnel_generation += 1
 
     def _start_tunnel_check(self) -> None:
@@ -692,7 +705,7 @@ class MainWindow(QMainWindow):
         if not isinstance(item, Delivered) or item.owner is not self._owner:
             return
         generation, (status, failure) = item.value
-        if generation != self._tunnel_generation or self._saved_mode != TUNNEL_MODE:
+        if generation != self._tunnel_generation or self._saved_mode != HOSTED_MODE:
             return  # an older check, or the mode changed after this check started
         line, detail = bar_texts(status, failure)
         self.tunnel_status_label.setText(line)

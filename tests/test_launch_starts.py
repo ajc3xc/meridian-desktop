@@ -249,8 +249,8 @@ def test_an_unexpected_local_error_is_failed_with_the_class_name_only():
 # ------------------------------------------------------------------ the hosted tunnel at launch (amendment G)
 
 
-def test_the_tunnel_starts_once_in_hosted_or_tunnel_mode_when_the_runner_says_not_running():
-    assert TUNNEL_MODES == ("hosted", "tunnel")
+def test_the_tunnel_starts_once_in_hosted_mode_when_the_runner_says_not_running():
+    assert TUNNEL_MODES == ("hosted",)
     rec = Recorder(tunnel_mode=True, tunnel_controls_on=True, tunnel_state=NOT_RUNNING)
 
     notes = _run(rec, tunnel=True)
@@ -260,13 +260,13 @@ def test_the_tunnel_starts_once_in_hosted_or_tunnel_mode_when_the_runner_says_no
     assert rec.calls == ["tunnel_status", "tunnel_start"]
 
 
-def test_the_tunnel_is_not_started_outside_hosted_or_tunnel_mode_and_says_so():
+def test_the_tunnel_is_not_started_outside_hosted_mode_and_says_so():
     rec = Recorder(tunnel_mode=False)
 
     notes = _run(rec, tunnel=True)
 
     assert [n.outcome for n in notes] == [SKIPPED]
-    assert "not set to Hosted or Tunnel mode" in notes[0].message
+    assert "not set to Hosted mode" in notes[0].message
     assert not any(call.startswith("tunnel") for call in rec.calls)
 
 
