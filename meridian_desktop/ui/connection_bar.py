@@ -3,7 +3,8 @@
 It states, in plain words and one colour per state, who is signed in and until when, what the desktop is connected to
 (the hosted URL, with its state), and the local server when one is live. The check is connection_status.read_connection,
 run on the thread pool. This widget only shows its result. It checks when the main window starts it, every five minutes,
-and when the main window asks after a sign-in or a sign-out. It starts, stops and changes nothing.
+and when the main window asks after a sign-in or a sign-out. It starts and stops no process. Its sign-in button only asks
+the main window to start the Settings sign-in.
 
 The job holds the store, the secret store, the transport, the probe and the clock, never the bar. Its result comes
 back to _on_delivered on the GUI thread through the shared delivery object, and a result from an earlier check is dropped.
@@ -15,8 +16,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRunnable, QThreadPool, QTimer, Slot
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QRunnable, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from meridian_desktop import connection_status as status
 from meridian_desktop.hosted_client import Transport
@@ -101,7 +102,13 @@ class _CheckJob(QRunnable):
 
 
 class ConnectionBar(QFrame):
-    """The top-of-window status strip. Three lines: signed in, hosted connection, local server."""
+    """The top-of-window status strip. Three lines: signed in, hosted connection, local server.
+
+    When the check says a sign-in would change something, a Sign in with browser button shows beside the first line. Clicking
+    it emits signInRequested, and the main window starts the same sign-in as the Settings button.
+    """
+
+    signInRequested = Signal()
 
     def __init__(
         self,
@@ -140,9 +147,18 @@ class ConnectionBar(QFrame):
             font.setBold(True)
             label.setFont(font)
 
+        self._sign_in = QPushButton("Sign in with browser", self)
+        self._sign_in.setObjectName("connection-bar-sign-in")
+        self._sign_in.setVisible(False)
+        self._sign_in.clicked.connect(self._request_sign_in)
+
         lines = QVBoxLayout(self)
         lines.setContentsMargins(12, 8, 12, 8)
-        lines.addWidget(self._headline)
+        headline_row = QHBoxLayout()
+        headline_row.addWidget(self._headline)
+        headline_row.addWidget(self._sign_in)
+        headline_row.addStretch(1)
+        lines.addLayout(headline_row)
         detail = QHBoxLayout()
         detail.addWidget(self._hosted)
         detail.addSpacing(24)
@@ -182,12 +198,22 @@ class ConnectionBar(QFrame):
         self._hosted_url = done.hosted_url
         self._apply(status.connection_view(done.snapshot, hosted_url=done.hosted_url))
 
+    @Slot()
+    def _request_sign_in(self) -> None:
+        """The sign-in button was clicked. The main window opens Settings and starts its browser sign-in."""
+        self.signInRequested.emit()
+
     def _apply(self, view: status.ConnectionView) -> None:
-        """Show one view: its three lines, and the colours of its state. The state is also a property, for tests."""
+        """Show one view: its three lines, the sign-in button when the view offers it, and the colours of its state.
+
+        The state is also a property, for tests.
+        """
         background, edge, text = _STYLES[view.state]
         self._headline.setText(view.headline)
+        self._headline.setVisible(bool(view.headline))
         self._hosted.setText(view.hosted)
         self._local.setText(view.local)
+        self._sign_in.setVisible(view.sign_in_offered)
         self.setProperty("state", view.state)
         self.setStyleSheet(
             f"#connection-bar {{ background: {background}; border-left: 8px solid {edge}; border-radius: 4px; }}"

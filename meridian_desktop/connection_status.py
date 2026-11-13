@@ -30,9 +30,7 @@ STATE_CHECKING = "checking"
 WARN_DAYS = 14
 DAY_SECONDS = 86400
 UNCONFIRMED_ACCOUNT = "account not confirmed yet"
-NOT_SIGNED_IN_HEADLINE = "Not signed in: sign in with your browser in Settings."
 NOT_CONNECTED_HEADLINE = "Not connected: sign in again."
-EXPIRY_NOT_RECORDED = "Expiry not recorded, so sign in again to record it."
 CHECKING_HEADLINE = "Checking the connection..."
 RETRY_NOTE = "It is tried again in five minutes."
 
@@ -65,12 +63,13 @@ class ConnectionSnapshot:
 
 @dataclass(frozen=True)
 class ConnectionView:
-    """The three lines the bar shows, and the state that picks its colours."""
+    """The three lines the bar shows, the state that picks its colours, and whether the bar offers a sign-in button."""
 
     state: str
     headline: str
     hosted: str
     local: str
+    sign_in_offered: bool = False
 
 
 def _days_left(expires_at: float, now: float) -> float:
@@ -143,7 +142,7 @@ def _host_label(hosted_url: str) -> str:
 
 def _until_text(expires_at: float | None) -> str:
     if expires_at is None:
-        return EXPIRY_NOT_RECORDED
+        return ""
     date = datetime.fromtimestamp(expires_at, tz=timezone.utc).strftime("%Y-%m-%d")
     return f"Signed in until {date}."
 
@@ -159,20 +158,29 @@ def connection_view(snapshot: ConnectionSnapshot, *, hosted_url: str) -> Connect
     host = _host_label(hosted_url)
     local = _local_line(snapshot.local_netloc)
     if not snapshot.signed_in:
-        return ConnectionView(STATE_NOT_CONNECTED, NOT_SIGNED_IN_HEADLINE, f"Not connected: {host}.", local)
+        return ConnectionView(
+            STATE_NOT_CONNECTED, "", f"Not connected: {host}.", local,
+        )
     hosted = snapshot.hosted
     if hosted.state == STATE_NOT_CONNECTED:
-        return ConnectionView(STATE_NOT_CONNECTED, NOT_CONNECTED_HEADLINE, f"Not connected: {host}.", local)
+        return ConnectionView(
+            STATE_NOT_CONNECTED, NOT_CONNECTED_HEADLINE, f"Not connected: {host}.", local, sign_in_offered=True,
+        )
     warns = (
         hosted.state == STATE_CONNECTED
         and hosted.expires_at is not None
         and _days_left(hosted.expires_at, snapshot.checked_at) < WARN_DAYS
     )
     state = STATE_RECONNECTING if hosted.state == STATE_RECONNECTING else (STATE_WARNING if warns else STATE_CONNECTED)
-    headline = f"Signed in: {hosted.account or UNCONFIRMED_ACCOUNT}. {_until_text(hosted.expires_at)}"
+    headline = f"Signed in: {hosted.account or UNCONFIRMED_ACCOUNT}."
+    until = _until_text(hosted.expires_at)
+    if until:
+        headline += f" {until}"
     if state == STATE_WARNING:
         headline += f" Under {WARN_DAYS} days left: sign in again before then."
-    return ConnectionView(state, headline, f"{_HOSTED_WORDS[state]}: {host}.", local)
+    # The button is offered only when the session is close to expiry: the one case where signing in again helps.
+    offered = state == STATE_WARNING
+    return ConnectionView(state, headline, f"{_HOSTED_WORDS[state]}: {host}.", local, sign_in_offered=offered)
 
 
 def checking_view(*, hosted_url: str) -> ConnectionView:

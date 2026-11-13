@@ -79,7 +79,8 @@ def test_no_token_says_not_signed_in_and_makes_no_hosted_request(secrets):
     snapshot, view = _check(secrets, transport)
 
     assert view.state == cs.STATE_NOT_CONNECTED
-    assert view.headline == "Not signed in: sign in with your browser in Settings."
+    assert view.headline == "", "no sign-in prompt on the bar when nothing is saved; the hosted line says not connected"
+    assert view.sign_in_offered is False
     assert view.hosted == HOSTED_NOT_CONNECTED
     assert view.local == "Local: none."
     assert transport.requests == [], "with no token saved, nothing is sent to the hosted host"
@@ -152,7 +153,7 @@ def test_an_expired_session_is_not_connected_and_makes_no_request(secrets):
     assert transport.requests == []
 
 
-def test_a_session_with_no_recorded_expiry_says_so_and_is_connected(secrets):
+def test_a_session_with_no_recorded_expiry_is_connected_with_no_prompt(secrets):
     # A token saved before the browser sign-in has no session record, so its expiry is not known.
     set_token(ACCESS, store=secrets)
     transport = ScriptedTransport({"/me": [_me_ok()]})
@@ -160,7 +161,8 @@ def test_a_session_with_no_recorded_expiry_says_so_and_is_connected(secrets):
     _snapshot, view = _check(secrets, transport)
 
     assert view.state == cs.STATE_CONNECTED
-    assert view.headline == f"Signed in: {EMAIL}. Expiry not recorded, so sign in again to record it."
+    assert view.headline == f"Signed in: {EMAIL}.", "no expiry prompt: the bar shows the account only"
+    assert view.sign_in_offered is False
 
 
 def test_a_refused_renewal_under_fourteen_days_is_not_connected_and_skips_the_account_check(secrets):
@@ -234,6 +236,21 @@ def test_the_hosted_name_comes_from_the_saved_url_not_a_fixed_word():
     )
 
     assert view.hosted == "Not connected: Hosted (hosted.example.test:8443)."
+
+
+def test_the_sign_in_button_is_offered_only_when_a_sign_in_would_change_something(secrets):
+    # Not signed in: not offered, no prompt. Expiry not recorded: not offered. Far from expiry: not offered.
+    # Under fourteen days: offered.
+    _snapshot, not_signed_in = _check(secrets, ScriptedTransport({}))
+    assert not_signed_in.state == cs.STATE_NOT_CONNECTED and not_signed_in.sign_in_offered is False
+
+    _save(secrets)
+    _snapshot, far = _check(secrets, ScriptedTransport({"/me": [_me_ok()]}))
+    assert far.state == cs.STATE_CONNECTED and far.sign_in_offered is False
+
+    _save(secrets, expires_at=SOON)
+    _snapshot, warning = _check(secrets, ScriptedTransport({"/me": [_me_ok()]}))
+    assert warning.state == cs.STATE_WARNING and warning.sign_in_offered is True
 
 
 def test_the_snapshot_carries_no_token_text(secrets):

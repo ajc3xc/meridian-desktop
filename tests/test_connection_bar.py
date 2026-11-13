@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QPushButton
 
 from _fakes import MemoryKeyring, ScriptedTransport
 from meridian_desktop import hosted_session as hs
@@ -19,6 +19,7 @@ from meridian_desktop.hosted_client import Reply
 from meridian_desktop.secret_store import KeyringSecretStore
 from meridian_desktop.settings_store import Settings, SettingsStore
 from meridian_desktop.ui.connection_bar import ConnectionBar
+from meridian_desktop.token_store import set_token
 from meridian_desktop.ui.main_window import MainWindow
 
 HOSTED = "https://usemeridian.us"
@@ -28,7 +29,6 @@ NEW_ACCESS = "sk_meridian_fake-bar-access-0002"
 NOW = datetime(2027, 1, 1, 12, tzinfo=timezone.utc).timestamp()
 FAR = datetime(2027, 3, 2, 12, tzinfo=timezone.utc).timestamp()
 SOON = NOW + 10 * 86400
-NOT_SIGNED_IN = "Not signed in: sign in with your browser in Settings."
 NOT_CONNECTED = "Not connected: sign in again."
 CHECKING = "Checking the connection..."
 
@@ -79,6 +79,28 @@ def _text(bar, name: str) -> str:
     return bar.findChild(QLabel, name).text()
 
 
+def test_the_bar_shows_the_account_with_no_sign_in_prompt_when_the_expiry_is_not_recorded(qtbot, settings_path):
+    secrets = _secrets()
+    set_token(ACCESS, store=secrets)
+    bar = _bar(qtbot, settings_path, secrets, ScriptedTransport({"/me": [_me_ok()]}))
+
+    bar.start()
+
+    qtbot.waitUntil(lambda: _text(bar, "connection-bar-headline") == f"Signed in: {EMAIL}.", timeout=5000)
+    assert bar.findChild(QPushButton, "connection-bar-sign-in").isHidden()
+
+
+def test_the_sign_in_button_stays_hidden_while_the_session_has_a_recorded_expiry_far_away(qtbot, settings_path):
+    secrets = _secrets()
+    _save_session(secrets)
+    bar = _bar(qtbot, settings_path, secrets, ScriptedTransport({"/me": [_me_ok()]}))
+
+    bar.start()
+
+    qtbot.waitUntil(lambda: bar.property("state") == "connected", timeout=5000)
+    assert bar.findChild(QPushButton, "connection-bar-sign-in").isHidden()
+
+
 def test_before_the_first_check_the_bar_says_it_is_checking(qtbot, settings_path):
     bar = _bar(qtbot, settings_path, _secrets(), ScriptedTransport({}))
 
@@ -86,16 +108,17 @@ def test_before_the_first_check_the_bar_says_it_is_checking(qtbot, settings_path
     assert bar.property("state") == "checking"
 
 
-def test_with_no_token_the_bar_says_not_signed_in_and_sends_nothing_to_the_hosted_host(qtbot, settings_path):
+def test_with_no_token_the_bar_shows_no_sign_in_prompt_and_sends_nothing_to_the_hosted_host(qtbot, settings_path):
     transport = ScriptedTransport({})
     bar = _bar(qtbot, settings_path, _secrets(), transport)
 
     bar.start()
 
-    qtbot.waitUntil(lambda: _text(bar, "connection-bar-headline") == NOT_SIGNED_IN, timeout=5000)
+    qtbot.waitUntil(lambda: bar.property("state") == "not_connected", timeout=5000)
+    assert bar.findChild(QLabel, "connection-bar-headline").isHidden()
+    assert bar.findChild(QPushButton, "connection-bar-sign-in").isHidden()
     assert _text(bar, "connection-bar-hosted") == "Not connected: Hosted (usemeridian.us)."
     assert _text(bar, "connection-bar-local") == "Local: none."
-    assert bar.property("state") == "not_connected"
     assert transport.requests == []
 
 
@@ -168,7 +191,7 @@ def test_signing_in_and_checking_again_updates_the_bar(qtbot, settings_path):
     transport = ScriptedTransport({"/me": [_me_ok()]})
     bar = _bar(qtbot, settings_path, secrets, transport)
     bar.start()
-    qtbot.waitUntil(lambda: _text(bar, "connection-bar-headline") == NOT_SIGNED_IN, timeout=5000)
+    qtbot.waitUntil(lambda: bar.property("state") == "not_connected", timeout=5000)
 
     _save_session(secrets)
     bar.refresh()
@@ -199,7 +222,7 @@ def test_the_main_window_puts_the_connection_bar_first_and_checks_again_after_a_
 
     assert first is bar
     assert bar.objectName() == "connection-bar"
-    qtbot.waitUntil(lambda: _text(bar, "connection-bar-headline") == NOT_SIGNED_IN, timeout=5000)
+    qtbot.waitUntil(lambda: bar.property("state") == "not_connected", timeout=5000)
 
     _save_session(secrets)
     window._settings_tab.signedInChanged.emit()
