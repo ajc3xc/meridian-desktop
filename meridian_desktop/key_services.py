@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from meridian_desktop import __version__
 from meridian_desktop.api_keys import KEY_SERVICE, account_for, slug
-from meridian_desktop.keys_file import read_value
+from meridian_desktop.keys_file import KeysFileError, read_value
 from meridian_desktop.secret_store import SecretStore
 
 CHECK_TIMEOUT = 10.0
@@ -193,6 +193,9 @@ def check_saved_key(
     else:
         try:
             key = read_value(keys_file, name)
+        except KeysFileError as exc:
+            # A skipped entry has a plain message of its own. Any other refused or missing file gets the one file message.
+            return str(exc) if exc.entry_skipped else FILE_UNREADABLE_TEXT
         except Exception:  # noqa: BLE001 - a refused or missing file is reported by one fixed message, never its text
             return FILE_UNREADABLE_TEXT
         if key is None:

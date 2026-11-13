@@ -17,7 +17,7 @@ Remove asks first, because the saved value is deleted from the keychain.
 A keys file the owner chose lists more names (keys_file.py). Each one is a card marked From file, with no value box: its
 value stays in the file and is read only when its Check is pressed. The app never writes the file. Remove on such a name
 only takes it off the list for this session, and says the file is unchanged. A name that the keychain also holds shows
-once, as the keychain name.
+once, as the keychain name. Each other imported name is set automatically: critical when it is a known service or a built-in name, non-critical otherwise. The list groups them under those two headings, and a critical name shows the Critical badge. No mark is saved for an imported name.
 
 A name that matches a known service (key_services) also shows what its key is for and where it is made. When that
 service has a check, its card has a Check button. The check runs only when the owner presses it, on the thread pool,
@@ -54,6 +54,8 @@ from meridian_desktop.api_keys import (
     STATUS_UNREADABLE,
     ApiKeys,
     KeyNameError,
+    KEY_SERVICE,
+    account_for,
     slug,
 )
 from meridian_desktop.key_services import (
@@ -65,12 +67,21 @@ from meridian_desktop.key_services import (
     check_saved_key,
     service_for,
 )
+from meridian_desktop.key_vault import VAULT_FILE_NAME
 from meridian_desktop.keys_export import write_names_export
-from meridian_desktop.keys_file import FileNames, is_classified, log_listing, read_names, split_by_classification
+from meridian_desktop.keys_file import (
+    FileNames,
+    is_classified,
+    log_listing,
+    read_names,
+    skipped_summary,
+    split_by_classification,
+)
 from meridian_desktop.secret_store import SecretStore, SecretStoreError
 from meridian_desktop.settings_store import SettingsStore
 from meridian_desktop.ui.confirm import ask_yes_no
 from meridian_desktop.ui.delivery import Delivered, shared_delivery
+from meridian_desktop.ui.key_vault_box import KeyVaultBox
 from meridian_desktop.ui.runner_actions import submit
 from meridian_desktop.projects_backup import BACKUP_DIR_NAME, utc_now
 from meridian_desktop.ui.text import make_selectable
@@ -137,13 +148,15 @@ SERVICE_CHOICES = (*(service.name for service in SERVICES), OTHER_CHOICE)
 # A known service's card: what the key is for, where it is made, and the check.
 CREATE_TEXT = "Create the key at {page}."
 CHECK_TEXT = "Check"
+SHOW_DETAILS_TEXT = "Details"
+HIDE_DETAILS_TEXT = "Hide"
 CHECKING_TEXT = "Checking {service}..."
 # The keys file: its control, what it says about the file, and the names it lists.
 FILE_HEADING_TEXT = "Load keys from a file"
 FILE_INTRO_TEXT = (
-    'Pick a JSON file that holds each key as a name and its value, for example {"OpenAI": "..."}. The values stay in that '
-    "file. They are not copied to the keychain or to settings, the app never writes the file, and a value is read only "
-    "when you press Check."
+    "Pick a .json, .env or secrets file. A .json file holds each key as a name and its value, for example "
+    '{"OpenAI": "..."}. A .env file holds one NAME=value line for each key. The values stay in that file. They are not '
+    "copied to the keychain or to settings, the app never writes the file, and a value is read only when you press Check."
 )
 CHOOSE_FILE_TEXT = "Choose file"
 STOP_FILE_TEXT = "Stop using this file"
@@ -153,14 +166,18 @@ FILE_LISTED_ONE_TEXT = "The file lists 1 key name. Its value stays in the file."
 FILE_LISTED_MANY_TEXT = "The file lists {count} key names. Their values stay in the file."
 FILE_STOPPED_TEXT = "Stopped using the keys file. The file itself is unchanged."
 FILE_CHOOSER_TITLE = "Choose a keys file"
-FILE_CHOOSER_FILTER = "JSON files (*.json)"
+# The patterns match the names keys_file.file_format accepts: ".env.*" is a prefix, so "production.env.local" is not offered.
+FILE_CHOOSER_FILTER = (
+    "Keys files (*.json *.env .env.* *.secrets *.secret secrets.*);;"
+    "JSON files (*.json);;"
+    "Env and secrets files (*.env .env.* *.secrets *.secret secrets.*)"
+)
 FROM_FILE_NOTE = "From file"
-FROM_FILE_DETAIL = "The value stays in the keys file. It is read only when you press Check."
 REMOVED_FROM_FILE_TEXT = "Removed {name} from the list for this session. The keys file is unchanged."
-# The two groups of From file names. A name is classified when it is a known service (key_services)
-# or a built-in name (api_keys).
-CLASSIFIED_HEADING_TEXT = "Classified: the name is a known service or a built-in name"
-UNCLASSIFIED_HEADING_TEXT = "Unclassified: the name is neither a known service nor a built-in name"
+# The two groups of From file names, set automatically. A name is critical when it is a known service (key_services)
+# or a built-in name (api_keys), and non-critical otherwise. No mark is saved for these names, so the rule decides.
+CLASSIFIED_HEADING_TEXT = "Critical: a known service or built-in name. Set automatically."
+UNCLASSIFIED_HEADING_TEXT = "Non-critical: any other name. Set automatically."
 # The names-only export. The file it writes holds names and classifications, and no value.
 EXPORT_TEXT = "Export key names"
 EXPORTED_TEXT = "Saved the key names and their classification to {path}. No value is in the file."
@@ -170,6 +187,34 @@ EXPORT_FAILED_TEXT = "Not saved: the key names could not be written. Try again."
 Confirm = Callable[[QWidget, str, str], bool]
 # A file dialog: (parent) -> the path the owner picked, or "" when the owner cancelled.
 FileChooser = Callable[[QWidget], str]
+
+
+def _details_toggle(frame: QFrame, key: str) -> QPushButton:
+    """The Details button of a card. It is checkable, so its state says whether the details are open."""
+    toggle = QPushButton(SHOW_DETAILS_TEXT, frame)
+    toggle.setObjectName(f"keys-entry-{key}-details-toggle")
+    toggle.setCheckable(True)
+    return toggle
+
+
+def _details_panel(frame: QFrame, key: str) -> tuple[QFrame, QVBoxLayout]:
+    """The hidden part of a card: the service lines, the value row, the marks and the check. Returned with its layout."""
+    panel = QFrame(frame)
+    panel.setObjectName(f"keys-entry-{key}-details")
+    panel.setVisible(False)
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(0, 0, 0, 0)
+    return panel, layout
+
+
+def _connect_details(toggle: QPushButton, panel: QFrame) -> None:
+    """Show or hide the details with the Details button, and name the button for what it does next."""
+
+    def set_shown(shown: bool) -> None:
+        panel.setVisible(shown)
+        toggle.setText(HIDE_DETAILS_TEXT if shown else SHOW_DETAILS_TEXT)
+
+    toggle.toggled.connect(set_shown)
 
 
 def _label(parent: QWidget, name: str, text: str = "") -> QLabel:
@@ -366,6 +411,11 @@ class KeysSection(QWidget):
         self._search_empty = _label(self, "keys-search-empty", SEARCH_EMPTY_TEXT)
         self._search_empty.setVisible(False)
         column.addWidget(self._search_empty)
+        # The Critical vault block sits above the list, so the critical keys and their vault are seen first.
+        # The critical names as the last loaded list showed them. The vault block reads this, never the keychain.
+        self._critical_cache: list[str] = []
+        self._vault_box = KeyVaultBox(self._vault_path(), self._critical_names, self._read_keychain, self)
+        column.addWidget(self._vault_box)
 
         # Every card sits in this one list, the RunPod card's included, so the critical names come first whichever they are.
         self._entry_layout = QVBoxLayout()
@@ -517,33 +567,39 @@ class KeysSection(QWidget):
         head.addWidget(mark.badge)
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
+        toggle = _details_toggle(frame, key)
+        head.addWidget(toggle)
         column.addLayout(head)
+        # One line per name. The details below stay hidden until the owner opens them with Details.
+        panel, details = _details_panel(frame, key)
+        column.addWidget(panel)
 
         if service is not None:
             # A known service says what its key is for and where it is made. Both lines are plain text.
-            column.addWidget(_label(frame, f"keys-entry-{key}-description", service.description))
-            column.addWidget(_label(frame, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
+            details.addWidget(_label(panel, f"keys-entry-{key}-description", service.description))
+            details.addWidget(_label(panel, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
 
         row = QHBoxLayout()
-        value = QLineEdit(frame)
+        value = QLineEdit(panel)
         value.setObjectName(f"keys-entry-{key}-value")
         value.setEchoMode(QLineEdit.EchoMode.Password)
         value.setPlaceholderText(NEW_VALUE_PLACEHOLDER)
-        save = QPushButton(SAVE_VALUE_TEXT, frame)
+        save = QPushButton(SAVE_VALUE_TEXT, panel)
         save.setObjectName(f"keys-entry-{key}-save")
-        remove = QPushButton(REMOVE_TEXT, frame)
+        remove = QPushButton(REMOVE_TEXT, panel)
         remove.setObjectName(f"keys-entry-{key}-remove")
         row.addWidget(value, 1)
         row.addWidget(save)
         row.addWidget(remove)
-        column.addLayout(row)
-        column.addLayout(_action_row(mark))
+        details.addLayout(row)
+        details.addLayout(_action_row(mark))
 
-        check, check_result = self._check_row(frame, column, key, name, service)
+        check, check_result = self._check_row(panel, details, key, name, service)
 
         save.clicked.connect(lambda *_, n=name: self._on_save_value(n))
         value.returnPressed.connect(lambda *_, n=name: self._on_save_value(n))
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
+        _connect_details(toggle, panel)
         return _Card(frame, status, value, mark, check, check_result)
 
     def _make_file_card(self, name: str) -> _Card:
@@ -557,28 +613,54 @@ class KeysSection(QWidget):
 
         head = QHBoxLayout()
         head.addWidget(_bold(_label(frame, f"keys-entry-{key}-name", name)))
+        # Set automatically: a known service or built-in name is critical, every other imported name is not.
+        badge = _bold(_label(frame, f"keys-entry-{key}-badge", CRITICAL_BADGE_TEXT))
+        badge.setVisible(is_classified(name))
+        head.addWidget(badge)
         status = _label(frame, f"keys-entry-{key}-status")
         head.addWidget(status, 1)
+        toggle = _details_toggle(frame, key)
+        head.addWidget(toggle)
         column.addLayout(head)
-        column.addWidget(_label(frame, f"keys-entry-{key}-file-detail", FROM_FILE_DETAIL))
+        panel, details = _details_panel(frame, key)
+        column.addWidget(panel)
 
         if service is not None:
-            column.addWidget(_label(frame, f"keys-entry-{key}-description", service.description))
-            column.addWidget(_label(frame, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
+            details.addWidget(_label(panel, f"keys-entry-{key}-description", service.description))
+            details.addWidget(_label(panel, f"keys-entry-{key}-create", CREATE_TEXT.format(page=service.create_page)))
 
         row = QHBoxLayout()
-        remove = QPushButton(REMOVE_TEXT, frame)
+        remove = QPushButton(REMOVE_TEXT, panel)
         remove.setObjectName(f"keys-entry-{key}-remove")
         row.addStretch(1)
         row.addWidget(remove)
-        column.addLayout(row)
+        details.addLayout(row)
 
-        check, check_result = self._check_row(frame, column, key, name, service)
+        check, check_result = self._check_row(panel, details, key, name, service)
 
         remove.clicked.connect(lambda *_, n=name: self._on_remove(n))
+        _connect_details(toggle, panel)
         return _Card(frame, status, None, check=check, check_result=check_result, from_file=True)
 
     # ----------------------------------------------------------- state on screen
+
+    def _vault_path(self) -> Path:
+        """The vault file, beside settings.json: the same folder as the settings the names are kept in."""
+        return self._settings.path.parent / VAULT_FILE_NAME
+
+    def _critical_names(self) -> list[str]:
+        """The names marked critical, as the last loaded list showed them. Never reads the keychain."""
+        return list(self._critical_cache)
+
+    def _set_critical_cached(self, name: str, critical: bool) -> None:
+        """Keep the critical names in step with a mark the owner just changed, then show the vault block again."""
+        remaining = [known for known in self._critical_cache if known != name]
+        self._critical_cache = remaining + ([name] if critical else [])
+        self._vault_box.refresh()
+
+    def _read_keychain(self, name: str) -> str | None:
+        """The keychain value of one name, for copying it into the vault. Only the vault box calls this."""
+        return self._store.get_secret(KEY_SERVICE, account_for(name))
 
     def refresh(self) -> None:
         """Re-read which names are listed and whether each one is set. Values are never read into a control.
@@ -591,6 +673,8 @@ class KeysSection(QWidget):
         self._apply_entries(self._keys.entries())
 
     def _apply_entries(self, entries: list[Any]) -> None:
+        self._critical_cache = [entry.name for entry in entries if entry.critical]
+        self._vault_box.refresh()
         listed = [entry for entry in entries if not entry.built_in]
         keychain = {entry.name for entry in listed}
         for name in [name for name, card in self._cards.items() if not card.from_file and name not in keychain]:
@@ -663,7 +747,8 @@ class KeysSection(QWidget):
             self._drop_file_cards(set())
             self._lay_out_file_groups([])
             return
-        self._set_file_status(_listed_text(len(listing.names)))
+        note = skipped_summary(listing)
+        self._set_file_status(_listed_text(len(listing.names)) + ("" if note is None else "\n" + note))
         keychain_slugs = {slug(name) for name in keychain_names}
         shown = [
             name
@@ -805,6 +890,7 @@ class KeysSection(QWidget):
         self._show(REPLACED_TEXT.format(name=listed))
 
     def _on_critical_toggled(self, name: str, critical: bool) -> None:
+        self._set_critical_cached(name, critical)
         try:
             listed = self._keys.set_critical(name, critical)
         except KeyNameError as exc:

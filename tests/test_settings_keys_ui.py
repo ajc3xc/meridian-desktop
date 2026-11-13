@@ -681,6 +681,11 @@ def test_no_label_or_button_on_the_keys_tab_is_clipped_at_1280_px(qtbot, setting
     _seed(settings_path, backend, names=("OpenAI", "Anthropic"), value_for="OpenAI")
     tab = _keys_tab(qtbot, settings_path, KeyringSecretStore(backend=backend))
     _show_keys_at_1280(qtbot, tab)
+    # Each card's controls sit behind its Details button, so open the two named cards before the walk. Only visible
+    # widgets are checked, and an opened card's controls are visible.
+    for key in ("openai", "anthropic"):
+        tab.findChild(QPushButton, f"keys-entry-{key}-details-toggle").click()
+    qtbot.waitUntil(lambda: tab.findChild(QPushButton, "keys-entry-openai-save").isVisible(), timeout=5000)
 
     buttons = _assert_labels_and_buttons_fully_inside(tab, min_labels=8, min_buttons=10)
     # The walk reaches the RunPod card and the two named cards, not only the add form.

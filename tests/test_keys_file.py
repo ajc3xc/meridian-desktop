@@ -1,4 +1,4 @@
-"""Tests for the keys file: a JSON file of key names and values that the owner chooses, and the Keys block listing it.
+"""Tests for the keys file: a .json, .env or secrets file of key names and values that the owner chooses, and the Keys block listing it.
 
 The file belongs to the owner, so the app never writes it. Every test that could touch it checks its bytes and its
 modification time before and after. FAKE_VALUE is an obviously fake key, so the leak checks can search every output for
@@ -30,12 +30,17 @@ from meridian_desktop.key_services import (
     service_for,
 )
 from meridian_desktop.keys_file import (
+    ENTRY_SKIPPED_TEXT,
     MAX_FILE_BYTES,
+    NOT_SUPPORTED_TEXT,
+    NOT_TEXT_TEXT,
+    TOO_LARGE_TEXT,
     FileNames,
     KeysFileError,
     is_classified,
     read_names,
     read_value,
+    skipped_summary,
     split_by_classification,
 )
 from meridian_desktop.secret_store import MAX_SECRET_LENGTH, KeyringSecretStore
@@ -156,7 +161,152 @@ def test_a_file_that_is_not_a_json_object_is_refused_with_a_count_and_no_value(t
     assert "sk-fake" not in listing.problem
 
 
-def test_entries_that_are_not_key_names_or_text_are_refused_with_a_count_and_no_name_or_value(tmp_path):
+def _write_named(tmp_path: Path, name: str, content) -> str:
+    """Write a keys file with this exact name under tmp_path and return its path. Text is written as UTF-8; bytes as they are."""
+    folder = tmp_path / "keys"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+    return str(path)
+
+
+@pytest.mark.parametrize("name", [".env", ".env.local", "production.env", "keys.secrets", "keys.secret", "secrets.local", "secrets"])
+def test_a_dotenv_or_secrets_name_is_read_as_name_equals_value_lines(tmp_path, name):
+    path = _write_named(tmp_path, name, f"OpenAI={FAKE_VALUE}\nAnthropic={FAKE_VALUE_TWO}\n")
+
+    listing = read_names(path)
+
+    assert listing == FileNames(names=("OpenAI", "Anthropic"), problem=None)
+    assert FAKE_VALUE not in repr(listing) and FAKE_VALUE_TWO not in repr(listing)
+    assert read_value(path, "Anthropic") == FAKE_VALUE_TWO
+
+
+def test_dotenv_export_quotes_comments_and_equals_signs_are_read(tmp_path):
+    path = _write_named(
+        tmp_path,
+        ".env",
+        "# keys for the desktop\n"
+        "\n"
+        f'export OpenAI="{FAKE_VALUE}"\n'
+        f"Anthropic='{FAKE_VALUE_TWO}'   # the second one\n"
+        "GitHub=sk-with=equals-inside\n",
+    )
+
+    assert read_names(path) == FileNames(names=("OpenAI", "Anthropic", "GitHub"), problem=None)
+    assert read_value(path, "OpenAI") == FAKE_VALUE
+    assert read_value(path, "Anthropic") == FAKE_VALUE_TWO
+    assert read_value(path, "GitHub") == "sk-with=equals-inside"
+
+
+@pytest.mark.parametrize("name", ["keys.txt", "keys.toml", "keys.yaml", "keys", "keys.env.bak"])
+def test_a_file_of_another_kind_is_refused_by_its_name_before_it_is_read(tmp_path, name):
+    path = _write_named(tmp_path, name, f"OpenAI={FAKE_VALUE}\n")
+
+    listing = read_names(path)
+
+    assert listing.names == ()
+    assert listing.problem == NOT_SUPPORTED_TEXT
+    assert FAKE_VALUE not in listing.problem
+
+
+def test_a_dotenv_line_that_is_not_name_equals_value_is_refused_by_line_number_and_no_value(tmp_path):
+    path = _write_named(tmp_path, ".env", f"OpenAI={FAKE_VALUE}\nthis line has no equals sign {FAKE_VALUE_TWO}\nAnthropic=\n")
+
+    listing = read_names(path)
+
+    assert listing.names == ("OpenAI",)
+    assert listing.problem is None
+    note = skipped_summary(listing)
+    assert "Skipped 2 of 3 entries" in note
+    assert "line 2: line is not NAME=value" in note
+    assert "line 3: value is empty" in note
+    for hidden in (FAKE_VALUE, FAKE_VALUE_TWO, "OpenAI", "Anthropic", "this line"):
+        assert hidden not in note
+
+
+def test_dotenv_quote_problems_are_refused_by_line_number_and_no_value(tmp_path):
+    path = _write_named(tmp_path, ".env", f'OpenAI="{FAKE_VALUE}\nAnthropic=\'{FAKE_VALUE_TWO}\' extra\n')
+
+    listing = read_names(path)
+
+    assert "line 1: value has no closing quote" in listing.problem
+    assert "line 2: value has text after its closing quote" in listing.problem
+    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+
+
+def test_a_repeated_name_in_a_dotenv_file_names_the_line_it_repeats(tmp_path):
+    path = _write_named(tmp_path, ".env", f"OpenAI={FAKE_VALUE}\nopenai={FAKE_VALUE_TWO}\n")
+
+    listing = read_names(path)
+
+    assert listing.names == ("OpenAI",)
+    assert "line 2: name repeats the one on line 1" in skipped_summary(listing)
+    assert FAKE_VALUE not in skipped_summary(listing) and FAKE_VALUE_TWO not in skipped_summary(listing)
+
+
+def test_web_ext_names_are_read_as_listed_names_and_values(tmp_path):
+    path = _write_named(tmp_path, ".env", f"WEB_EXT_API_KEY={FAKE_VALUE}\nWEB_EXT_API_SECRET={FAKE_VALUE_TWO}\n")
+
+    assert read_names(path).names == ("WEB_EXT_API_KEY", "WEB_EXT_API_SECRET")
+    assert read_value(path, "WEB_EXT_API_SECRET") == FAKE_VALUE_TWO
+
+
+def test_a_tab_after_export_is_read_as_export_and_a_hash_right_after_equals_is_part_of_the_value(tmp_path):
+    path = _write_named(tmp_path, ".env", f"export\tOpenAI={FAKE_VALUE}\nAnthropic=#{FAKE_VALUE_TWO}\n")
+
+    assert read_names(path) == FileNames(names=("OpenAI", "Anthropic"), problem=None)
+    assert read_value(path, "Anthropic") == "#" + FAKE_VALUE_TWO
+
+
+def test_a_hash_after_whitespace_starts_a_comment_so_the_value_is_empty_and_refused(tmp_path):
+    path = _write_named(tmp_path, ".env", "GitHub=\t# only a comment\n")
+
+    assert "line 1: value is empty" in read_names(path).problem
+
+
+def test_a_form_feed_inside_a_value_does_not_shift_the_line_numbers(tmp_path):
+    path = _write_named(tmp_path, ".env", f"OpenAI={FAKE_VALUE}\x0cX\nthis has no equals sign\nAnthropic={FAKE_VALUE_TWO}\n")
+
+    listing = read_names(path)
+
+    assert listing.names == ("OpenAI", "Anthropic")
+    note = skipped_summary(listing)
+    assert "Skipped 1 of 3 entries" in note
+    assert "line 2: line is not NAME=value" in note
+
+
+def test_a_dotenv_file_with_five_bad_lines_among_fifty_seven_loads_the_other_fifty_two(tmp_path):
+    good = [f"KEY{number:02d}=value-{number:02d}" for number in range(1, 53)]
+    bad = ["  -----BEGIN PRIVATE KEY-----", "MIIEvQIBADANBgkq", "continuation text", "+/abc==", "-----END PRIVATE KEY-----"]
+    lines = good + bad  # 52 usable lines, then 5 bad ones
+    path = _write_named(tmp_path, ".env", "\n".join(lines) + "\n")
+
+    listing = read_names(path)
+
+    assert listing.problem is None, "the file loads: a bad line is skipped, not the whole file"
+    assert len(listing.names) == 52 and listing.total == 57
+    assert len(listing.refused) == 5
+    note = skipped_summary(listing)
+    assert "Skipped 5 of 57 entries" in note
+    assert "line 53: line is not NAME=value" in note
+    assert "value-01" not in note, "no value shows in the skip note"
+
+
+def test_a_dotenv_file_over_the_size_limit_is_refused_before_it_is_read(tmp_path):
+    path = _write_named(tmp_path, ".env", "OpenAI=" + "x" * MAX_FILE_BYTES)
+
+    assert read_names(path).problem == TOO_LARGE_TEXT
+
+
+def test_a_dotenv_file_that_is_not_utf8_is_refused_with_no_value(tmp_path):
+    path = _write_named(tmp_path, ".env", b"OpenAI=\xff\xfe")
+
+    listing = read_names(path)
+
+    assert listing.problem == NOT_TEXT_TEXT
+
+
+def test_entries_that_are_not_usable_are_skipped_and_the_rest_still_load(tmp_path):
     path = _write(
         tmp_path,
         {"OpenAI": FAKE_VALUE, "Anthropic": 42, "GitHub": [FAKE_VALUE_TWO], "Bad/Name": FAKE_VALUE_TWO, "Blank": "   "},
@@ -164,35 +314,41 @@ def test_entries_that_are_not_key_names_or_text_are_refused_with_a_count_and_no_
 
     listing = read_names(path)
 
-    assert listing.names == ()
-    assert "4 of 5 entries were refused" in listing.problem
+    assert listing.names == ("OpenAI",)
+    assert listing.problem is None
+    assert len(listing.refused) == 4 and listing.total == 5
+    note = skipped_summary(listing)
+    assert "Skipped 4 of 5 entries" in note
     for hidden in (FAKE_VALUE, FAKE_VALUE_TWO, "Anthropic", "GitHub", "Bad/Name", "Blank"):
-        assert hidden not in listing.problem, "a refusal names no entry and shows no value"
+        assert hidden not in note, "a skipped entry names no entry and shows no value"
 
 
-def test_a_name_repeated_by_case_or_naming_runpod_is_refused(tmp_path):
+def test_a_name_repeated_by_case_or_naming_runpod_is_skipped_and_the_first_loads(tmp_path):
     text = '{"OpenAI": "%s", "openai": "%s", "RunPod": "%s"}' % (FAKE_VALUE, FAKE_VALUE_TWO, FAKE_VALUE)
 
     listing = read_names(_write(tmp_path, text))
 
-    assert listing.names == ()
-    assert "2 of 3 entries were refused" in listing.problem
+    assert listing.names == ("OpenAI",)
+    assert listing.problem is None
+    assert "Skipped 2 of 3 entries" in skipped_summary(listing)
 
 
-def test_a_refused_runpod_entry_says_it_has_its_own_entry_and_shows_no_value(tmp_path):
+def test_a_skipped_runpod_entry_says_it_has_its_own_entry_and_shows_no_value(tmp_path):
     listing = read_names(_write(tmp_path, {"RunPod": FAKE_VALUE, "OpenAI": FAKE_VALUE_TWO}))
 
-    assert listing.names == ()
-    assert "1 of 2 entries were refused" in listing.problem
-    assert "which has its own entry" in listing.problem, "the refusal says RunPod keeps its own entry"
-    assert FAKE_VALUE not in listing.problem and FAKE_VALUE_TWO not in listing.problem
+    assert listing.names == ("OpenAI",)
+    note = skipped_summary(listing)
+    assert "Skipped 1 of 2 entries" in note
+    assert "which has its own entry" in note, "the note says RunPod keeps its own entry"
+    assert FAKE_VALUE not in note and FAKE_VALUE_TWO not in note
 
 
-def test_a_value_longer_than_the_limit_is_refused(tmp_path):
+def test_a_value_longer_than_the_limit_is_skipped_and_when_it_is_the_only_entry_nothing_loads(tmp_path):
     listing = read_names(_write(tmp_path, {"OpenAI": "x" * (MAX_SECRET_LENGTH + 1)}))
 
     assert listing.names == ()
-    assert "1 of 1 entries were refused" in listing.problem
+    assert "All 1 entries were skipped" in listing.problem
+    assert "value is longer than" in listing.problem
 
 
 def test_a_file_larger_than_the_limit_is_refused_before_it_is_read(tmp_path):
@@ -213,7 +369,10 @@ def test_a_missing_file_says_so_plainly(tmp_path):
 
 
 def test_a_folder_in_place_of_the_file_is_refused_as_unreadable(tmp_path):
-    listing = read_names(str(tmp_path))
+    # A folder with a .json name gets past the name check, so the read itself is what refuses it.
+    folder = tmp_path / "as-a-folder.json"
+    folder.mkdir()
+    listing = read_names(str(folder))
 
     assert listing.names == ()
     assert "could not be read" in listing.problem
@@ -230,12 +389,15 @@ def test_a_check_reads_one_value_from_the_file_and_nothing_else(tmp_path):
     assert read_value(path, "GitHub") is None, "a name the file does not hold has no value"
 
 
-def test_a_check_refuses_a_file_that_the_listing_refuses(tmp_path):
+def test_a_check_refuses_a_name_whose_entry_was_skipped_and_still_reads_the_rest(tmp_path):
     path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 7})
 
+    assert read_value(path, "OpenAI") == FAKE_VALUE, "a usable entry still loads"
     with pytest.raises(KeysFileError) as caught:
-        read_value(path, "OpenAI")
+        read_value(path, "Anthropic")
 
+    assert caught.value.entry_skipped is True
+    assert str(caught.value) == ENTRY_SKIPPED_TEXT
     assert FAKE_VALUE not in str(caught.value)
 
 
@@ -310,13 +472,23 @@ def test_a_check_for_a_name_the_file_does_not_hold_says_so_and_sends_nothing(tmp
 
 def test_a_check_with_a_missing_or_refused_file_says_so_and_sends_nothing(tmp_path):
     missing = str(tmp_path / "gone.json")
-    refused = _write(tmp_path, {"OpenAI": 7})
+    whole_file_refused = _write(tmp_path, '"sk-fake"')  # a JSON string is not an object, so the whole file is refused
     transport = FakeTransport(200)
 
-    for path in (missing, refused):
+    for path in (missing, whole_file_refused):
         result = check_saved_key(OPENAI, "OpenAI", _empty_keychain(), transport=transport, keys_file=path)
         assert result == FILE_UNREADABLE_TEXT == "The keys file could not be read. Choose the file again."
 
+    assert transport.calls == []
+
+
+def test_a_check_of_a_skipped_entry_says_it_was_skipped_and_sends_nothing(tmp_path):
+    skipped = _write(tmp_path, {"OpenAI": 7})  # the file loads, but this entry is skipped
+    transport = FakeTransport(200)
+
+    result = check_saved_key(OPENAI, "OpenAI", _empty_keychain(), transport=transport, keys_file=skipped)
+
+    assert result == ENTRY_SKIPPED_TEXT
     assert transport.calls == []
 
 
@@ -376,7 +548,7 @@ def test_the_choose_dialog_opens_on_the_home_folder_and_a_cancel_changes_nothing
     assert section.findChild(QLabel, "keys-file-path").text() == NO_FILE_TEXT
 
 
-def test_the_choose_dialog_offers_json_files_only(qtbot, settings_path, monkeypatch):
+def test_the_choose_dialog_offers_the_keys_file_kinds_the_app_reads(qtbot, settings_path, monkeypatch):
     asked: dict[str, object] = {}
 
     class FakeDialog:
@@ -390,22 +562,24 @@ def test_the_choose_dialog_offers_json_files_only(qtbot, settings_path, monkeypa
 
     _choose(section)
 
-    assert asked["names"] == "JSON files (*.json)", "the filter lists JSON files only"
-    assert "All files" not in asked["names"]
+    assert asked["names"] == keys_module.FILE_CHOOSER_FILTER
+    for pattern in ("*.json", "*.env", ".env.*", "*.secrets", "secrets.*"):
+        assert pattern in asked["names"], pattern
+    assert "All files" not in asked["names"], "a name the app does not read is refused by name, so it is not offered"
 
 
-def test_a_refused_file_is_not_chosen_and_its_count_is_shown_without_a_name_or_value(qtbot, settings_path, tmp_path):
+def test_a_file_with_a_skipped_entry_is_chosen_and_the_skip_is_shown_without_a_name_or_value(qtbot, settings_path, tmp_path):
     path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 9})
     section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
 
     _choose(section)
 
     status = section.findChild(QLabel, "keys-file-status").text()
-    assert "1 of 2 entries were refused" in status
-    for hidden in (FAKE_VALUE, "OpenAI", "Anthropic"):
+    assert "Skipped 1 of 2 entries" in status
+    for hidden in (FAKE_VALUE, "Anthropic"):
         assert hidden not in status
-    assert SettingsStore(settings_path).load().settings.keys_file_path == ""
-    assert section.findChild(QWidget, "keys-entry-openai") is None
+    assert SettingsStore(settings_path).load().settings.keys_file_path == path, "the file with its usable entry is chosen"
+    assert section.findChild(QWidget, "keys-entry-openai") is not None, "the usable entry is listed"
 
 
 def test_a_check_on_a_from_file_name_reads_the_value_from_the_file(qtbot, settings_path, tmp_path):
@@ -508,12 +682,12 @@ def test_a_file_that_goes_bad_after_it_was_chosen_lists_nothing_and_says_why(qtb
     _choose(section)
     assert section.findChild(QWidget, "keys-entry-openai") is not None
 
-    _write(tmp_path, {"OpenAI": FAKE_VALUE, "Anthropic": 3})
+    _write(tmp_path, '"now a string, not an object"')  # the whole file is refused now
     section.refresh()
     qtbot.waitUntil(lambda: section.findChild(QWidget, "keys-entry-openai") is None, timeout=5000)
 
     status = section.findChild(QLabel, "keys-file-status").text()
-    assert "1 of 2 entries were refused" in status
+    assert "must hold one JSON object" in status
     assert FAKE_VALUE not in status
 
 
@@ -638,3 +812,19 @@ def test_a_group_heading_hides_when_the_search_hides_its_group(qtbot, settings_p
 
     assert not section.findChild(QLabel, "keys-file-classified-heading").isHidden()
     assert section.findChild(QLabel, "keys-file-unclassified-heading").isHidden()
+
+
+def test_an_imported_name_is_set_critical_or_non_critical_automatically_and_its_badge_matches(
+    qtbot, settings_path, tmp_path
+):
+    path = _write(tmp_path, {"OpenAI": FAKE_VALUE, "Acme": FAKE_VALUE_TWO})
+    section = _section(qtbot, settings_path, MemoryKeyring(), choose=_chooser(path))
+
+    _choose(section)
+
+    assert not section.findChild(QLabel, "keys-entry-openai-badge").isHidden(), "a known service is critical"
+    assert section.findChild(QLabel, "keys-entry-acme-badge").isHidden(), "any other name is non-critical"
+    assert section.findChild(QLabel, "keys-file-classified-heading").text().startswith("Critical:")
+    assert section.findChild(QLabel, "keys-file-unclassified-heading").text().startswith("Non-critical:")
+    assert FAKE_VALUE not in _all_text(section)
+    assert FAKE_VALUE_TWO not in _all_text(section)
